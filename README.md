@@ -1,0 +1,192 @@
+# ClipForge
+
+**AI short-form clipping + per-platform SEO + approval-first publishing for
+YouTube Shorts, Facebook Reels, Instagram Reels, and TikTok.**
+
+ClipForge turns one long video you own into scored 9:16 clips with burned-in
+captions, writes a different title / description / hashtag set for each
+platform, and publishes **only after a human approves** — through the
+platforms' official APIs, and nothing else.
+
+> **Status: v0.1.0 — early alpha.** The clipping pipeline, review UI, and
+> publishing adapters are under active development. Nothing in this repo
+> posts to any platform automatically, and `DRY_RUN=true` is the default.
+
+---
+
+## What it is
+
+- **Clipping engine** — Whisper transcription with word-level timestamps →
+  LLM highlight detection (word indices, not timestamps) → virality score
+  0–100 with hook rating + reason → dedupe of >50% overlapping candidates →
+  face-tracked 9:16 reframe + burned captions → 1080×1920 H.264 MP4.
+- **Per-platform SEO** — one master clip, four native variants: different
+  title, description, hashtag count, length, and cover per platform.
+- **Approval-first publishing** — every post sits in an approval queue.
+  Nothing publishes without an explicit human approve. TikTok stays in
+  inbox-draft mode until its Content Posting API audit is passed.
+- **Monetization tracker** — subs / views / watch-time vs. each platform's
+  thresholds, including the YouTube Partner Program doubling for new
+  applicants from 1 February 2027. It shows thresholds, never promised
+  earnings.
+
+## What it is not
+
+- Not a fully-automatic poster. Fully-automatic, no-review posting is
+  against TikTok's audit rules and is a fast way to get accounts flagged
+  everywhere else.
+- Not a repost bot. It only processes content you own or have rights to.
+  It never downloads other creators' videos, never re-uploads third-party
+  content, and never strips or crops out another app's watermark.
+- Not a Selenium / cookie uploader. See [the DO-NOT list](#do-not-list).
+
+## Architecture
+
+```
+Upload / own YouTube link
+        │
+        ▼
+┌─────────────┐   ┌──────────┐   ┌──────────────┐
+│   FastAPI   │──▶│  SQLite/ │──▶│   Workers    │
+│  apps/api   │   │ Postgres │   │  (pipeline)  │
+└─────────────┘   └──────────┘   └──────┬───────┘
+        │                               │
+        ▼                               ▼
+┌─────────────┐                  ingest → transcribe
+│  Next.js    │                  (Whisper) → highlights
+│  apps/web   │                  (LLM, word indices)
+│ review +    │                  → reframe 9:16 → render
+│ approvals   │                  (FFmpeg + captions)
+└─────────────┘                          │
+        │                                ▼
+        ▼                         per-platform SEO
+┌──────────────────────────────────────────────┐
+│ Approval queue → Scheduler → Official APIs   │
+│  YouTube Data API v3 · Meta Graph API        │
+│  TikTok Content Posting API (audit-gated)    │
+│  + manual-post pack fallback (file + copy)   │
+└──────────────────────────────────────────────┘
+```
+
+Full detail: [ARCHITECTURE.md](ARCHITECTURE.md).
+
+## Quickstart
+
+```bash
+git clone https://github.com/hamxa8769/clipforge.git
+cd clipforge
+
+# Python 3.12, FFmpeg 8.1+ required. Node 24 for apps/web.
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+
+cp .env.example .env   # fill in only what you need; dry-run works with none
+
+# API (http://localhost:8000)
+cd apps/api && PYTHONPATH=src uvicorn clipforge_api.app:app --reload --port 8000
+
+# Web review UI (http://localhost:3000)
+cd apps/web && npm ci && npm run dev
+
+# Smoke test: builds a 1080x1920 sample, runs the pipeline, verifies output
+python3 scripts/smoke_test.py
+
+# Tests + lint
+python3 -m pytest tests/ -q
+ruff check . && ruff format --check .
+```
+
+## API endpoints
+
+| Method | Path | What it does |
+|---|---|---|
+| `GET` | `/health` | Liveness + version + dry-run flag |
+| `POST` | `/jobs` | Create a clipping job (own-content declaration required for YouTube) |
+| `GET` | `/jobs/{id}` | Job status + candidate count |
+| `GET` | `/jobs/{id}/candidates` | Candidates with scores + per-platform SEO |
+| `POST` | `/jobs/{id}/candidates/{n}/approve` | Approve a candidate (reject/trim also exist) |
+| `POST` | `/posts` | Create a post from an approved candidate (409 if not approved) |
+| `POST` | `/posts/{id}/approve` | Approve a post |
+| `POST` | `/posts/{id}/publish?dry_run=true` | Publish (409 if not approved; dry-run default) |
+| `GET` | `/monetization` | Threshold progress per platform |
+| `GET` | `/accounts` | Connected social accounts |
+
+Full reference: [docs/api.md](docs/api.md).
+
+## Approval-first + official-APIs-only policy
+
+1. **Human approval is mandatory.** No clip is published, scheduled, or
+   sent to any platform without an explicit approve action. There is no
+   "auto-post everything" switch.
+2. **Official APIs only.** YouTube Data API v3, Meta Graph API, TikTok
+   Content Posting API. Each platform's OAuth scopes, app review, and
+   audit gates are respected — including TikTok's rule that unaudited apps
+   post private-only, and its inbox-draft mode while the audit is pending.
+3. **Rate limits are read live, never hard-coded.** YouTube quota from
+   Cloud Console, Instagram's `content_publishing_limit`, TikTok's
+   `creator_info.max_video_post_duration_sec`. The numbers in
+   [ARCHITECTURE.md](ARCHITECTURE.md) are starting defaults with
+   `VERIFY_LIVE` notes where sources conflict.
+4. **AI labelling is on by default.** AI-clipped / AI-voiced posts carry
+   the platform's AI label (`is_aigc` on TikTok, YouTube disclosure, Meta
+   AI-info signals). See [docs/compliance.md](docs/compliance.md).
+5. **Own content only.** Ingest requires a source-ownership declaration.
+   No third-party downloads, no reused-content pipelines.
+
+## Reuse attribution
+
+ClipForge is built fresh, but its clipping approach owes a debt to two MIT-
+licensed open-source projects (ideas and prompt design reused, not code
+copied wholesale):
+
+- [zhouxiaoka/autoclip](https://github.com/zhouxiaoka/autoclip) (MIT) —
+  one-link → up to 10 scored clips per platform, publish-pack concept.
+- [Anil-matcha/AI-Youtube-Shorts-Generator](https://github.com/Anil-matcha/AI-Youtube-Shorts-Generator)
+  (MIT) — Whisper → LLM virality framework (hook / emotional peak /
+  opinion bomb / revelation / conflict / quotable / story / practical
+  value) → score 0–100 → dedupe → face-tracked 9:16 render.
+
+Other projects were studied as design references only; see
+[ARCHITECTURE.md](ARCHITECTURE.md#reuse--references).
+
+## DO-NOT list
+
+These are never acceptable in ClipForge, in any PR, under any flag:
+
+- ❌ **Postiz (AGPL-3.0) code** — reference / self-hosted scheduler design
+  only. Forking it into a hosted service would force AGPL publication of
+  the whole product.
+- ❌ **Selenium / cookie / headless-browser uploaders** — unofficial upload
+  paths get accounts flagged and break on platform changes.
+- ❌ **Unofficial TikTok uploaders** (e.g. browser-login + web-API upload
+  tools) — explicitly excluded by TikTok's audit; use the official
+  Content Posting API or inbox drafts.
+- ❌ **Third-party reposts** — no downloading other creators' videos, no
+  re-uploading other people's content, no watermark cropping.
+- ❌ **Templated AI-slop at scale** — repetitive / generic / mass-produced
+  clips are demonetizable under YouTube's 16 July 2026 reused-content
+  rules; ClipForge varies templates and requires human review.
+- ❌ **Promising earnings or Reels Play bonuses** — Reels Play ended
+  31 Aug 2025. The monetization tracker shows thresholds only.
+- ❌ **Secrets in the repo** — no API keys, tokens, keystores, or
+  `.env` files. Ever. See [SECURITY.md](SECURITY.md).
+
+## Docs
+
+- [docs/setup.md](docs/setup.md) — install, env vars, running locally
+- [docs/api.md](docs/api.md) — API reference + job lifecycle
+- [docs/publishing.md](docs/publishing.md) — per-platform OAuth / app-review /
+  audit checklists
+- [docs/monetization.md](docs/monetization.md) — thresholds per platform
+- [docs/compliance.md](docs/compliance.md) — AI labelling, copyright, privacy
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Contract-first: the tests in
+`tests/` define the module APIs; implement to the contract, keep
+`DRY_RUN=true` the default, and never add a publishing path that bypasses
+approval.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 hamxa8769.

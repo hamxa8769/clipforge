@@ -1,0 +1,70 @@
+# ClipForge CI — v0.1.0
+#
+# Python job: ruff (lint + format check) and pytest on every push/PR.
+# Web job: Next.js build — runs ONLY once apps/web has real app source
+# (an app/ or pages/ dir, or a next.config.*). Right now apps/web contains
+# only package.json, so the job is skipped until the web app lands; the
+# hashFiles gate below activates it automatically when that happens.
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  python:
+    name: Python (ruff + pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install FFmpeg (smoke test + pipeline dependency)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - name: Install ClipForge + dev tools
+        # Editable install needs the src/clipforge package to exist; until
+        # the implementation modules land it may install an empty package,
+        # so fall back to installing the dev tools directly.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" || pip install pytest ruff mypy fastapi uvicorn sqlalchemy pydantic pydantic-settings httpx python-multipart
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Pytest
+        run: python -m pytest tests/ -q
+
+  web:
+    name: Web (Next.js build)
+    runs-on: ubuntu-latest
+    # Skip until the web app has source to build; activates automatically
+    # when apps/web gains an app/ or pages/ directory or a next.config.*.
+    if: ${{ hashFiles('apps/web/app/**', 'apps/web/pages/**', 'apps/web/next.config.*') != '' }}
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
