@@ -1,0 +1,37 @@
+"use client";
+import { useState } from "react";
+import type { Post } from "@/lib/api";
+import { Card } from "@/components/ui";
+
+export default function QueueClient({ posts, demo }: { posts: Post[]; demo: boolean }) {
+  const [items, setItems] = useState(posts);
+  const [msg, setMsg] = useState("");
+  async function act(id: string, action: "approve" | "publish") {
+    try { await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/posts/${id}/${action}`, { method: "POST" }); } catch { /* demo */ }
+    setItems((xs) => xs.map((p) => (p.id === id ? { ...p, status: action === "approve" ? "approved" : "published (dry-run)" } : p)));
+    setMsg(action === "publish" ? "Dry-run publish: no post was sent to any platform." : "Approved — ready to schedule.");
+  }
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center gap-3"><h1 className="text-2xl font-bold">Approval queue</h1>{demo && <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-xs font-medium text-sky-300">Demo data — API unreachable</span>}</div>
+      <p className="text-sm text-neutral-400">Nothing publishes without approval. TikTok posts go to the creator inbox as a draft until the Content Posting API audit is passed.</p>
+      {msg && <p className="rounded-md bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">{msg}</p>}
+      {items.length === 0 ? <Card><p className="text-neutral-400">Queue is empty — approve clips on a job review page first.</p></Card> : (
+        <ul className="space-y-4">{items.map((p) => (
+          <li key={p.id}><Card>
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-xs font-medium">{p.platform}</span>
+              <span className="text-sm text-neutral-400">Scheduled {new Date(p.scheduled_at).toLocaleString()}</span>
+              <span className="ml-auto text-sm text-neutral-400">{p.status}</span>
+            </div>
+            <p className="mt-3 text-sm">{p.caption}</p>
+            <div className="mt-4 flex gap-2">
+              <button onClick={() => act(p.id, "approve")} className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium hover:bg-emerald-500">Approve</button>
+              <button onClick={() => act(p.id, "publish")} className="rounded-md bg-neutral-800 px-4 py-2 text-sm font-medium hover:bg-neutral-700">Publish (dry-run)</button>
+            </div>
+          </Card></li>
+        ))}</ul>
+      )}
+    </div>
+  );
+}
