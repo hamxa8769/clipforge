@@ -1,12 +1,150 @@
+// Shared design-system primitives for the ClipForge web UI (v0.3.0).
+//
+// Design tokens (dark, high-fi — one system, every screen):
+// - Surface: neutral-950 page, neutral-900 cards, neutral-800 borders/controls.
+// - Text: neutral-100 headings, neutral-300 body, neutral-400 secondary, neutral-500 captions.
+// - Accent: amber-400 (brand / primary actions), emerald (success/done),
+//   sky (info/active), red (error/failed), violet (rendering).
+// - Radius: rounded-xl cards, rounded-lg inner panels, rounded-full pills.
+// - Every screen shows loading / empty / error states — never a blank page
+//   and never demo numbers presented as live channel stats.
+import type { ReactNode } from "react";
+
 export function DemoBadge() {
   return <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-xs font-medium text-sky-300">Demo data — API unreachable</span>;
 }
-export function Card({ children, className = "" }: { children: React.ReactNode; className?: string }) {
+
+export function Card({ children, className = "" }: { children: ReactNode; className?: string }) {
   return <div className={`rounded-xl border border-neutral-800 bg-neutral-900 p-5 ${className}`}>{children}</div>;
 }
+
+/** Card header row: title + optional right-aligned action. */
+export function CardHeader({ title, hint, action }: { title: string; hint?: string; action?: ReactNode }) {
+  return (
+    <div className="mb-4 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+      <h2 className="text-lg font-semibold text-neutral-100">{title}</h2>
+      {hint && <span className="text-xs text-neutral-500">{hint}</span>}
+      {action && <span className="ml-auto">{action}</span>}
+    </div>
+  );
+}
+
 export function StatusPill({ status }: { status: string }) {
-  const map: Record<string, string> = { ready: "bg-emerald-500/15 text-emerald-300", failed: "bg-red-500/15 text-red-300", scoring: "bg-amber-500/15 text-amber-300", rendering: "bg-violet-500/15 text-violet-300", review: "bg-sky-500/15 text-sky-300", transcribing: "bg-sky-500/15 text-sky-300", pending: "bg-neutral-700/50 text-neutral-300", approved: "bg-emerald-500/15 text-emerald-300", rejected: "bg-red-500/15 text-red-300", pending_approval: "bg-amber-500/15 text-amber-300", scheduled: "bg-sky-500/15 text-sky-300", published: "bg-emerald-500/15 text-emerald-300", dry_run: "bg-neutral-700/50 text-neutral-300" };
+  const map: Record<string, string> = { ready: "bg-emerald-500/15 text-emerald-300", failed: "bg-red-500/15 text-red-300", scoring: "bg-amber-500/15 text-amber-300", rendering: "bg-violet-500/15 text-violet-300", review: "bg-sky-500/15 text-sky-300", transcribing: "bg-sky-500/15 text-sky-300", pending: "bg-neutral-700/50 text-neutral-300", approved: "bg-emerald-500/15 text-emerald-300", rejected: "bg-red-500/15 text-red-300", pending_approval: "bg-amber-500/15 text-amber-300", scheduled: "bg-sky-500/15 text-sky-300", published: "bg-emerald-500/15 text-emerald-300", dry_run: "bg-neutral-700/50 text-neutral-300", publishing: "bg-sky-500/15 text-sky-300", draft: "bg-neutral-700/50 text-neutral-300" };
   // Unknown statuses fall back to the "pending" style — never to "queued",
   // which is not a backend status (see lib/api.ts normalizeJobStatus).
   return <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${map[status] ?? map.pending}`}>{status}</span>;
+}
+
+/** Small coloured dot identifying a platform everywhere it appears. */
+export const PLATFORM_COLORS: Record<string, string> = {
+  youtube: "bg-red-500",
+  instagram: "bg-pink-500",
+  facebook: "bg-blue-500",
+  tiktok: "bg-cyan-400",
+};
+
+export function PlatformDot({ platform, className = "" }: { platform: string; className?: string }) {
+  return <span className={`inline-block h-2.5 w-2.5 rounded-full ${PLATFORM_COLORS[platform.toLowerCase()] ?? "bg-neutral-500"} ${className}`} aria-hidden="true" />;
+}
+
+export const PLATFORM_LABELS: Record<string, string> = {
+  youtube: "YouTube",
+  instagram: "Instagram",
+  facebook: "Facebook",
+  tiktok: "TikTok",
+};
+
+export function platformLabel(p: string): string {
+  return PLATFORM_LABELS[p.toLowerCase()] ?? p;
+}
+
+/** Compact number: 412,000 -> "412k", 1,840 -> "1,840". */
+export function fmtCompact(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (n >= 10_000) return `${Math.round(n / 1000)}k`;
+  return n.toLocaleString();
+}
+
+export function fmtNum(n: number): string {
+  return n.toLocaleString();
+}
+
+/** Thin progress bar (0–100). Colour: emerald when complete, amber while running, red on failure. */
+export function ProgressBar({ value, tone = "default", className = "" }: { value: number; tone?: "default" | "success" | "danger"; className?: string }) {
+  const color = tone === "success" ? "bg-emerald-500" : tone === "danger" ? "bg-red-500" : "bg-amber-400";
+  return (
+    <div className={`h-2 overflow-hidden rounded-full bg-neutral-800 ${className}`} role="progressbar" aria-valuenow={Math.round(value)} aria-valuemin={0} aria-valuemax={100}>
+      <div className={`h-full ${color} transition-all`} style={{ width: `${Math.max(0, Math.min(100, value))}%` }} />
+    </div>
+  );
+}
+
+/** Loading skeleton block — shown while the first fetch is in flight. */
+export function Skeleton({ className = "" }: { className?: string }) {
+  return <div className={`animate-pulse rounded-lg bg-neutral-800/70 ${className}`} aria-label="Loading" />;
+}
+
+/** Empty state: icon-free, honest, with one clear next step. */
+export function EmptyState({ title, body, action }: { title: string; body: string; action?: ReactNode }) {
+  return (
+    <div className="rounded-xl border border-dashed border-neutral-700 bg-neutral-900/60 p-6 text-center">
+      <p className="font-medium text-neutral-200">{title}</p>
+      <p className="mx-auto mt-1 max-w-md text-sm text-neutral-400">{body}</p>
+      {action && <div className="mt-4 flex justify-center">{action}</div>}
+    </div>
+  );
+}
+
+/** Error state with a retry action — used when a fetch fails after the API was reachable, or on first load. */
+export function ErrorBanner({ message, onRetry }: { message: string; onRetry?: () => void }) {
+  return (
+    <div className="flex flex-wrap items-center gap-3 rounded-xl border border-red-500/40 bg-red-500/10 p-4" role="alert">
+      <p className="flex-1 text-sm text-red-200">{message}</p>
+      {onRetry && (
+        <button onClick={onRetry} className="rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500">
+          Retry
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** Primary (amber) and secondary (neutral) action buttons — one primary per screen. */
+export function PrimaryButton({ children, href, onClick, disabled }: { children: ReactNode; href?: string; onClick?: () => void; disabled?: boolean }) {
+  const cls = "inline-flex items-center justify-center rounded-md bg-amber-400 px-4 py-2 text-sm font-semibold text-neutral-950 hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-50";
+  if (href) return <a href={href} className={cls}>{children}</a>;
+  return <button onClick={onClick} disabled={disabled} className={cls}>{children}</button>;
+}
+
+export function SecondaryButton({ children, href, onClick, disabled }: { children: ReactNode; href?: string; onClick?: () => void; disabled?: boolean }) {
+  const cls = "inline-flex items-center justify-center rounded-md bg-neutral-800 px-3 py-1.5 text-sm font-medium text-neutral-200 hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-50";
+  if (href) return <a href={href} className={cls}>{children}</a>;
+  return <button onClick={onClick} disabled={disabled} className={cls}>{children}</button>;
+}
+
+/**
+ * Accessible on/off switch. `disabled` renders it locked (used for the
+ * dry-run guard, which is server-enforced and cannot be turned off here).
+ */
+export function Toggle({ checked, onChange, disabled, label, hint }: { checked: boolean; onChange?: (v: boolean) => void; disabled?: boolean; label: string; hint?: string }) {
+  return (
+    <div className="flex items-start gap-3">
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        disabled={disabled}
+        onClick={() => onChange?.(!checked)}
+        className={`mt-0.5 flex h-6 w-11 shrink-0 items-center rounded-full p-0.5 transition-colors ${checked ? "bg-amber-400" : "bg-neutral-700"} ${disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
+      >
+        <span className={`h-5 w-5 rounded-full bg-white shadow transition-transform ${checked ? "translate-x-5" : "translate-x-0"}`} />
+      </button>
+      <span>
+        <span className="block text-sm font-medium text-neutral-100">{label}</span>
+        {hint && <span className="mt-0.5 block text-xs text-neutral-400">{hint}</span>}
+      </span>
+    </div>
+  );
 }

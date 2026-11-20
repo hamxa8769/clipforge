@@ -1,5 +1,15 @@
-# ClipForge Web — v0.2.1
+# ClipForge Web — v0.3.0 (frontend)
 Next.js 15 + TypeScript + Tailwind review/scheduler dashboard (App Router).
+
+## Pages
+- `/` — Dashboard: live stats cards (from `GET /analytics`), channels strip (`GET /accounts`), recent jobs with live stage/progress, approval-queue summary, up-next schedule, monetization vs thresholds (Feb 2027 doubling flag). One primary action: Review approval queue.
+- `/automation` — Automation runner: running/queued jobs (10s poll), history with outcome + error, what is next, retention-feedback signals, "Run scheduler now" (`POST /scheduler/run`, dry-run default), rule toggles (browser-local only — see `docs/API-CONTRACT.md`).
+- `/channels` — One card per platform: account, connection state, latest analytics snapshot, retention signals, connect guidance.
+- `/queue` — Approval queue. `/schedule` — Staggered posting times + post list with state filters (All / Scheduled / Awaiting approval / Published / Failed); failed posts show their stored error inline.
+- `/jobs/view/?id=<id>` — Job detail: 8-stage pipeline stepper, progress, error/run log, retry (re-creates the job from the same source), then the review list (video player + timeline trim editor + per-platform SEO).
+- `/monetization` — Threshold progress per platform, computed with real metrics from the latest analytics snapshot. `/settings` — Live connected accounts (`GET /accounts`); no key/token field exists in this UI by design.
+
+Design system: `components/ui.tsx` (one dark token set, `Card`/`StatusPill`/`ProgressBar`/`Skeleton`/`EmptyState`/`ErrorBanner`/`Toggle`). Every screen has loading / empty / error states; demo fallback is always badged. UI patterns borrowed vs built fresh: `docs/REUSE.md`. Backend fields the frontend still needs: `docs/API-CONTRACT.md`.
 
 ## Run
 ```bash
@@ -41,7 +51,7 @@ dashboard) returns 404 from the static file server. Live jobs are
 reviewed through `/jobs/view/?id=<id>` instead — a single static page
 (`jobs/view/index.html`) that reads the id from the query string in the
 browser and renders the same review UI; in-app links point there.
-Every other page (`/`, `/queue`, `/schedule`, `/monetization`,
+Every other page (`/`, `/automation`, `/channels`, `/queue`, `/schedule`, `/monetization`,
 `/settings`) is fully static.
 
 ## Scaffold note
