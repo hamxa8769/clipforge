@@ -1,0 +1,50 @@
+[
+  {
+    "video": "/tmp/face-test/talking_head_moving.mp4",
+    "width": 1280,
+    "height": 720,
+    "duration_s": 10.0,
+    "opencv_version": "4.10.0",
+    "haar_cascade_available": true,
+    "face_tracked": false,
+    "mode": "centre-crop fallback",
+    "crop_points": 20,
+    "crop_x_min": 437.5,
+    "crop_x_max": 437.5,
+    "crop_x_centre": 437.5,
+    "crop_x_range": 0.0,
+    "shot_cuts_s": []
+  },
+  {
+    "video": "/tmp/face-test/talking_head_still.mp4",
+    "width": 1280,
+    "height": 720,
+    "duration_s": 10.0,
+    "opencv_version": "4.10.0",
+    "haar_cascade_available": true,
+    "face_tracked": false,
+    "mode": "centre-crop fallback",
+    "crop_points": 20,
+    "crop_x_min": 437.5,
+    "crop_x_max": 437.5,
+    "crop_x_centre": 437.5,
+    "crop_x_range": 0.0,
+    "shot_cuts_s": []
+  },
+  {
+    "video": "/home/hatch/workspace/clipforge/data/uploads/sample_60s.mp4",
+    "width": 1280,
+    "height": 720,
+    "duration_s": 60.0,
+    "opencv_version": "4.10.0",
+    "haar_cascade_available": true,
+    "face_tracked": false,
+    "mode": "centre-crop fallback",
+    "crop_points": 120,
+    "crop_x_min": 437.5,
+    "crop_x_max": 437.5,
+    "crop_x_centre": 437.5,
+    "crop_x_range": 0.0,
+    "shot_cuts_s": []
+  }
+]
