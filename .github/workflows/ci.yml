@@ -1,10 +1,9 @@
 # ClipForge CI — v0.1.0
 #
 # Python job: ruff (lint + format check) and pytest on every push/PR.
-# Web job: Next.js build — runs ONLY once apps/web has real app source
-# (an app/ or pages/ dir, or a next.config.*). Right now apps/web contains
-# only package.json, so the job is skipped until the web app lands; the
-# hashFiles gate below activates it automatically when that happens.
+# Web job: Next.js build — runs when apps/web has real app source
+# (an app/ or pages/ dir, or a next.config.*); the hashFiles gate below
+# activates it automatically.
 name: CI
 
 on:
