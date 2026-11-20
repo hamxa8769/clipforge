@@ -195,7 +195,11 @@ def words_to_ass(
                     f"{_ass_time(max(0.0, w.end - start_offset_s))},{style.name},,0,0,0,,"
                     f"{{\\pos({PLAY_RES_X // 2},{CAPTION_Y})}}{text}"
                 )
-    return "".join(lines)
+    # One line per event: the header already ends with a newline, and
+    # every Dialogue line needs its own. (A "".join here once glued all
+    # events into a single line, so libass parsed only the first event
+    # and the rest rendered as literal "Dialogue: ..." caption text.)
+    return "\n".join(lines) + "\n"
 
 
 def write_ass(
