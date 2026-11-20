@@ -135,6 +135,13 @@ jobs:
       - name: Install cargo-tauri
         run: cargo install tauri-cli --version ^2
 
+      # Fail fast on Windows-only compile errors (e.g. #[cfg(windows)]
+      # code that Linux never compiles) before the slow PyInstaller /
+      # npm / Tauri bundle steps below.
+      - name: Check desktop compiles (Windows)
+        run: cargo check
+        working-directory: apps/desktop/src-tauri
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip

@@ -38,7 +38,7 @@ fn run_version(path: &str) -> Option<String> {
 fn windows_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(pf) = std::env::var("ProgramFiles") {
-        out.push(PathBuf::from(pf).join("ffmpeg/bin/ffmpeg.exe"));
+        out.push(PathBuf::from(&pf).join("ffmpeg/bin/ffmpeg.exe"));
         out.push(PathBuf::from(pf).join("Gyan/FFmpeg/bin/ffmpeg.exe"));
     }
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
