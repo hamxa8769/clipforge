@@ -3,17 +3,25 @@
 
 Usage (from the repo root):
 
-    python scripts/build_exe.py [--with-web]
+    python scripts/build_exe.py [--with-web | --with-web-static]
 
 * Builds the one-file PyInstaller executable for the current platform:
   ``dist/clipforge-server`` (``clipforge-server.exe`` on Windows).
 * ``--with-web`` also builds the Next.js app (``output: "standalone"``)
   and includes it in the zip under ``web/``.
+* ``--with-web-static`` instead builds the static export
+  (``npm run build:static``: ``output: "export"`` with an empty
+  ``NEXT_PUBLIC_API_URL`` so the UI calls the API same-origin) and
+  stages it under ``web/out/`` — the layout ``clipforge-server`` serves
+  at ``/`` with no Node runtime needed (this is what the Tauri desktop
+  app uses). The two ``--with-web*`` modes are mutually exclusive.
 * Stages everything under ``dist/ClipForge-v<version>-<Windows|Linux>/``
   and zips it to ``dist/ClipForge-v<version>-<Windows|Linux>.zip``:
 
       clipforge-server(.exe)   one-file API server, no Python needed
       web/                     Next.js standalone build (needs Node 20+)
+      web/out/                 static export (--with-web-static only,
+                               served by the API server, no Node needed)
       start-server.bat/.sh     start the API server
       start-web.bat/.sh        start the web UI (needs Node 20+)
       README.txt               setup instructions for the zip
@@ -24,7 +32,7 @@ FFmpeg is NOT bundled — it stays a separate prerequisite for clipping
 (see README.txt).
 
 Requires: Python 3.11+ (PyInstaller is installed automatically if it is
-missing) and, with ``--with-web``, Node 20+ with ``npm``.
+missing) and, with ``--with-web`` or ``--with-web-static``, Node 20+ with ``npm``.
 """
 
 from __future__ import annotations
@@ -121,7 +129,31 @@ def _build_web(stage_web: Path) -> None:
     print(f"Staged web UI at {stage_web}", flush=True)
 
 
-def _stage(exe: Path, with_web: bool) -> tuple[Path, Path]:
+def _build_web_static(stage_web_out: Path) -> None:
+    """Build the static export and stage it at <stage>/web/out/.
+
+    ``clipforge-server`` serves ``<base>/web/out`` (``index.html``) at
+    ``/`` — see apps/api/clipforge_api/__main__.py. The export is built
+    with an empty NEXT_PUBLIC_API_URL so the UI calls the API same-origin
+    (relative "/jobs", ...) on whatever port the server runs on.
+    """
+    web = ROOT / "apps" / "web"
+    if not (web / "package.json").is_file():
+        raise SystemExit("apps/web/package.json not found")
+    npm = _npm()
+    _run([npm, "ci"], cwd=web)
+    _run([npm, "run", "build:static"], cwd=web)
+    out = web / "out"
+    if not (out / "index.html").is_file():
+        raise SystemExit(
+            "Next.js static export not found at apps/web/out/index.html — "
+            'is `output: "export"` set for CLIPFORGE_STATIC_EXPORT=1 in apps/web/next.config.ts?'
+        )
+    shutil.copytree(out, stage_web_out, dirs_exist_ok=True)
+    print(f"Staged static web UI at {stage_web_out}", flush=True)
+
+
+def _stage(exe: Path, with_web: bool, with_web_static: bool) -> tuple[Path, Path]:
     version = _version()
     platform = _platform()
     stage = DIST / f"ClipForge-v{version}-{platform}"
@@ -145,6 +177,8 @@ def _stage(exe: Path, with_web: bool) -> tuple[Path, Path]:
         shutil.copy2(env_example, stage / ".env.example")
     if with_web:
         _build_web(stage / "web")
+    if with_web_static:
+        _build_web_static(stage / "web" / "out")
 
     zip_path = DIST / f"ClipForge-v{version}-{platform}.zip"
     if zip_path.exists():
@@ -163,15 +197,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--with-web",
         action="store_true",
-        help="also build the Next.js UI and include it in the zip",
+        help="also build the Next.js UI (standalone, needs Node 20+) under web/",
+    )
+    parser.add_argument(
+        "--with-web-static",
+        action="store_true",
+        help="also build the static web export (no Node at runtime) under web/out/",
     )
     args = parser.parse_args(argv)
+    if args.with_web and args.with_web_static:
+        raise SystemExit("--with-web and --with-web-static are mutually exclusive")
 
     if sys.version_info < (3, 11):  # noqa: UP036  (guard for pre-3.11 interpreters)
         raise SystemExit("ClipForge needs Python 3.11+ to build the executable")
     DIST.mkdir(parents=True, exist_ok=True)
     exe = _build_exe()
-    stage, zip_path = _stage(exe, with_web=args.with_web)
+    stage, zip_path = _stage(exe, with_web=args.with_web, with_web_static=args.with_web_static)
     print()
     print("Done.")
     print(f"  Executable: {exe}")

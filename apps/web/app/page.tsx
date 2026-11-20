@@ -1,11 +1,31 @@
+// Client component: data is fetched in the browser (useEffect) instead of
+// at render time on the server, so this page can be statically exported
+// (`output: "export"`). Same UI, same API contract (lib/api.ts), same
+// demo-data fallback + "Demo data" badge when the API is unreachable.
+// Initial state is the demo data, so the page renders content immediately
+// and swaps in live data once the fetch returns.
+"use client";
+import { useEffect, useState } from "react";
 import Link from "next/link";
-import { apiGet, getJobs, PROCESSING_STATUSES } from "@/lib/api";
+import { apiGet, getJobs, PROCESSING_STATUSES, type Job } from "@/lib/api";
 import { demoJobs } from "@/lib/mock";
 import { Card, DemoBadge, StatusPill } from "@/components/ui";
 
-export default async function Dashboard() {
-  const jobs = (await getJobs()) ?? demoJobs;
-  const live = (await apiGet<unknown>("/health")) !== null;
+export default function Dashboard() {
+  const [jobs, setJobs] = useState<Job[]>(demoJobs);
+  const [live, setLive] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [fetched, health] = await Promise.all([getJobs(), apiGet<unknown>("/health")]);
+      if (cancelled) return;
+      if (fetched !== null) setJobs(fetched);
+      setLive(health !== null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const ready = jobs.filter((j) => j.status === "ready").length;
   // Statuses are normalised in getJobs(): the backend sends "pending", never
   // "queued" — see lib/api.ts normalizeJobStatus.
@@ -43,12 +63,15 @@ export default async function Dashboard() {
           {jobs.map((j) => (
             <li key={j.id} className="flex flex-wrap items-center gap-3 py-3">
               <div className="min-w-0 flex-1">
-                <Link href={`/jobs/${j.id}`} className="font-medium hover:underline">{j.title}</Link>
-                <p className="truncate text-sm text-neutral-400">{j.source} · {new Date(j.created_at).toLocaleString()}</p>
+                <Link href={`/jobs/view/?id=${encodeURIComponent(j.id)}`} className="font-medium hover:underline">{j.title}</Link>
+                {/* Dates are locale-formatted in the browser; the static
+                    prerender uses the build machine's locale, so suppress
+                    the hydration warning for this text. */}
+                <p className="truncate text-sm text-neutral-400" suppressHydrationWarning>{j.source} · {new Date(j.created_at).toLocaleString()}</p>
               </div>
               <span className="text-sm text-neutral-400">{j.candidates} candidates</span>
               <StatusPill status={j.status} />
-              <Link href={`/jobs/${j.id}`} className="rounded-md bg-neutral-800 px-3 py-1.5 text-sm hover:bg-neutral-700">Review</Link>
+              <Link href={`/jobs/view/?id=${encodeURIComponent(j.id)}`} className="rounded-md bg-neutral-800 px-3 py-1.5 text-sm hover:bg-neutral-700">Review</Link>
             </li>
           ))}
         </ul>

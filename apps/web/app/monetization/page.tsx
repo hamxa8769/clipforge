@@ -1,12 +1,31 @@
+// Client component: monetization + liveness are fetched in the browser so
+// this page can be statically exported. Same UI, same demo fallback + badge.
+"use client";
+import { useEffect, useState } from "react";
 import { apiGet, type Monetization } from "@/lib/api";
 import { demoMonetization } from "@/lib/mock";
 import { Card, DemoBadge } from "@/components/ui";
 
 function fmt(n: number) { return n.toLocaleString(); }
 
-export default async function MonetizationPage() {
-  const items = (await apiGet<Monetization[]>("/monetization")) ?? demoMonetization;
-  const live = (await apiGet<unknown>("/health")) !== null;
+export default function MonetizationPage() {
+  const [items, setItems] = useState<Monetization[]>(demoMonetization);
+  const [live, setLive] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [fetched, health] = await Promise.all([
+        apiGet<Monetization[]>("/monetization"),
+        apiGet<unknown>("/health"),
+      ]);
+      if (cancelled) return;
+      if (fetched !== null) setItems(fetched);
+      setLive(health !== null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3"><h1 className="text-2xl font-bold">Monetization tracker</h1>{!live && <DemoBadge />}</div>

@@ -10,6 +10,7 @@ import {
   normalizeJobStatus,
   normalizePost,
   normalizePostStatus,
+  resolveApiUrl,
   sourceVideoUrl,
   API_URL,
 } from "./api.js";
@@ -57,6 +58,16 @@ test("normalizePostStatus maps legacy 'pending'/'queued' to 'pending_approval'",
 test("normalizePost keeps the clip id from either field name", () => {
   assert.equal(normalizePost({ id: "p1", clip_candidate_id: "c1", status: "pending" }).clip_id, "c1");
   assert.equal(normalizePost({ id: "p1", clip_id: "c2", status: "approved" }).status, "approved");
+});
+
+test("resolveApiUrl keeps an empty string (same-origin) and only defaults when unset", () => {
+  // Empty string is the static-export / desktop case: API_URL "" makes
+  // fetches relative ("/jobs"), served from the same origin as the UI.
+  // A `??` fallback would wrongly turn "" back into localhost:8000.
+  assert.equal(resolveApiUrl(""), "");
+  assert.equal(resolveApiUrl(undefined), "http://localhost:8000");
+  assert.equal(resolveApiUrl("http://localhost:8000"), "http://localhost:8000");
+  assert.equal(resolveApiUrl("https://api.example.test"), "https://api.example.test");
 });
 
 test("clipVideoUrl builds the media endpoint URL from a candidate file_path", () => {

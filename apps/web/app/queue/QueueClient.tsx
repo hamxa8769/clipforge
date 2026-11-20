@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { API_URL } from "@/lib/api";
 import type { Post } from "@/lib/api";
 import { Card, StatusPill } from "@/components/ui";
 
@@ -7,7 +8,7 @@ export default function QueueClient({ posts, demo }: { posts: Post[]; demo: bool
   const [items, setItems] = useState(posts);
   const [msg, setMsg] = useState("");
   async function act(id: string, action: "approve" | "publish") {
-    try { await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/posts/${id}/${action}`, { method: "POST" }); } catch { /* demo */ }
+    try { await fetch(`${API_URL}/posts/${id}/${action}`, { method: "POST" }); } catch { /* demo */ }
     // Optimistic update uses real PostStatus values: a dry-run publish lands
     // the post in "dry_run", an approval in "approved" (docs/api.md).
     setItems((xs) => xs.map((p) => (p.id === id ? { ...p, status: action === "approve" ? "approved" : "dry_run" } : p)));

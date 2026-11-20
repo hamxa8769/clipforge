@@ -16,7 +16,16 @@
 // which silently broke the "Processing" count and the status pill. Every
 // job payload from the API goes through normalizeJobStatus() so a stray
 // "queued" (or any unknown value) can never leak into the UI unmapped.
-export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+export function resolveApiUrl(value: string | undefined): string {
+  // Empty string is meaningful: it means "same origin" (relative fetches
+  // like "/jobs"), which is what the desktop app needs — the static web
+  // export and the API are served from the same origin/port, so no host
+  // or port may be baked in. Only an *unset* variable falls back to the
+  // dev default. (A `??` fallback would wrongly turn "" into localhost.)
+  return value === undefined ? "http://localhost:8000" : value;
+}
+
+export const API_URL = resolveApiUrl(process.env.NEXT_PUBLIC_API_URL);
 
 /** Canonical job statuses, exactly as the backend JobStatus enum sends them. */
 export type JobStatus =

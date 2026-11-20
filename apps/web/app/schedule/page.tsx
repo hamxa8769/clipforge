@@ -1,4 +1,8 @@
-import { apiGet, getPosts } from "@/lib/api";
+// Client component: posts + liveness are fetched in the browser so this
+// page can be statically exported. Same UI, same demo fallback + badge.
+"use client";
+import { useEffect, useState } from "react";
+import { apiGet, getPosts, type Post } from "@/lib/api";
 import { demoPosts } from "@/lib/mock";
 import { Card, DemoBadge, StatusPill } from "@/components/ui";
 
@@ -9,10 +13,22 @@ const STAGGER = [
   { platform: "TikTok", time: "19:00", note: "6–10 PM local; 1–4/day for max growth, quality-gated." },
 ];
 
-export default async function SchedulePage() {
+export default function SchedulePage() {
   // Post statuses are normalised in getPosts() (legacy "pending" -> "pending_approval").
-  const posts = (await getPosts()) ?? demoPosts;
-  const live = (await apiGet<unknown>("/health")) !== null;
+  const [posts, setPosts] = useState<Post[]>(demoPosts);
+  const [live, setLive] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const [fetched, health] = await Promise.all([getPosts(), apiGet<unknown>("/health")]);
+      if (cancelled) return;
+      if (fetched !== null) setPosts(fetched);
+      setLive(health !== null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const sorted = [...posts].sort((a, b) => a.scheduled_at.localeCompare(b.scheduled_at));
   return (
     <div className="space-y-6">
@@ -36,7 +52,9 @@ export default async function SchedulePage() {
           <ul className="divide-y divide-neutral-800">{sorted.map((p) => (
             <li key={p.id} className="flex flex-wrap items-center gap-3 py-3">
               <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-xs font-medium">{p.platform}</span>
-              <span className="text-sm font-medium">{new Date(p.scheduled_at).toLocaleString()}</span>
+              {/* Locale-formatted date: suppress the hydration warning, the
+                  static prerender uses the build machine's locale. */}
+              <span className="text-sm font-medium" suppressHydrationWarning>{new Date(p.scheduled_at).toLocaleString()}</span>
               <span className="min-w-0 flex-1 truncate text-sm text-neutral-400">{p.caption}</span>
               <StatusPill status={p.status} />
             </li>
