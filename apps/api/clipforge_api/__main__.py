@@ -20,7 +20,11 @@ Behaviour:
 * **Web UI** — the Next.js app is a server-rendered app, so it cannot be
   served from inside this Python executable. If a *static export* of the
   web UI is present at ``<base>/web/out`` (``index.html`` exists), it is
-  served at ``/``. Otherwise the server runs API-only and ``/`` returns
+  served at ``/``. ``CLIPFORGE_WEB_OUT`` overrides that location: the
+  Tauri desktop shell sets it, because the Linux bundles install the
+  sidecar to ``/usr/bin`` while the export lives under the app resources
+  dir (``<resources>/binaries/web/out``), so "next to the exe" does not
+  hold there. Otherwise the server runs API-only and ``/`` returns
   a small status page explaining how to start the web UI (bundled
   ``start-web`` script, needs Node.js 20+). Nothing is faked: the page
   says plainly which mode is active.
@@ -109,7 +113,8 @@ def _build_app(base: Path):
     from clipforge.config import settings
     from clipforge_api.app import app
 
-    web_out = base / "web" / "out"
+    web_out_env = os.environ.get("CLIPFORGE_WEB_OUT", "").strip()
+    web_out = Path(web_out_env) if web_out_env else base / "web" / "out"
     if (web_out / "index.html").is_file():
         from fastapi.staticfiles import StaticFiles
 

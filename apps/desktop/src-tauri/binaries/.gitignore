@@ -1,0 +1,5 @@
+# Staged sidecar binaries for local dev/build only.
+# The release packager stages the per-platform clipforge-server binary here
+# (e.g. clipforge-server-x86_64-unknown-linux-gnu); never commit binaries.
+*
+!.gitignore

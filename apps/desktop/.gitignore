@@ -1,0 +1,7 @@
+# Rust / Tauri build outputs — never commit these.
+src-tauri/target/
+# Staged sidecar binaries are local dev/build staging only (see
+# src-tauri/binaries/.gitignore); the release packager stages them.
+src-tauri/binaries/*
+!src-tauri/binaries/.gitignore
+src-tauri/gen/

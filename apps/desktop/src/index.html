@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClipForge — starting…</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0;
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: #0f0f1a; color: #f3f3f8; }
+  .card { width: min(560px, 92vw); background: #1b1b2b; border: 1px solid #33334d;
+    border-radius: 16px; padding: 28px 30px; box-shadow: 0 12px 40px rgba(0,0,0,.45); }
+  .logo { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+  .logo svg { width: 44px; height: 44px; }
+  h1 { font-size: 24px; margin: 0; }
+  p { color: #b9b9cc; line-height: 1.55; }
+  .spinner { width: 26px; height: 26px; border: 3px solid #44445e; border-top-color: #8b5cf6;
+    border-radius: 50%; animation: spin 1s linear infinite; display: inline-block;
+    vertical-align: middle; margin-right: 10px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .banner { border-radius: 10px; padding: 12px 14px; margin: 14px 0; font-size: 14px;
+    line-height: 1.5; }
+  .banner.warn { background: #3a2a08; border: 1px solid #8a6d1b; color: #ffe1a1; }
+  .banner.ok { background: #0d2f1c; border: 1px solid #1f6b3a; color: #b9f2cd; }
+  .banner.err { background: #3a1111; border: 1px solid #8a2b2b; color: #ffc9c9; }
+  .banner a { color: #c4b5fd; }
+  button { background: #7c3aed; color: #fff; border: 0; border-radius: 8px;
+    padding: 10px 16px; font-size: 14px; cursor: pointer; margin: 4px 6px 4px 0; }
+  button.secondary { background: #2c2c40; color: #e6e6f2; border: 1px solid #44445e; }
+  button:hover { filter: brightness(1.12); }
+  pre { background: #10101c; border: 1px solid #2c2c40; border-radius: 8px;
+    padding: 10px; max-height: 220px; overflow: auto; font-size: 12px;
+    white-space: pre-wrap; word-break: break-word; color: #c9c9dd; }
+  .meta { font-size: 12px; color: #8a8aa3; margin-top: 16px; line-height: 1.6; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">
+    <svg viewBox="0 0 512 512" aria-hidden="true"><rect x="20" y="20" width="472" height="472" rx="112" fill="#7c3aed"/><polygon points="212,150 212,362 372,256" fill="#fff"/></svg>
+    <h1>ClipForge</h1>
+  </div>
+
+  <div id="starting">
+    <p><span class="spinner"></span><span id="status-text">Starting the ClipForge server…</span></p>
+  </div>
+
+  <div id="ffmpeg-banner" class="banner warn hidden"></div>
+  <div id="ffmpeg-ok" class="banner ok hidden"></div>
+
+  <div id="error" class="hidden">
+    <div class="banner err" id="error-text"></div>
+    <pre id="log"></pre>
+    <button id="retry">Retry</button>
+    <button id="open-shell" class="secondary">Server status &amp; settings</button>
+  </div>
+
+  <div class="meta" id="meta"></div>
+</div>
+
+<script>
+  const invoke = window.__TAURI__ && window.__TAURI__.core
+    ? window.__TAURI__.core.invoke
+    : null;
+
+  const $ = (id) => document.getElementById(id);
+
+  async function showFfmpeg() {
+    if (!invoke) return;
+    try {
+      const ff = await invoke("check_ffmpeg");
+      if (ff.available) {
+        $("ffmpeg-ok").textContent = "FFmpeg " + (ff.version || "") + " found — clipping is available.";
+        $("ffmpeg-ok").classList.remove("hidden");
+      } else {
+        $("ffmpeg-banner").innerHTML =
+          "FFmpeg was not found on this computer. <b>Clipping needs FFmpeg</b> — " +
+          "review, SEO and scheduling still work. " +
+          '<a href="https://ffmpeg.org/download.html" target="_blank" rel="noreferrer">Download FFmpeg</a> ' +
+          "and restart ClipForge, or continue without clipping.";
+        const btn = document.createElement("button");
+        btn.className = "secondary";
+        btn.textContent = "Continue without clipping (review / SEO only)";
+        btn.onclick = () => $("ffmpeg-banner").classList.add("hidden");
+        $("ffmpeg-banner").appendChild(document.createElement("br"));
+        $("ffmpeg-banner").appendChild(btn);
+        $("ffmpeg-banner").classList.remove("hidden");
+      }
+    } catch (e) { /* ffmpeg status is advisory; never block startup */ }
+  }
+
+  async function poll() {
+    if (!invoke) {
+      $("status-text").textContent = "Tauri bridge not available — this page must run inside the ClipForge app.";
+      return;
+    }
+    try {
+      const st = await invoke("get_server_status");
+      $("meta").textContent = "Server: " + st.source + "  •  Data: " + st.data_dir;
+      if (st.phase === "ready" || (st.phase && st.phase.phase === "ready")) {
+        // Tauri v2 serialises the flattened enum as { phase: "ready", url, port }
+        const url = st.phase.url || st.url;
+        window.location.href = url;
+        return;
+      }
+      if (st.phase === "failed" || (st.phase && st.phase.phase === "failed")) {
+        const err = st.phase.error || st.error || "Server failed to start.";
+        $("starting").classList.add("hidden");
+        $("error-text").textContent = err;
+        $("error").classList.remove("hidden");
+        try { $("log").textContent = await invoke("get_server_logs", { lines: 120 }); } catch (e) {}
+        return;
+      }
+      setTimeout(poll, 500);
+    } catch (e) {
+      $("status-text").textContent = "Could not reach the desktop shell: " + e;
+      setTimeout(poll, 1000);
+    }
+  }
+
+  $("retry").onclick = async () => {
+    $("error").classList.add("hidden");
+    $("starting").classList.remove("hidden");
+    try { await invoke("retry_server"); } catch (e) {}
+    setTimeout(poll, 500);
+  };
+  $("open-shell").onclick = async () => { try { await invoke("open_shell_window"); } catch (e) {} };
+
+  showFfmpeg();
+  poll();
+</script>
+</body>
+</html>
