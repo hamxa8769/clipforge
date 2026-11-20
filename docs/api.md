@@ -36,7 +36,7 @@ Trimming a candidate narrows its `start_s`/`end_s` within the original span.
 ### `GET /health`
 
 ```json
-{ "status": "ok", "dry_run": true, "version": "0.1.0", "database_url_scheme": "sqlite" }
+{ "status": "ok", "dry_run": true, "version": "0.2.0", "database_url_scheme": "sqlite" }
 ```
 
 ### `POST /jobs` → `201`

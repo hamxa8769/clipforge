@@ -8,9 +8,11 @@ captions, writes a different title / description / hashtag set for each
 platform, and publishes **only after a human approves** — through the
 platforms' official APIs, and nothing else.
 
-> **Status: v0.1.1 — early alpha.** The clipping pipeline, review UI, and
+> **Status: v0.2.0 — early alpha.** The clipping pipeline, review UI, and
 > publishing adapters are under active development. Nothing in this repo
 > posts to any platform automatically, and `DRY_RUN=true` is the default.
+> v0.2.0 adds a single double-click desktop app (Windows installer) with
+> the server built in — no terminal, no Node, no separate server window.
 
 ---
 
@@ -96,11 +98,24 @@ python3 -m pytest tests/ -q
 ruff check . && ruff format --check .
 ```
 
+## Download the desktop app (Windows — no terminal, no Node)
+
+**Download `ClipForge-0.2.0-setup.exe` (or the `.msi`) from
+[GitHub Releases](https://github.com/hamxa8769/clipforge/releases/tag/v0.2.0),
+double-click it, done.** The app starts its own built-in server
+automatically — there is no terminal window, no Node.js install, and no
+separate server to start. Logs and data live in
+`%APPDATA%\com.clipforge.app\` (server log: `logs\clipforge-server.log`).
+
+FFmpeg is still required separately for clipping — download it from
+https://ffmpeg.org/download.html and put it on `PATH`. Without FFmpeg the
+app still runs (review / SEO only) and tells you so.
+
 ## Download the executable (no Python needed)
 
 Every release ships a ready-to-run zip — no Python install required:
 
-- [GitHub Releases](https://github.com/hamxa8769/clipforge/releases/tag/v0.1.1)
+- [GitHub Releases](https://github.com/hamxa8769/clipforge/releases/tag/v0.2.0)
   — `ClipForge-vX.Y.Z-Windows.zip` or `ClipForge-vX.Y.Z-Linux.zip`
   (published with each `v*` release; the asset appears on the release
   page once the release workflow has run).
@@ -141,6 +156,24 @@ Things to know:
 
 Building the exe yourself: `python scripts/build_exe.py --with-web`
 (see `clipforge-server.spec`).
+
+## What's new in v0.2.0
+
+- **Desktop app (Tauri v2)** — one double-click Windows installer
+  (`.msi` + setup `.exe`). The app embeds the `clipforge-server` sidecar
+  and the static web UI, starts the server itself, waits for `/health`,
+  and shows the real dashboard — no terminal, no Node, no separate
+  server window. Tray icon, server log viewer, settings (data folder,
+  port, API key *names* only). Linux `.deb` / `.AppImage` are built in
+  CI too when available. See `apps/desktop/README.md`.
+- **Static web export** — `npm run build:static` produces plain files in
+  `apps/web/out/`, served by `clipforge-server` at `/` with no Node at
+  runtime (`python scripts/build_exe.py --with-web-static`). All pages
+  fetch data in the browser; live jobs are reviewed at
+  `/jobs/view/?id=<id>`, which works for any job id (the static
+  `/jobs/<id>` pages only exist for the demo ids).
+- **FFmpeg check** — the desktop app checks for FFmpeg on start and shows
+  a download link instead of failing silently when it is missing.
 
 ## What's new in v0.1.1
 

@@ -5,7 +5,7 @@ as ``clipforge_api.app`` (see ``tests/conftest.py`` for the path setup and
 the throwaway test database — tests never touch ``./clipforge.db``).
 
 Real endpoints (docs/api.md):
-  GET  /health            -> 200 {"status": "ok", "version": "0.1.1", ...}
+  GET  /health            -> 200 {"status": "ok", "version": "0.2.0", ...}
   POST /jobs              -> 201 {"id": ..., "status": "pending", ...}
   GET  /jobs/{id}/candidates
   POST /jobs/{id}/candidates/{n}/approve -> 200 {"status": "approved"}
@@ -64,7 +64,7 @@ def test_health_ok():
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
-    assert body["version"] == "0.1.1"
+    assert body["version"] == "0.2.0"
     assert body["dry_run"] is True
 
 
