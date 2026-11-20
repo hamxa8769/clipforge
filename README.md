@@ -8,7 +8,7 @@ captions, writes a different title / description / hashtag set for each
 platform, and publishes **only after a human approves** — through the
 platforms' official APIs, and nothing else.
 
-> **Status: v0.1.0 — early alpha.** The clipping pipeline, review UI, and
+> **Status: v0.1.1 — early alpha.** The clipping pipeline, review UI, and
 > publishing adapters are under active development. Nothing in this repo
 > posts to any platform automatically, and `DRY_RUN=true` is the default.
 
@@ -100,7 +100,7 @@ ruff check . && ruff format --check .
 
 Every release ships a ready-to-run zip — no Python install required:
 
-- [GitHub Releases](https://github.com/hamxa8769/clipforge/releases/tag/v0.1.0)
+- [GitHub Releases](https://github.com/hamxa8769/clipforge/releases/tag/v0.1.1)
   — `ClipForge-vX.Y.Z-Windows.zip` or `ClipForge-vX.Y.Z-Linux.zip`
   (published with each `v*` release; the asset appears on the release
   page once the release workflow has run).
@@ -141,6 +141,22 @@ Things to know:
 
 Building the exe yourself: `python scripts/build_exe.py --with-web`
 (see `clipforge-server.spec`).
+
+## What's new in v0.1.1
+
+- **Packaged executable** — `clipforge-server` one-file exe + Next.js web UI,
+  built by GitHub Actions on Windows and Linux, attached to each release.
+- **Video player + timeline trim editor** in clip review (draggable trim
+  handles, preview-trim, numeric fallback); `pending`/`queued` status
+  mismatch fixed; approve/reject now calls the real endpoint.
+- **Bulk/CSV scheduling** (dry-run preview, per-row errors, idempotent
+  re-import), **B-roll** (source-video / licensed-upload only, URLs
+  rejected), **brand kits** (2 built-in templates), **A/B title variants**,
+  and **retention analytics → next-clip feedback** (synthetic-data tested;
+  live platform feeds still need API keys).
+- Face tracking on a synthetic talking-head video did **not** engage
+  (Haar found 0 faces; centre-crop fallback ran) — real-human tracking
+  remains unverified. See `docs/face-tracking-test.md`.
 
 ## API endpoints
 

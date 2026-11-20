@@ -1,4 +1,4 @@
-"""ClipForge API v0.1.0 — FastAPI app.
+"""ClipForge API v0.1.1 — FastAPI app.
 
 Endpoints (all dry-run by default; nothing publishes live without an
 approved Post record, explicit credentials, and ``dry_run=false``):
@@ -247,7 +247,7 @@ def get_db():
         db.close()
 
 
-app = FastAPI(title="ClipForge API", version="0.1.0")
+app = FastAPI(title="ClipForge API", version="0.1.1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -380,7 +380,7 @@ def health():
     return {
         "status": "ok",
         "dry_run": settings.dry_run,
-        "version": "0.1.0",
+        "version": "0.1.1",
         "database_url_scheme": settings.database_url.split("://")[0],
     }
 

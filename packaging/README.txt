@@ -1,4 +1,4 @@
-ClipForge v0.1.0 — packaged release
+ClipForge v0.1.1 — packaged release
 =================================
 
 AI short-form clipping + per-platform SEO + approval-first publishing for
