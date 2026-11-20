@@ -1,13 +1,29 @@
-# ClipForge Release — packaged executables
+# ClipForge Release — packaged executables + desktop app
 #
-# Trigger: a `v*` tag push (e.g. v0.1.0) or manual dispatch.
+# Trigger: a `v*` tag push (e.g. v0.2.0) or manual dispatch.
 # Builds the one-file `clipforge-server` executable + the Next.js web UI
 # on windows-latest AND ubuntu-latest (an executable only runs on the
 # platform it was built on — the Windows .exe is NEVER built on Linux).
 # The two zips are attached to the GitHub Release for the tag.
 #
+# v0.2.0 adds the Tauri desktop app: `desktop-windows` builds the server
+# exe + static web export (`--with-web-static`), stages them into the
+# Tauri sidecar layout (`binaries/clipforge-server-<triple>[.exe]` +
+# `binaries/web/out`, see apps/desktop/README.md), runs `cargo tauri
+# build`, and uploads the MSI + NSIS setup exe. `desktop-linux` does the
+# same on ubuntu-latest (.deb + .AppImage). The `release` job attaches
+# the installers to the GitHub Release alongside the server zips.
+#
+# Honest limit: the Windows installer is NOT launch-tested on the
+# runner — a headless GUI launch there is unreliable, so the workflow
+# verifies the installer exists and that the sidecar exe + web/out are
+# inside the built MSI (admin-install extraction) instead of faking a
+# launch. The Linux .deb IS launch-tested under Xvfb locally before
+# tagging (see apps/desktop/README.md); a real Windows machine test is
+# still needed after the release.
+#
 # The release job only runs for tag pushes; a manual dispatch just
-# produces the zips as workflow artifacts (no Release is created).
+# produces the zips/installers as workflow artifacts (no Release is created).
 name: Release
 
 on:
@@ -95,9 +111,166 @@ jobs:
           path: dist/ClipForge-*-Linux.zip
           if-no-files-found: error
 
+  desktop-windows:
+    name: Windows desktop app
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Set up Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-tauri
+        run: cargo install tauri-cli --version ^2
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pyinstaller
+
+      - name: Build server exe + static web export
+        run: python scripts/build_exe.py --with-web-static
+
+      - name: Smoke-test the server exe
+        run: |
+          $exe = (Get-ChildItem dist/ClipForge-*-Windows/clipforge-server.exe).FullName
+          python scripts/smoke_exe.py $exe
+
+      # Tauri sidecar layout (see apps/desktop/README.md): the server exe
+      # must be named binaries/clipforge-server-x86_64-pc-windows-msvc.exe
+      # and the static export staged at binaries/web/out (bundled via
+      # bundle.resources); the shell passes it to the server as
+      # CLIPFORGE_WEB_OUT. WebView2 is preinstalled on windows-latest.
+      - name: Stage sidecar + web export for Tauri
+        run: |
+          $stage = Get-ChildItem dist/ClipForge-*-Windows -Directory | Select-Object -First 1
+          if (-not $stage) { throw "no ClipForge-*-Windows stage dir in dist/" }
+          New-Item -ItemType Directory -Force -Path apps/desktop/src-tauri/binaries/web | Out-Null
+          Copy-Item "$($stage.FullName)/clipforge-server.exe" apps/desktop/src-tauri/binaries/clipforge-server-x86_64-pc-windows-msvc.exe
+          Copy-Item "$($stage.FullName)/web/out" apps/desktop/src-tauri/binaries/web/out -Recurse
+          if (-not (Test-Path apps/desktop/src-tauri/binaries/web/out/index.html)) { throw "web/out/index.html missing after staging" }
+
+      - name: Build desktop app
+        run: cargo tauri build
+        working-directory: apps/desktop/src-tauri
+
+      # No headless launch test on the Windows runner (unreliable there —
+      # see the header comment): instead, prove the sidecar exe + web UI
+      # are actually inside the built MSI via admin-install extraction.
+      - name: Verify installer bundle contents
+        run: |
+          $msi = (Get-ChildItem apps/desktop/src-tauri/target/release/bundle/msi/*.msi | Select-Object -First 1).FullName
+          $nsis = Get-ChildItem apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+          if (-not $msi) { throw "no .msi in target/release/bundle/msi/" }
+          if (-not $nsis) { throw "no setup .exe in target/release/bundle/nsis/" }
+          $extract = Join-Path $env:TEMP "clipforge-msi-extract"
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          Start-Process msiexec.exe -ArgumentList @("/a", "`"$msi`"", "/qb", "TARGETDIR=`"$extract`"") -Wait -NoNewWindow
+          $sidecar = Get-ChildItem $extract -Recurse -Filter "clipforge-server-x86_64-pc-windows-msvc.exe" -ErrorAction SilentlyContinue
+          $webIndex = Get-ChildItem $extract -Recurse -Filter "index.html" -ErrorAction SilentlyContinue | Where-Object { $_.DirectoryName -match "web.out" }
+          if (-not $sidecar) { throw "sidecar exe NOT inside the MSI bundle" }
+          if (-not $webIndex) { throw "web/out/index.html NOT inside the MSI bundle" }
+          Write-Host "MSI contains sidecar: $($sidecar.FullName)"
+          Write-Host "MSI contains web UI: $($webIndex[0].FullName)"
+
+      - name: Upload desktop installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipForge-Desktop-Windows
+          path: |
+            apps/desktop/src-tauri/target/release/bundle/msi/*.msi
+            apps/desktop/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+  desktop-linux:
+    name: Linux desktop app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf build-essential
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Set up Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-tauri
+        run: cargo install tauri-cli --version ^2
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pyinstaller
+
+      - name: Build server binary + static web export
+        run: python scripts/build_exe.py --with-web-static
+
+      - name: Smoke-test the server binary
+        run: python scripts/smoke_exe.py dist/ClipForge-*-Linux/clipforge-server
+
+      - name: Stage sidecar + web export for Tauri
+        run: |
+          stage=$(echo dist/ClipForge-*-Linux)
+          test -d "$stage" || { echo "no ClipForge-*-Linux stage dir in dist/"; exit 1; }
+          mkdir -p apps/desktop/src-tauri/binaries/web
+          cp "$stage/clipforge-server" apps/desktop/src-tauri/binaries/clipforge-server-x86_64-unknown-linux-gnu
+          cp -r "$stage/web/out" apps/desktop/src-tauri/binaries/web/out
+          test -f apps/desktop/src-tauri/binaries/web/out/index.html || { echo "web/out/index.html missing after staging"; exit 1; }
+
+      - name: Build desktop app
+        run: cargo tauri build
+        working-directory: apps/desktop/src-tauri
+
+      # Linux bundles split the sidecar (/usr/bin) from the web export
+      # (<resources>/binaries/web/out) — verify both are in the .deb.
+      - name: Verify .deb bundle contents
+        run: |
+          deb=$(echo apps/desktop/src-tauri/target/release/bundle/deb/*.deb)
+          test -f "$deb" || { echo "no .deb in target/release/bundle/deb/"; exit 1; }
+          dpkg-deb -c "$deb" | grep -q 'usr/bin/clipforge-server' || { echo "sidecar NOT in .deb"; exit 1; }
+          dpkg-deb -c "$deb" | grep -q 'binaries/web/out/index.html' || { echo "web/out NOT in .deb"; exit 1; }
+          echo ".deb contains sidecar + web/out"
+
+      - name: Upload desktop packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipForge-Desktop-Linux
+          path: |
+            apps/desktop/src-tauri/target/release/bundle/deb/*.deb
+            apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
   release:
     name: Publish GitHub Release
-    needs: [build-windows, build-linux]
+    needs: [build-windows, build-linux, desktop-windows, desktop-linux]
     # Only for tag pushes — manual dispatch produces artifacts only.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
@@ -114,9 +287,26 @@ jobs:
           name: ClipForge-Linux
           path: release-assets
 
+      - name: Download Windows desktop installers
+        uses: actions/download-artifact@v4
+        with:
+          name: ClipForge-Desktop-Windows
+          path: release-assets/desktop-windows
+
+      - name: Download Linux desktop packages
+        uses: actions/download-artifact@v4
+        with:
+          name: ClipForge-Desktop-Linux
+          path: release-assets/desktop-linux
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: release-assets/ClipForge-*.zip
+          files: |
+            release-assets/ClipForge-*.zip
+            release-assets/desktop-windows/*.msi
+            release-assets/desktop-windows/*.exe
+            release-assets/desktop-linux/*.deb
+            release-assets/desktop-linux/*.AppImage
           generate_release_notes: true
           fail_on_unmatched_files: true
