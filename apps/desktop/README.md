@@ -149,11 +149,11 @@ inside the MSI (admin-install extraction) before publishing.
 **Headless smoke test (installed .deb, Xvfb — verified 2026-11-20)**
 
 ```sh
-sudo dpkg -i src-tauri/target/release/bundle/deb/ClipForge_0.2.0_amd64.deb
+sudo dpkg -i src-tauri/target/release/bundle/deb/ClipForge_0.2.1_amd64.deb
 Xvfb :99 -screen 0 1280x800x24 &
 XDG_DATA_HOME=/tmp/cf-appdata-v02 DISPLAY=:99 /usr/bin/clipforge-desktop &
 # wait ~25 s, then: curl 127.0.0.1:8000/ must return the dashboard HTML
-# (contains "Dashboard", no "API-only"), /health reports version 0.2.0,
+# (contains "Dashboard", no "API-only"), /health reports version 0.2.1,
 # and the server log (<data>/logs/clipforge-server.log) shows the
 # WebView fetching / + the JS chunks + /jobs/view/index.txt prefetch.
 # SIGTERM the app: it exits in ~1 s and the sidecar is gone (no orphan).

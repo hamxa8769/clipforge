@@ -1,4 +1,4 @@
-# ClipForge Web — v0.2.0
+# ClipForge Web — v0.2.1
 Next.js 15 + TypeScript + Tailwind review/scheduler dashboard (App Router).
 
 ## Run

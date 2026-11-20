@@ -8,11 +8,14 @@ captions, writes a different title / description / hashtag set for each
 platform, and publishes **only after a human approves** — through the
 platforms' official APIs, and nothing else.
 
-> **Status: v0.2.0 — early alpha.** The clipping pipeline, review UI, and
+> **Status: v0.2.1 — early alpha.** The clipping pipeline, review UI, and
 > publishing adapters are under active development. Nothing in this repo
 > posts to any platform automatically, and `DRY_RUN=true` is the default.
-> v0.2.0 adds a single double-click desktop app (Windows installer) with
-> the server built in — no terminal, no Node, no separate server window.
+> v0.2.1 fixes the desktop app showing as a plain unstyled page in v0.2.0
+> (the stylesheet was never bundled) — the app now shows its real dark
+> theme. v0.2.0 added the single double-click desktop app (Windows
+> installer) with the server built in — no terminal, no Node, no separate
+> server window.
 
 ---
 
@@ -100,8 +103,8 @@ ruff check . && ruff format --check .
 
 ## Download the desktop app (Windows — no terminal, no Node)
 
-**Download `ClipForge-0.2.0-setup.exe` (or the `.msi`) from
-[GitHub Releases](https://github.com/hamxa8769/clipforge/releases/tag/v0.2.0),
+**Download `ClipForge-0.2.1-setup.exe` (or the `.msi`) from
+[GitHub Releases](https://github.com/hamxa8769/clipforge/releases/tag/v0.2.1),
 double-click it, done.** The app starts its own built-in server
 automatically — there is no terminal window, no Node.js install, and no
 separate server to start. Logs and data live in
@@ -115,7 +118,7 @@ app still runs (review / SEO only) and tells you so.
 
 Every release ships a ready-to-run zip — no Python install required:
 
-- [GitHub Releases](https://github.com/hamxa8769/clipforge/releases/tag/v0.2.0)
+- [GitHub Releases](https://github.com/hamxa8769/clipforge/releases/tag/v0.2.1)
   — `ClipForge-vX.Y.Z-Windows.zip` or `ClipForge-vX.Y.Z-Linux.zip`
   (published with each `v*` release; the asset appears on the release
   page once the release workflow has run).
@@ -156,6 +159,19 @@ Things to know:
 
 Building the exe yourself: `python scripts/build_exe.py --with-web`
 (see `clipforge-server.spec`).
+
+## What's new in v0.2.1
+
+- **Desktop UI styling fix** — v0.2.0 on Windows opened as a plain
+  unstyled page (serif font, blue underlined links, white background)
+  because the app layout never imported its stylesheet, so Tailwind CSS
+  was never bundled into the static export. One-line fix
+  (`import "./globals.css"` in `apps/web/app/layout.tsx`); the static
+  export now ships a 14 KB stylesheet linked on every page, and the
+  desktop app shows the intended dark theme with cards and navigation.
+  Verified with screenshots of all five main pages.
+- If you have v0.2.0 installed, just install v0.2.1 over it — no need to
+  uninstall first.
 
 ## What's new in v0.2.0
 
