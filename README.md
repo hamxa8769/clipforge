@@ -96,6 +96,52 @@ python3 -m pytest tests/ -q
 ruff check . && ruff format --check .
 ```
 
+## Download the executable (no Python needed)
+
+Every release ships a ready-to-run zip — no Python install required:
+
+- [GitHub Releases](https://github.com/hamxa8769/clipforge/releases/tag/v0.1.0)
+  — `ClipForge-vX.Y.Z-Windows.zip` or `ClipForge-vX.Y.Z-Linux.zip`
+  (published with each `v*` release; the asset appears on the release
+  page once the release workflow has run).
+
+Each zip contains:
+
+| File | What it is |
+|---|---|
+| `clipforge-server` / `clipforge-server.exe` | One-file API server — runs without Python |
+| `web/` | Web review UI (Next.js standalone build) |
+| `start-server.bat` / `start-server.sh` | Start the API server |
+| `start-web.bat` / `start-web.sh` | Start the web UI |
+| `README.txt` | Setup instructions |
+| `.env.example` | Copy to `.env` and fill in what you need |
+
+```text
+1. Unzip anywhere.
+2. Start the API server:  double-click start-server.bat (Windows)
+                          or ./start-server.sh (Linux)
+   → API at http://127.0.0.1:8000 (docs at /docs).
+3. Start the web UI:      double-click start-web.bat / ./start-web.sh
+   → http://localhost:3000. Keep the API server running too.
+```
+
+Things to know:
+
+- **FFmpeg is still required separately** (and on `PATH`) for clipping,
+  transcription, and rendering — the exe does not bundle it.
+- **The web UI needs Node.js 20+** to run (`start-web`). The API server
+  does not. The Next.js app is server-rendered, so it cannot run inside
+  the Python exe; if you place a static export of the web app at
+  `web/out/` next to the exe, the exe *will* serve it at
+  `http://127.0.0.1:8000/` instead of the API-only status page.
+- First run creates a `data/` folder next to the exe with `clipforge.db`
+  (SQLite) — your jobs, clips, and approvals live there.
+- `DRY_RUN=true` is the default: nothing publishes live, and every post
+  still waits for a human approve in the web UI.
+
+Building the exe yourself: `python scripts/build_exe.py --with-web`
+(see `clipforge-server.spec`).
+
 ## API endpoints
 
 | Method | Path | What it does |
