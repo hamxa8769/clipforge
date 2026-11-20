@@ -6,6 +6,8 @@
 
 use serde::Serialize;
 use std::process::Command;
+#[cfg(windows)]
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FfmpegStatus {
