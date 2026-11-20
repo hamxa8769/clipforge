@@ -46,9 +46,6 @@ jobs:
   web:
     name: Web (Next.js build)
     runs-on: ubuntu-latest
-    # Skip until the web app has source to build; activates automatically
-    # when apps/web gains an app/ or pages/ directory or a next.config.*.
-    if: ${{ hashFiles('apps/web/app/**', 'apps/web/pages/**', 'apps/web/next.config.*') != '' }}
     defaults:
       run:
         working-directory: apps/web
