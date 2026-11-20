@@ -316,11 +316,15 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          # upload-artifact v4 preserves the leaf directories (msi/,
+          # nsis/, deb/, appimage/) inside the artifact, so the
+          # installers are nested one level below release-assets/...
+          # — match them recursively.
           files: |
             release-assets/ClipForge-*.zip
-            release-assets/desktop-windows/*.msi
-            release-assets/desktop-windows/*.exe
-            release-assets/desktop-linux/*.deb
-            release-assets/desktop-linux/*.AppImage
+            release-assets/desktop-windows/**/*.msi
+            release-assets/desktop-windows/**/*.exe
+            release-assets/desktop-linux/**/*.deb
+            release-assets/desktop-linux/**/*.AppImage
           generate_release_notes: true
           fail_on_unmatched_files: true
