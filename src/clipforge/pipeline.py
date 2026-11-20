@@ -111,7 +111,7 @@ def run_pipeline(
 
     return {
         "job_id": job_id,
-        "engine": "clipforge 0.2.1",
+        "engine": "clipforge 0.3.0",
         "elapsed_s": round(time.time() - started, 2),
         "source": source.to_dict(),
         "transcript": {

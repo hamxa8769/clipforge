@@ -53,6 +53,9 @@ yarn-error.log*
 *.key
 credentials*.json
 service-account*.json
+# Encrypted token/credential store + app settings (live secrets, machine key)
+data/secrets/
+data/settings.json
 
 # User media & generated outputs
 data/uploads/

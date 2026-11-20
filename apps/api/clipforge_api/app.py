@@ -1,12 +1,19 @@
-"""ClipForge API v0.2.1 — FastAPI app.
+"""ClipForge API v0.3.0 — FastAPI app.
 
 Endpoints (all dry-run by default; nothing publishes live without an
 approved Post record, explicit credentials, and ``dry_run=false``):
 
   GET  /health
+  GET  /dependencies                 (doctor: tools / keys / flags present?)
   POST /jobs                         (own_content declaration required)
+  POST /jobs/upload                  (multipart file upload → job)
   GET  /jobs | GET /jobs/{id} | GET /jobs/{id}/candidates
+  GET  /jobs/{id}/logs
+  POST /jobs/{id}/run | retry | cancel
+                                     (live workflow: stage history, progress,
+                                      ETA, retry/cancel)
   POST /jobs/{id}/candidates/{n}/approve | reject | trim
+  GET  /clips/{candidate_id}/seo     (stored per-platform SEO variants)
   GET  /media/clips/{job_id}/{filename} | /media/uploads/{filename}
                                      (serve rendered clips / source uploads
                                       for the web player's <video> tag)
@@ -15,9 +22,26 @@ approved Post record, explicit credentials, and ``dry_run=false``):
   POST /posts/{id}/approve | POST /posts/{id}/publish (dry-run default)
   GET  /posts/{id}
   GET  /accounts | POST /accounts    (token stored as env-var NAME only)
+  GET  /channels                     (per-platform connection status)
+  GET  /auth/{platform}/start        (OAuth authorize URL)
+  GET  /auth/callback/{platform}     (OAuth callback — exchanges the code)
+  POST /channels/{platform}/refresh  (refresh / extend the stored token)
+  POST /channels/{platform}/disconnect
+  GET  /settings | PUT /settings     (masked credentials + preferences)
+  POST /settings/test-connection/{service}  (live auth check per service)
   GET  /monetization                 (tracker; ?platform=&subs=&...)
   GET  /analytics | GET /analytics/{account_id}
   POST /scheduler/run                (run due posts; dry-run default)
+  GET  /worker/queue | POST /worker/run-next
+                                     (background worker: running / queued /
+                                      next / recent runs)
+  GET  /automation/feed | GET /automation/rules | PUT /automation/rules
+  POST /automation/rules | PATCH /automation/rules/{id}
+  POST /automation/run
+  POST /automation/pick-next/{job_id}
+                                     (automation rules + history)
+  GET  /scheduler/status             (runner state: running / last run /
+                                      due now / last error)
 
 Run:  PYTHONPATH=src uvicorn clipforge_api.app:app --port 8000
       (from apps/api; see requirements.txt)
@@ -41,13 +65,14 @@ for _candidate in (
     if (_candidate / "clipforge").is_dir() and str(_candidate) not in sys.path:
         sys.path.insert(0, str(_candidate))
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from clipforge import __version__ as _VERSION  # noqa: F401  (package version)
+from clipforge import automation
 from clipforge.abtest import (
     ABTestError,
     assign_variant_to_post,
@@ -65,6 +90,22 @@ from clipforge.abtest import (
     variant_results as ab_variant_results,
 )
 from clipforge.analytics import ingest_all, retention_signals
+from clipforge.auth import (
+    OAuthError,
+    SettingsStore,
+    StateStore,
+    TokenRecord,
+    TokenStore,
+)
+from clipforge.auth.channels import all_channels, channel_status
+from clipforge.auth.oauth import (
+    build_authorize_url,
+    exchange_code,
+    fetch_profile,
+    refresh_access_token,
+)
+from clipforge.auth.providers import PLATFORMS, get_provider, redirect_uri
+from clipforge.auth.secrets import SecretStore
 from clipforge.brandkits import (
     BrandKitError,
     BrandKitSpec,
@@ -78,17 +119,23 @@ from clipforge.config import settings
 from clipforge.csv_import import import_csv as csv_import
 from clipforge.db import (
     AnalyticsSnapshot,
+    AutomationEvent,
+    AutomationRule,
     BrandKit,
     BrollAsset,
+    CandidateSeo,
     ClipCandidate,
     Job,
+    JobStageEvent,
     JobStatus,
     MonetizationProgress,
     Post,
     PostStatus,
     RetentionPoint,
+    SchedulerRun,
     SocialAccount,
     TitleVariant,
+    WorkerRun,
     init_db,
     session_factory,
 )
@@ -105,8 +152,16 @@ from clipforge.retention import (
     point_to_dict,
     store_retention_point,
 )
-from clipforge.scheduler import run_due_posts
+from clipforge.scheduler import due_posts, run_due_posts
 from clipforge.seo import generate_all as generate_all_seo
+from clipforge.worker import RUNNABLE_STATUSES, queue_summary, run_job, run_next_queued
+from clipforge.workflow import (
+    check_dependencies,
+    estimate_eta_s,
+    score_band,
+    stage_event_out,
+    stage_events_for,
+)
 
 
 # ------------------------------------------------------------------ schemas
@@ -117,6 +172,10 @@ class JobCreate(BaseModel):
     title: str = ""
     own_content: bool | None = None
     own_content_declaration: bool | None = None
+    # Worker options (stored on job.meta_json; see clipforge.worker).
+    transcript_text: str | None = None  # deterministic fallback transcript
+    top_n: int = Field(default=3, ge=1, le=10)
+    caption_style: str = "bold-pop"
 
     def declared(self) -> bool:
         return bool(self.own_content or self.own_content_declaration)
@@ -234,6 +293,20 @@ class AccountCreate(BaseModel):
     token_env_var: str = ""  # NAME of the env var only — never a token value
 
 
+class SettingsUpdate(BaseModel):
+    """Partial settings update. Omitted = keep; "" on a secret = clear it."""
+
+    dry_run: bool | None = None
+    default_privacy: dict[str, str] | None = None
+    default_platforms: list[str] | None = None
+    llm_provider: str | None = None
+    llm_base_url: str | None = None
+    llm_model: str | None = None
+    llm_api_key: str | None = None  # None = keep, "" = clear, value = set
+    # {platform: {"client_id": ..., "client_secret": ...}} — same semantics.
+    credentials: dict[str, dict[str, str | None]] | None = None
+
+
 # ------------------------------------------------------------------ app setup
 _engine = init_db()
 _Session = session_factory()
@@ -247,7 +320,7 @@ def get_db():
         db.close()
 
 
-app = FastAPI(title="ClipForge API", version="0.2.1")
+app = FastAPI(title="ClipForge API", version="0.3.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -257,8 +330,11 @@ app.add_middleware(
 )
 
 
-def _job_out(job: Job, db: Session) -> dict:
-    return {
+def _job_out(job: Job, db: Session, detail: bool = False) -> dict:
+    """Job summary. ``detail=True`` adds the live-workflow view: stage
+    history, worker runs, alternates below the score threshold."""
+    meta = dict(job.meta_json or {})
+    out: dict = {
         "id": job.id,
         "title": job.title,
         "source": job.source_url or job.source_path or "",
@@ -268,7 +344,59 @@ def _job_out(job: Job, db: Session) -> dict:
         "error": job.error,
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "candidates": db.query(ClipCandidate).filter_by(job_id=job.id).count(),
+        # Live workflow fields (v0.3.0) — always present, null/0 when idle.
+        "stage": meta.get("stage"),
+        "progress_pct": float(meta.get("progress_pct") or 0.0),
+        "eta_s": estimate_eta_s(db, job),
+        "demo": bool(meta.get("demo", False)),
+        "blocked_by": meta.get("blocked_by"),
     }
+    if detail:
+        events = stage_events_for(db, job.id)
+        out["stages"] = [stage_event_out(e) for e in events]
+        runs = (
+            db.query(WorkerRun)
+            .filter_by(job_id=job.id)
+            .order_by(WorkerRun.started_at.desc())
+            .limit(5)
+            .all()
+        )
+        out["worker_runs"] = [
+            {
+                "id": r.id,
+                "status": r.status,
+                "outcome": r.outcome,
+                "error": r.error,
+                "duration_s": r.duration_s,
+                "started_at": r.started_at.isoformat() if r.started_at else None,
+                "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+            }
+            for r in runs
+        ]
+        # Frontend contract (docs/API-CONTRACT.md §2): which stage failed
+        # (if any), and the run's real start / finish / duration. All
+        # null when the job never ran.
+        failed_stage = None
+        for event in reversed(events):
+            if event.status in {"failed", "blocked"}:
+                failed_stage = event.stage
+                break
+        latest_run = runs[0] if runs else None
+        out["failed_stage"] = failed_stage
+        out["started_at"] = (
+            latest_run.started_at.isoformat() if latest_run and latest_run.started_at else None
+        )
+        out["finished_at"] = (
+            latest_run.finished_at.isoformat() if latest_run and latest_run.finished_at else None
+        )
+        out["duration_s"] = latest_run.duration_s if latest_run else None
+        alternates: list[dict] = []
+        for event in reversed(events):
+            if event.stage == "score" and (event.detail_json or {}).get("alternates"):
+                alternates = (event.detail_json or {})["alternates"]
+                break
+        out["alternates"] = alternates
+    return out
 
 
 def _candidate_out(c: ClipCandidate, keyword: str) -> dict:
@@ -280,12 +408,17 @@ def _candidate_out(c: ClipCandidate, keyword: str) -> dict:
         "job_id": c.job_id,
         "n": c.n,
         "score": c.score,
+        "score_band": score_band(c.score),
         "hook_rating": c.hook_rating,
         "hook_line": c.hook_line,
         "reason": c.reason,
         "transcript_excerpt": c.transcript_excerpt,
         "start_s": c.trim_start_s if c.trim_start_s is not None else c.start_s,
         "end_s": c.trim_end_s if c.trim_end_s is not None else c.end_s,
+        # Original span (the trim endpoint validates against it, so the
+        # UI can widen a previous trim back out — contract gap, docs/api.md).
+        "orig_start_s": c.start_s,
+        "orig_end_s": c.end_s,
         "status": c.status,
         "file_path": c.file_path,
         "seo": {
@@ -375,13 +508,45 @@ def _get_or_404(db: Session, model, obj_id: str, name: str):
 
 
 # ------------------------------------------------------------------ health
+def _secrets() -> SecretStore:
+    return SecretStore(_data_dir())
+
+
+def _settings_store() -> SettingsStore:
+    return SettingsStore(_data_dir(), _secrets())
+
+
+def _effective_dry_run() -> bool:
+    """Settings-page override wins; otherwise CLIPFORGE_DRY_RUN decides."""
+    return _settings_store().effective_dry_run(settings.dry_run)
+
+
 @app.get("/health")
 def health():
     return {
         "status": "ok",
-        "dry_run": settings.dry_run,
-        "version": "0.2.1",
+        "dry_run": _effective_dry_run(),
+        "version": "0.3.0",
         "database_url_scheme": settings.database_url.split("://")[0],
+    }
+
+
+@app.get("/dependencies")
+def get_dependencies():
+    """Doctor check: every tool / package / key the pipeline may need.
+
+    Presence only — no secret *value* is ever returned. A job blocked
+    on a missing dependency names the same ``code`` you see here
+    (e.g. ``ffmpeg_missing``, ``transcription_backend_missing``), so
+    the UI can point at exactly what to install or set. The
+    ``doctor``-command equivalent from artbyjazi/autoclip and
+    ghost1412/shortsflow (see docs/REUSE.md).
+    """
+    deps = [d.to_dict() for d in check_dependencies()]
+    return {
+        "dependencies": deps,
+        "missing": [d for d in deps if not d["available"]],
+        "all_available": all(d["available"] for d in deps),
     }
 
 
@@ -440,6 +605,9 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)):
         and payload.source_url is None
     ):
         raise HTTPException(422, "local jobs need source_path (or source_url)")
+    meta: dict = {"top_n": payload.top_n, "caption_style": payload.caption_style}
+    if payload.transcript_text:
+        meta["transcript_text"] = payload.transcript_text
     job = Job(
         source_type=payload.source_type,
         source_url=payload.source_url,
@@ -447,6 +615,53 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)):
         title=payload.title,
         own_content=payload.declared(),
         status=JobStatus.PENDING.value,
+        meta_json=meta,
+    )
+    db.add(job)
+    db.commit()
+    return _job_out(job, db)
+
+
+@app.post("/jobs/upload", status_code=201)
+async def upload_job(
+    file: UploadFile = File(...),
+    title: str = Form(default=""),
+    own_content_declaration: bool = Form(default=False),
+    transcript_text: str | None = Form(default=None),
+    top_n: int = Form(default=3),
+    db: Session = Depends(get_db),
+):
+    """Upload a source video file and create a job for it (ingest stage).
+
+    Only .mp4/.mov, max 10 GiB (same caps as local ingest). The file is
+    stored under ``data/uploads/`` with a random prefix; the job's
+    ``source_path`` points at it. YouTube uploads are not accepted
+    here — use POST /jobs with source_type=youtube + the declaration.
+    """
+    from clipforge.ingest import MAX_SOURCE_BYTES
+
+    name = Path(file.filename or "upload").name
+    if Path(name).suffix.lower() not in {".mp4", ".mov"}:
+        raise HTTPException(422, "only .mp4 / .mov uploads are accepted")
+    raw = await file.read()
+    if len(raw) > MAX_SOURCE_BYTES:
+        raise HTTPException(422, "file exceeds the 10 GiB source cap")
+    import uuid as _uuid
+
+    uploads = _data_dir() / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+    stored = uploads / f"{_uuid.uuid4().hex[:12]}_{name}"
+    stored.write_bytes(raw)
+    meta: dict = {"top_n": max(1, min(10, top_n)), "caption_style": "bold-pop"}
+    if transcript_text:
+        meta["transcript_text"] = transcript_text
+    job = Job(
+        source_type="local",
+        source_path=str(stored),
+        title=title,
+        own_content=bool(own_content_declaration),
+        status=JobStatus.PENDING.value,
+        meta_json=meta,
     )
     db.add(job)
     db.commit()
@@ -460,7 +675,131 @@ def list_jobs(db: Session = Depends(get_db)):
 
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str, db: Session = Depends(get_db)):
-    return _job_out(_get_or_404(db, Job, job_id, "job"), db)
+    return _job_out(_get_or_404(db, Job, job_id, "job"), db, detail=True)
+
+
+@app.get("/jobs/{job_id}/logs")
+def get_job_logs(job_id: str, db: Session = Depends(get_db)):
+    """Per-stage run log for a job (docs/API-CONTRACT.md §2).
+
+    One entry per stage event, oldest first: ``{ts, stage, level,
+    message}``. ``level`` is ``error`` for failed / blocked stages,
+    ``info`` otherwise. Worker-run start/finish lines are included so
+    the log also shows the run outcome and duration. Empty ``logs``
+    when the job never ran — the job page then shows the single
+    ``error`` string instead.
+    """
+    job = _get_or_404(db, Job, job_id, "job")
+    logs: list[dict] = []
+    for event in stage_events_for(db, job.id):
+        logs.append(
+            {
+                "ts": event.created_at.isoformat() if event.created_at else None,
+                "stage": event.stage,
+                "level": "error" if event.status in {"failed", "blocked"} else "info",
+                "message": event.message + (f" [{event.error_code}]" if event.error_code else ""),
+            }
+        )
+    for run in (
+        db.query(WorkerRun).filter_by(job_id=job.id).order_by(WorkerRun.started_at.asc()).all()
+    ):
+        logs.append(
+            {
+                "ts": run.started_at.isoformat() if run.started_at else None,
+                "stage": "worker",
+                "level": "info",
+                "message": f"worker run started ({run.id})",
+            }
+        )
+        if run.finished_at:
+            logs.append(
+                {
+                    "ts": run.finished_at.isoformat(),
+                    "stage": "worker",
+                    "level": "error" if run.status in {"failed", "blocked"} else "info",
+                    "message": f"worker run {run.status}: {run.outcome}",
+                }
+            )
+    return {"job_id": job.id, "logs": logs}
+
+
+@app.post("/jobs/{job_id}/run")
+def run_job_endpoint(job_id: str, db: Session = Depends(get_db)):
+    """Run a job through the worker now (synchronous) and return its detail.
+
+    Only pending / queued / failed / blocked jobs can run; anything
+    else is 409. A missing dependency leaves the job ``blocked`` with
+    ``blocked_by`` naming it — the response is still 200 with the job
+    detail, because the block is a state, not a request error.
+    """
+    job = _get_or_404(db, Job, job_id, "job")
+    if job.status not in RUNNABLE_STATUSES:
+        raise HTTPException(
+            409,
+            f"job is '{job.status}' — only {sorted(RUNNABLE_STATUSES)} jobs can run",
+        )
+    run_job(db, job_id)
+    db.refresh(job)
+    return _job_out(job, db, detail=True)
+
+
+@app.post("/jobs/{job_id}/retry")
+def retry_job(job_id: str, db: Session = Depends(get_db)):
+    """Reset a failed / blocked job to pending and run it again.
+
+    Old candidates + stored SEO are dropped (they are re-derived);
+    stage history and worker runs are kept as the audit trail. A retry
+    resumes scoring from the stage artifact when one exists
+    (``data/jobs/<id>/candidates.json``) and transcription from the
+    sha256 transcript cache — it never re-does completed work blindly.
+    """
+    job = _get_or_404(db, Job, job_id, "job")
+    if job.status not in {JobStatus.FAILED.value, JobStatus.BLOCKED.value}:
+        raise HTTPException(
+            409,
+            f"job is '{job.status}' — only failed / blocked jobs can be retried",
+        )
+    cand_ids = [c.id for c in db.query(ClipCandidate).filter_by(job_id=job.id).all()]
+    if cand_ids:
+        db.query(CandidateSeo).filter(CandidateSeo.clip_candidate_id.in_(cand_ids)).delete(
+            synchronize_session=False
+        )
+    db.query(ClipCandidate).filter_by(job_id=job.id).delete()
+    job.status = JobStatus.PENDING.value
+    job.error = None
+    job.meta_json = {
+        k: v
+        for k, v in (dict(job.meta_json or {}).items())
+        if k in {"top_n", "caption_style", "transcript_text"}
+    }
+    db.commit()
+    run_job(db, job_id)
+    db.refresh(job)
+    return _job_out(job, db, detail=True)
+
+
+@app.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str, db: Session = Depends(get_db)):
+    """Cancel a job that has not started (or that failed / blocked).
+
+    A running in-process job cannot be interrupted mid-request; cancel
+    applies to pending / queued / failed / blocked jobs. Any orphan
+    ``running`` worker run for the job is closed as cancelled.
+    """
+    job = _get_or_404(db, Job, job_id, "job")
+    if job.status not in {
+        JobStatus.PENDING.value,
+        JobStatus.QUEUED.value,
+        JobStatus.FAILED.value,
+        JobStatus.BLOCKED.value,
+    }:
+        raise HTTPException(409, f"job is '{job.status}' — cannot cancel from here")
+    job.status = JobStatus.CANCELLED.value
+    db.query(WorkerRun).filter_by(job_id=job.id, status="running").update(
+        {"status": "cancelled", "outcome": "cancelled by user"}
+    )
+    db.commit()
+    return _job_out(job, db, detail=True)
 
 
 @app.get("/jobs/{job_id}/candidates")
@@ -484,7 +823,44 @@ def approve_candidate(job_id: str, n: int, db: Session = Depends(get_db)):
     cand = _candidate_by_n(db, job_id, n)
     cand.status = "approved"
     db.commit()
-    return {"id": cand.id, "n": cand.n, "status": cand.status}
+    job = db.get(Job, job_id)
+    # The review stage completes on first approval: the job is ready
+    # to schedule. Record it in the stage history (progress → 100).
+    if job is not None and job.status == JobStatus.REVIEW.value:
+        job.status = JobStatus.READY.value
+        db.add(
+            JobStageEvent(
+                job_id=job.id,
+                stage="review",
+                status="done",
+                progress_pct=100.0,
+                message=f"candidate {n} approved — job ready to schedule",
+            )
+        )
+        meta = dict(job.meta_json or {})
+        meta.update({"stage": "review", "progress_pct": 100.0})
+        job.meta_json = meta
+        db.commit()
+    # Automation rules fire here (SEO gen + auto-queue). They never
+    # raise — a rule failure is logged, approval still stands.
+    auto = automation.on_candidate_approved(db, cand)
+    return {"id": cand.id, "n": cand.n, "status": cand.status, "automation": auto}
+
+
+@app.get("/clips/{candidate_id}/seo")
+def get_candidate_seo(candidate_id: str, db: Session = Depends(get_db)):
+    """Stored per-platform SEO variants for a clip.
+
+    Written by the worker (``seo`` stage) and by the
+    ``auto_seo_on_approve`` rule. Empty ``{}`` when SEO was never
+    generated for this clip — the review UI then falls back to the
+    on-the-fly variants in ``GET /jobs/{id}/candidates``.
+    """
+    cand = _get_or_404(db, ClipCandidate, candidate_id, "clip candidate")
+    return {
+        "clip_candidate_id": cand.id,
+        "seo": automation.seo_for_candidate(db, cand),
+    }
 
 
 @app.post("/jobs/{job_id}/candidates/{n}/reject")
@@ -612,11 +988,11 @@ def _publish_post(post: Post, dry_run: bool, db: Session) -> dict:
         raise HTTPException(409, f"post is '{post.status}' — approve it before publishing")
     if post.status in {PostStatus.DRAFT.value, PostStatus.PENDING_APPROVAL.value}:
         raise HTTPException(409, "Approval-first: approve this post before publishing it")
-    if not dry_run and settings.dry_run:
+    if not dry_run and _effective_dry_run():
         raise HTTPException(
             409,
-            "Live publishing is disabled: CLIPFORGE_DRY_RUN=true. "
-            "Set CLIPFORGE_DRY_RUN=false AND provide credentials to go live.",
+            "Live publishing is disabled: dry-run is on. "
+            "Turn dry-run off in Settings AND provide credentials to go live.",
         )
     seo = post.seo_json or {}
     title = seo.get("title") or seo.get("caption") or "ClipForge clip"
@@ -709,6 +1085,264 @@ def create_account(payload: AccountCreate, db: Session = Depends(get_db)):
     return _account_out(account)
 
 
+# ------------------------------------------------- channels / OAuth / settings
+# OAuth state tokens are single-use and in-memory (process-local sidecar).
+_OAUTH_STATES = StateStore()
+
+
+def _require_platform(platform: str):
+    try:
+        return get_provider(platform)
+    except ValueError:
+        raise HTTPException(404, f"unknown platform: {platform}") from None
+
+
+def _callback_page(*, title: str, message: str, ok: bool) -> HTMLResponse:
+    """Plain result page the platform redirects the browser to.
+
+    The browser lands here after granting (or refusing) access; the page
+    just says what happened — the user closes it and returns to ClipForge.
+    """
+    colour = "#22c55e" if ok else "#ef4444"
+    return HTMLResponse(
+        f"""<!doctype html><html><head><meta charset="utf-8">
+<title>ClipForge — {title}</title></head>
+<body style="font-family:system-ui,sans-serif;background:#111;color:#eee;
+padding:3rem 1.5rem;text-align:center">
+<h1 style="color:{colour}">{title}</h1><p>{message}</p>
+<p>You can close this window and return to ClipForge.</p>
+</body></html>""",
+        status_code=200 if ok else 400,
+    )
+
+
+@app.get("/channels")
+def list_channels(db: Session = Depends(get_db)):
+    """One status card per platform, from the real backend — never hardcoded.
+
+    CANONICAL channel-status endpoint (v0.3.0). GET /accounts is the
+    legacy account-record endpoint (list/create SocialAccount rows) and
+    stays working for compatibility, but the Channels page and any new
+    client must use /channels: only it knows OAuth token state, expiry,
+    scopes granted, daily caps, and the review/audit notice.
+    """
+    return all_channels(secrets=_secrets(), db=db)
+
+
+@app.get("/channels/{platform}")
+def get_channel(platform: str, db: Session = Depends(get_db)):
+    _require_platform(platform)
+    return channel_status(platform, secrets=_secrets(), db=db)
+
+
+@app.get("/auth/{platform}/start")
+def start_oauth(platform: str):
+    """Return the platform authorize URL for the Connect button to open.
+
+    409 when the platform app credentials are not configured yet — the
+    Settings page is where client id/secret are saved first.
+    """
+    spec = _require_platform(platform)
+    store = _settings_store()
+    client_id = store.get_credential(platform, "client_id")
+    if not client_id:
+        raise HTTPException(
+            409,
+            f"{spec.display_name} is not configured yet — save the app client id "
+            "and secret in Settings first (the redirect URI shown there must "
+            "also be registered in the platform app).",
+        )
+    state = _OAUTH_STATES.new(platform)
+    return {
+        "authorize_url": build_authorize_url(
+            platform,
+            client_id=client_id,
+            redirect_uri=redirect_uri(platform),
+            state=state,
+        ),
+        "redirect_uri": redirect_uri(platform),
+        "state": state,
+    }
+
+
+@app.get("/auth/callback/{platform}")
+def oauth_callback(
+    platform: str,
+    code: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    """Platform redirect target: exchange the code, store the token, done."""
+    spec = _require_platform(platform)
+    if error:
+        return _callback_page(
+            title="Connection refused",
+            message=f"{spec.display_name} refused the connection ({error}).",
+            ok=False,
+        )
+    if not code or not state:
+        return _callback_page(
+            title="Connection failed",
+            message="The platform redirected back without a code — try Connect again.",
+            ok=False,
+        )
+    store = _settings_store()
+    try:
+        _OAUTH_STATES.consume(state, platform)
+        client_id = store.get_credential(platform, "client_id")
+        client_secret = store.get_credential(platform, "client_secret")
+        if not client_id or not client_secret:
+            raise OAuthError(
+                "not_configured",
+                f"{spec.display_name} app credentials are missing — save them in Settings first.",
+            )
+        token = exchange_code(
+            platform,
+            code,
+            client_id=client_id,
+            client_secret=client_secret,
+            redirect_uri=redirect_uri(platform),
+        )
+    except OAuthError as exc:
+        return _callback_page(title="Connection failed", message=exc.message, ok=False)
+    record = TokenRecord.from_token_response(platform, token)
+    try:  # profile is best-effort: a token without a name still connects
+        profile = fetch_profile(platform, record.access_token)
+        record.account_name = profile.get("account_name") or ""
+        record.avatar_url = profile.get("avatar_url") or ""
+        record.account_ref = profile.get("account_ref") or ""
+    except OAuthError:
+        pass
+    TokenStore(_secrets()).save(record)
+    account = (
+        db.query(SocialAccount)
+        .filter_by(provider=platform)
+        .order_by(SocialAccount.created_at.desc())
+        .first()
+    )
+    if account is None:
+        account = SocialAccount(provider=platform)
+        db.add(account)
+    account.label = record.account_name or account.label or spec.display_name
+    account.account_ref = record.account_ref or account.account_ref
+    account.scopes = record.scopes
+    account.status = "active"
+    account.token_env_var = ""  # OAuth tokens live in the encrypted store now
+    db.commit()
+    name = record.account_name or spec.display_name
+    return _callback_page(
+        title=f"{spec.display_name} connected",
+        message=f"Connected as {name}.",
+        ok=True,
+    )
+
+
+@app.post("/channels/{platform}/refresh")
+def refresh_channel(platform: str, db: Session = Depends(get_db)):
+    """Refresh (YouTube/TikTok) or extend (Meta, 60-day long-lived) the token."""
+    spec = _require_platform(platform)
+    secrets = _secrets()
+    record = TokenStore(secrets).load(platform)
+    if record is None:
+        raise HTTPException(404, f"{spec.display_name} is not connected.")
+    store = _settings_store()
+    try:
+        token = refresh_access_token(
+            platform,
+            client_id=store.get_credential(platform, "client_id") or "",
+            client_secret=store.get_credential(platform, "client_secret") or "",
+            refresh_token=record.refresh_token,
+            access_token=record.access_token,
+        )
+    except OAuthError as exc:
+        raise HTTPException(502, exc.message) from exc
+    new_record = TokenRecord.from_token_response(platform, token)
+    # Providers often omit the refresh token on refresh — keep the old one.
+    new_record.refresh_token = new_record.refresh_token or record.refresh_token
+    new_record.account_name = record.account_name
+    new_record.avatar_url = record.avatar_url
+    new_record.account_ref = record.account_ref
+    TokenStore(secrets).save(new_record)
+    return channel_status(platform, secrets=secrets, db=db)
+
+
+@app.post("/channels/{platform}/disconnect")
+def disconnect_channel(platform: str, db: Session = Depends(get_db)):
+    """Delete the stored token. The account row stays, marked disconnected."""
+    _require_platform(platform)
+    secrets = _secrets()
+    TokenStore(secrets).delete(platform)
+    account = (
+        db.query(SocialAccount)
+        .filter_by(provider=platform)
+        .order_by(SocialAccount.created_at.desc())
+        .first()
+    )
+    if account is not None:
+        account.status = "disconnected"
+        db.commit()
+    return channel_status(platform, secrets=secrets, db=db)
+
+
+@app.get("/settings")
+def get_settings():
+    """Masked credentials + preferences + environment status. No secret values."""
+    return _settings_store().public_view(env_dry_run=settings.dry_run)
+
+
+@app.put("/settings")
+def update_settings(payload: SettingsUpdate):
+    """Save preferences / credentials. Returns the masked public view."""
+    store = _settings_store()
+    current = store.load()
+    if payload.dry_run is not None:
+        current.dry_run = payload.dry_run
+    if payload.default_privacy is not None:
+        bad = {
+            p: v
+            for p, v in payload.default_privacy.items()
+            if p not in PLATFORMS or v not in ("public", "private", "unlisted")
+        }
+        if bad:
+            raise HTTPException(422, f"invalid default_privacy entries: {sorted(bad)}")
+        current.default_privacy = dict(payload.default_privacy)
+    if payload.default_platforms is not None:
+        bad = [p for p in payload.default_platforms if p not in PLATFORMS]
+        if bad:
+            raise HTTPException(422, f"unknown platforms in default_platforms: {bad}")
+        current.default_platforms = list(payload.default_platforms)
+    if payload.llm_provider is not None:
+        current.llm_provider = payload.llm_provider
+    if payload.llm_base_url is not None:
+        if not payload.llm_base_url.startswith(("http://", "https://")):
+            raise HTTPException(422, "llm_base_url must start with http:// or https://")
+        current.llm_base_url = payload.llm_base_url.rstrip("/")
+    if payload.llm_model is not None:
+        current.llm_model = payload.llm_model
+    store.save(current)
+    if payload.llm_api_key is not None:
+        store.set_credential("llm", "api_key", payload.llm_api_key or None)
+    if payload.credentials:
+        for platform, creds in payload.credentials.items():
+            _require_platform(platform)
+            for kind in ("client_id", "client_secret"):
+                if kind in creds:
+                    store.set_credential(platform, kind, creds[kind] or None)
+    return store.public_view(env_dry_run=settings.dry_run)
+
+
+@app.post("/settings/test-connection/{service}")
+def test_connection(service: str):
+    """Hit the real API with the stored credential; report the exact result."""
+    if service not in (*PLATFORMS, "llm"):
+        raise HTTPException(404, f"unknown service: {service}")
+    result = _settings_store().test_connection(service)
+    if not result["ok"]:
+        raise HTTPException(502, result["message"])
+    return result
+
+
 # ------------------------------------------------- monetization / analytics / scheduler
 @app.get("/monetization")
 def get_monetization(
@@ -770,9 +1404,225 @@ def list_analytics(db: Session = Depends(get_db)):
 
 @app.post("/scheduler/run")
 def run_scheduler(dry_run: bool = Query(default=True), db: Session = Depends(get_db)):
-    if not dry_run and settings.dry_run:
-        raise HTTPException(409, "Live publishing disabled: CLIPFORGE_DRY_RUN=true")
+    if not dry_run and _effective_dry_run():
+        raise HTTPException(409, "Live publishing disabled: dry-run is on")
     return {"dry_run": dry_run, "results": run_due_posts(db, dry_run=dry_run)}
+
+
+@app.get("/scheduler/status")
+def get_scheduler_status(db: Session = Depends(get_db)):
+    """Scheduler runner state (docs/API-CONTRACT.md §4).
+
+    ``running`` is true only while a run is executing (runs are
+    synchronous, so this is almost always false between calls).
+    ``last_run_at`` / ``last_error`` come from the latest recorded
+    :class:`SchedulerRun`; ``due_now`` counts posts due right now.
+    ``next_run_at`` is null: the scheduler only runs on demand
+    (``POST /scheduler/run`` / CLI) — no cron schedule is configured
+    in this release.
+    """
+    last = db.query(SchedulerRun).order_by(SchedulerRun.started_at.desc()).first()
+    return {
+        "running": bool(last and last.status == "running"),
+        "last_run_at": ((last.finished_at or last.started_at).isoformat() if last else None),
+        "next_run_at": None,
+        "due_now": len(due_posts(db)),
+        "last_error": last.error if last else None,
+        "last_run": (
+            {
+                "id": last.id,
+                "status": last.status,
+                "dry_run": last.dry_run,
+                "processed": last.processed,
+                "failed_count": last.failed_count,
+                "duration_s": last.duration_s,
+            }
+            if last
+            else None
+        ),
+    }
+
+
+# ------------------------------------------------------------------ worker queue
+@app.get("/worker/queue")
+def get_worker_queue(db: Session = Depends(get_db)):
+    """Background worker state: running jobs, queued jobs, what is next,
+    and recent runs with outcome + duration. The queue is the jobs
+    table itself (DB-backed, not in-process) — see clipforge.worker."""
+    return queue_summary(db)
+
+
+@app.post("/worker/run-next")
+def run_next_job_endpoint(db: Session = Depends(get_db)):
+    """Run the oldest queued/pending job now (synchronous).
+
+    Returns the job detail when a job ran, or ``{"ran": null}`` when
+    the queue is empty. A missing dependency leaves the job ``blocked``
+    with ``blocked_by`` — still a 200, the block is a state.
+    """
+    result = run_next_queued(db)
+    if result is None:
+        return {"ran": None, "queue": queue_summary(db)}
+    job = _get_or_404(db, Job, result["job_id"], "job")
+    return {"ran": _job_out(job, db, detail=True), "queue": queue_summary(db)}
+
+
+# ------------------------------------------------------------------ automation
+class AutomationRuleCreate(BaseModel):
+    kind: str
+    name: str | None = None
+    enabled: bool = True
+    config: dict[str, Any] | None = None
+
+
+class AutomationRuleUpdate(BaseModel):
+    enabled: bool | None = None
+    name: str | None = None
+    config: dict[str, Any] | None = None
+
+
+@app.get("/automation/feed")
+def get_automation_feed(
+    kind: str | None = Query(default=None),
+    job_id: str | None = Query(default=None),
+    clip_candidate_id: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    """Automation history: every rule action + skip, newest first.
+
+    Filter by rule ``kind`` (auto_seo_on_approve /
+    auto_pick_next_clip / auto_queue_approved), ``job_id`` or
+    ``clip_candidate_id``. This is the audit trail that proves what
+    the automation did — and what it deliberately did not do.
+    """
+    query = db.query(AutomationEvent).order_by(AutomationEvent.created_at.desc())
+    if kind:
+        query = query.filter_by(kind=kind)
+    if job_id:
+        query = query.filter_by(job_id=job_id)
+    if clip_candidate_id:
+        query = query.filter_by(clip_candidate_id=clip_candidate_id)
+    return [automation.event_out(e) for e in query.limit(limit).all()]
+
+
+@app.get("/automation/rules")
+def list_automation_rules(db: Session = Depends(get_db)):
+    """All automation rules, contract shape (docs/API-CONTRACT.md §1):
+    ``{rules: [{key, label, enabled, description, ...}]}``. ``key`` is
+    the frontend toggle key (``retention_feedback``, ``auto_seo``,
+    ``staggered_schedule``, ``auto_approve_high_score``); ``kind`` is
+    the backend rule name. The Automation page's toggles map 1:1."""
+    return {"rules": [automation.rule_out(r) for r in automation.ensure_default_rules(db)]}
+
+
+class AutomationRuleToggle(BaseModel):
+    key: str  # frontend key (retention_feedback, ...) or backend kind
+    enabled: bool
+
+
+@app.put("/automation/rules")
+def set_automation_rule(payload: AutomationRuleToggle, db: Session = Depends(get_db)):
+    """Set one rule on/off by its frontend ``key`` (or backend kind).
+
+    Returns the updated rule in the same shape as GET. ``409`` when
+    the key is server-locked: ``dry_run_guard`` is enforced by the
+    server setting (``CLIPFORGE_DRY_RUN``), never by a toggle.
+    Unknown keys are 422.
+    """
+    if payload.key == "dry_run_guard":
+        raise HTTPException(
+            409,
+            "dry_run_guard is server-locked: live publishing is controlled "
+            "by the CLIPFORGE_DRY_RUN server setting, not by a toggle.",
+        )
+    kind = automation.resolve_kind(payload.key)
+    if kind is None:
+        raise HTTPException(422, f"unknown automation rule key {payload.key!r}")
+    rule = automation.get_rule(db, kind)
+    if rule is None:
+        automation.ensure_default_rules(db)
+        rule = automation.get_rule(db, kind)
+    assert rule is not None
+    rule.enabled = payload.enabled
+    db.commit()
+    return automation.rule_out(rule)
+
+
+@app.post("/automation/rules", status_code=201)
+def upsert_automation_rule(payload: AutomationRuleCreate, db: Session = Depends(get_db)):
+    """Create or update a rule by ``kind`` (unknown kinds are 422).
+
+    ``kind`` accepts a backend kind (``auto_pick_next_clip``, ...) or
+    a frontend key (``retention_feedback``, ...). Prefer
+    ``PUT /automation/rules`` for simple on/off toggles.
+    """
+    kind = automation.resolve_kind(payload.kind)
+    if kind is None:
+        raise HTTPException(422, f"unknown automation rule kind {payload.kind!r}")
+    known = {spec["kind"]: spec for spec in automation.DEFAULT_RULES}
+    rule = automation.get_rule(db, kind)
+    if rule is None:
+        rule = AutomationRule(
+            name=payload.name or known[kind]["name"],
+            kind=kind,
+            enabled=payload.enabled,
+            config_json=payload.config or known[kind]["config"],
+        )
+        db.add(rule)
+    else:
+        if payload.name is not None:
+            rule.name = payload.name
+        rule.enabled = payload.enabled
+        if payload.config is not None:
+            rule.config_json = payload.config
+    db.commit()
+    return automation.rule_out(rule)
+
+
+@app.patch("/automation/rules/{rule_id}")
+def update_automation_rule(
+    rule_id: str, payload: AutomationRuleUpdate, db: Session = Depends(get_db)
+):
+    rule = _get_or_404(db, AutomationRule, rule_id, "automation rule")
+    if payload.enabled is not None:
+        rule.enabled = payload.enabled
+    if payload.name is not None:
+        rule.name = payload.name
+    if payload.config is not None:
+        rule.config_json = payload.config
+    db.commit()
+    return automation.rule_out(rule)
+
+
+@app.post("/automation/run")
+def run_automation(db: Session = Depends(get_db)):
+    """One automation pass: auto-queue approved clips with no posts yet
+    (per platform caps) and pick the next clip for jobs in review.
+
+    Only creates ``pending_approval`` posts — nothing publishes.
+    Returns a summary; every action is also in /automation/feed.
+    """
+    return automation.run_automation_pass(db)
+
+
+@app.post("/automation/pick-next/{job_id}")
+def pick_next_clip_endpoint(job_id: str, db: Session = Depends(get_db)):
+    """Recommend the next clip for a job from retention feedback.
+
+    Returns the pick (adjusted score, band, adjustment reason) or
+    ``{"pick": null, "reason": ...}`` when nothing qualifies. The pick
+    is a recommendation only — it never approves a candidate.
+    """
+    _get_or_404(db, Job, job_id, "job")
+    pick = automation.pick_next_clip(db, job_id)
+    if pick is None:
+        return {
+            "job_id": job_id,
+            "pick": None,
+            "reason": "no pending candidate qualifies (see /automation/feed)",
+        }
+    return {"job_id": job_id, "pick": pick}
 
 
 # ------------------------------------------------------------------ brand kits

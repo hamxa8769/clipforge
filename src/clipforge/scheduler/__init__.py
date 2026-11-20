@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 from clipforge.db import (
     Post,
     PostStatus,
+    SchedulerRun,
     SocialAccount,
     init_db,
 )
@@ -136,9 +137,48 @@ def run_due_posts(
     Idempotent: already-published / dry_run posts are not in the due set,
     so a re-run skips them. Cap-reached posts are left scheduled with an
     error note (not failed) so they are retried tomorrow.
+
+    The run itself is recorded as a :class:`SchedulerRun` row so
+    ``GET /scheduler/status`` reports real runs (last run, outcome,
+    error) instead of inferring from posts.
     """
+    import time as _time
+
+    started = _time.time()
     now = now or _utcnow()
     publish_fn = publish_fn or _dispatch
+    run = SchedulerRun(status="running", dry_run=dry_run)
+    session.add(run)
+    session.commit()
+    results: list[dict] = []
+    try:
+        results = _publish_due(session, publish_fn, dry_run, now)
+    except Exception as exc:  # unexpected — the run row records it
+        run.status = "failed"
+        run.error = f"{type(exc).__name__}: {exc}"
+        run.finished_at = _utcnow()
+        run.duration_s = round(_time.time() - started, 2)
+        session.commit()
+        raise
+    failed = [r for r in results if r["status"] == PostStatus.FAILED.value]
+    run.status = "failed" if failed else "done"
+    run.processed = len(results)
+    run.failed_count = len(failed)
+    run.error = failed[0].get("error") if failed else None
+    run.finished_at = _utcnow()
+    run.duration_s = round(_time.time() - started, 2)
+    session.commit()
+    return results
+
+
+def _publish_due(
+    session: Session,
+    publish_fn: Callable[[Post, bool], PublishResult],
+    dry_run: bool,
+    now: datetime,
+) -> list[dict]:
+    """The per-post loop of :func:`run_due_posts` (split out so the run
+    recording above stays readable)."""
     results: list[dict] = []
     for post in due_posts(session, now):
         cap = daily_cap_for(session, post)

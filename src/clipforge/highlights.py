@@ -22,6 +22,10 @@ Two paths:
   ``OPENAI_API_KEY`` (and optionally ``OPENAI_BASE_URL`` /
   ``CLIPFORGE_LLM_MODEL``) is configured. The prompt asks for word
   indices only; this module converts them to times and validates them.
+  The system prompt is externalised in
+  ``prompts/highlight_system.md`` (``load_highlight_prompt``) so it can
+  be tuned without touching code; override it with
+  ``CLIPFORGE_HIGHLIGHT_PROMPT``.
 * Heuristic fallback — deterministic keyword / position / signal
   scoring, no model and no key. Pure functions, unit-testable without
   FFmpeg or an LLM.
@@ -34,8 +38,58 @@ import os
 import re
 import urllib.request
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 from clipforge.transcribe import Transcript, Word
+
+# The LLM highlight prompt lives in a file (prompts/highlight_system.md)
+# so it can be tuned without touching code — the "prompts as files"
+# pattern borrowed from zhouxiaoka/autoclip (MIT, see docs/REUSE.md).
+# Set CLIPFORGE_HIGHLIGHT_PROMPT to your own prompt file to override it.
+_PROMPT_FILE = Path(__file__).resolve().parent / "prompts" / "highlight_system.md"
+_FALLBACK_PROMPT = (
+    "You select viral short-form clips from a word-level transcript. "
+    'Return STRICT JSON only: {"candidates": [{"start_word_index": int, '
+    '"end_word_index": int, "score": number, "hook": int, '
+    '"hook_line": string, "reason": string}]}. '
+    "Rules: indices refer to the numbered word list, start < end, each clip "
+    "15-60 seconds long by the word timestamps, self-contained, hook rated "
+    "1-10 on the first 3 seconds, score 0-100. Score on: hook, emotional "
+    "peak, opinion bomb / contrarian take, revelation, conflict, quotable "
+    "line, story peak, practical value. Never do timestamp arithmetic — "
+    "use word indices only. At most 10 candidates."
+)
+
+
+def load_highlight_prompt(path: str | Path | None = None) -> str:
+    """Load the LLM highlight system prompt from a file.
+
+    ``path`` overrides; otherwise ``CLIPFORGE_HIGHLIGHT_PROMPT`` wins,
+    then the shipped ``prompts/highlight_system.md``. The prompt file
+    is a Markdown doc whose ``## Instructions`` section is the prompt;
+    if that section is absent the whole file is used. Any read error
+    falls back to the built-in prompt — a missing prompt file must
+    never fail a job.
+    """
+    candidates: list[Path] = []
+    if path:
+        candidates.append(Path(path))
+    if os.environ.get("CLIPFORGE_HIGHLIGHT_PROMPT"):
+        candidates.append(Path(os.environ["CLIPFORGE_HIGHLIGHT_PROMPT"]))
+    candidates.append(_PROMPT_FILE)
+    for candidate in candidates:
+        try:
+            text = candidate.read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            continue
+        marker = "## Instructions"
+        if marker in text:
+            text = text.split(marker, 1)[1]
+        text = text.strip()
+        if text:
+            return text
+    return _FALLBACK_PROMPT
+
 
 # Chunking (report §2 stage 3).
 CHUNK_WINDOW_S = 9 * 60  # 9 minutes
@@ -376,18 +430,7 @@ def dedupe_and_rank(candidates: list[Candidate], top_n: int = MAX_CANDIDATES) ->
 
 # ---------------------------------------------------------------- LLM path
 
-LLM_SYSTEM_PROMPT = (
-    "You select viral short-form clips from a word-level transcript. "
-    'Return STRICT JSON only: {"candidates": [{"start_word_index": int, '
-    '"end_word_index": int, "score": number, "hook": int, '
-    '"hook_line": string, "reason": string}]}. '
-    "Rules: indices refer to the numbered word list, start < end, each clip "
-    "15-60 seconds long by the word timestamps, self-contained, hook rated "
-    "1-10 on the first 3 seconds, score 0-100. Score on: hook, emotional "
-    "peak, opinion bomb / contrarian take, revelation, conflict, quotable "
-    "line, story peak, practical value. Never do timestamp arithmetic — "
-    "use word indices only. At most 10 candidates."
-)
+LLM_SYSTEM_PROMPT = load_highlight_prompt()
 
 
 def _llm_candidates_for_chunk(

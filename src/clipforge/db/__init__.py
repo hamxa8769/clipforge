@@ -53,11 +53,14 @@ def _new_id() -> str:
 
 class JobStatus(enum.StrEnum):
     PENDING = "pending"
+    QUEUED = "queued"
     TRANSCRIBING = "transcribing"
     SCORING = "scoring"
     RENDERING = "rendering"
     REVIEW = "review"
     READY = "ready"
+    BLOCKED = "blocked"  # waiting on a missing dependency (tool/key) — see workflow.py
+    CANCELLED = "cancelled"
     FAILED = "failed"
 
 
@@ -343,6 +346,152 @@ class MonetizationProgress(Base):
     )
 
 
+class JobStageEvent(Base):
+    """One stage transition of one job — the live-workflow audit trail.
+
+    Every stage (ingest / transcribe / score / render / seo / review)
+    writes a ``started`` row and then a terminal row (``done`` /
+    ``failed`` / ``blocked`` / ``skipped``) with progress %, elapsed
+    seconds and a JSON ``detail`` (engine used, counts, alternates,
+    missing-dependency code, ...). The frontend polls
+    ``GET /jobs/{id}`` and renders this as the job's stage history.
+    """
+
+    __tablename__ = "job_stage_events"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_new_id)
+    job_id: Mapped[str] = mapped_column(String(32), ForeignKey("jobs.id"), index=True)
+    stage: Mapped[str] = mapped_column(String(30))  # see workflow.STAGES
+    status: Mapped[str] = mapped_column(
+        String(20), default="started"
+    )  # started|done|failed|blocked|skipped
+    progress_pct: Mapped[float] = mapped_column(Float, default=0.0)
+    message: Mapped[str] = mapped_column(Text, default="")
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    detail_json: Mapped[dict] = mapped_column("detail", JSON, default=dict)
+    duration_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class WorkerRun(Base):
+    """One worker execution of one job — what ran, outcome, duration.
+
+    The queue view (``GET /worker/queue``) reads the currently
+    ``running`` rows plus recent finished rows. A run is created when
+    the worker starts a job and closed when it finishes / fails /
+    blocks, so a crashed worker leaves a visible orphan ``running`` row
+    instead of silent nothing.
+    """
+
+    __tablename__ = "worker_runs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_new_id)
+    job_id: Mapped[str] = mapped_column(String(32), ForeignKey("jobs.id"), index=True)
+    status: Mapped[str] = mapped_column(
+        String(20), default="running"
+    )  # running|done|failed|blocked|cancelled
+    outcome: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SchedulerRun(Base):
+    """One scheduler execution — what ``GET /scheduler/status`` reads.
+
+    Recorded by :func:`clipforge.scheduler.run_due_posts` (the single
+    entry point used by the API endpoint and the CLI), so the status
+    endpoint reports real runs instead of inferring from posts. A run
+    left in ``running`` means the process died mid-run. ``next_run_at``
+    is intentionally not stored here: the scheduler only runs on
+    demand (``POST /scheduler/run`` / CLI) — there is no cron schedule
+    in this release, so the status endpoint reports ``next_run_at:
+    null`` until one is configured.
+    """
+
+    __tablename__ = "scheduler_runs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_new_id)
+    status: Mapped[str] = mapped_column(String(20), default="running")
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=True)
+    processed: Mapped[int] = mapped_column(Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AutomationEvent(Base):
+    """One logged automation action — the automation feed/history.
+
+    Every rule-driven action (SEO auto-generated, clip auto-picked,
+    post auto-queued, rule skipped because of a cap / missing account)
+    writes a row here with ``actor="automation"``. Human actions are
+    never written here; they are visible in the normal API responses.
+    """
+
+    __tablename__ = "automation_events"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_new_id)
+    kind: Mapped[str] = mapped_column(String(40))  # rule kind, e.g. auto_queue_approved
+    action: Mapped[str] = mapped_column(String(80))
+    actor: Mapped[str] = mapped_column(String(20), default="automation")
+    job_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    clip_candidate_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    post_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    detail_json: Mapped[dict] = mapped_column("detail", JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class AutomationRule(Base):
+    """One toggleable automation rule (see :mod:`clipforge.automation`).
+
+    Rules are seeded with defaults on first use; the API can enable /
+    disable them and edit their JSON ``config``. A disabled rule never
+    fires; every firing is logged to :class:`AutomationEvent`.
+    """
+
+    __tablename__ = "automation_rules"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_new_id)
+    name: Mapped[str] = mapped_column(String(120))
+    kind: Mapped[str] = mapped_column(String(40), unique=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    config_json: Mapped[dict] = mapped_column("config", JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
+class CandidateSeo(Base):
+    """Stored per-platform SEO variant for one clip candidate.
+
+    Generated deterministically by :mod:`clipforge.seo` (template, not
+    LLM, unless ``CLIPFORGE_LLM_API_KEY`` is set and polish is wired).
+    Written by the worker at the ``seo`` stage and by the automation
+    rule ``auto_seo_on_approve``; the review UI reads these instead of
+    re-generating SEO on every render. One row per (candidate, platform).
+    """
+
+    __tablename__ = "candidate_seo"
+    __table_args__ = (UniqueConstraint("clip_candidate_id", "platform", name="uq_candidate_seo"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_new_id)
+    clip_candidate_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("clip_candidates.id"), index=True
+    )
+    platform: Mapped[str] = mapped_column(String(20))
+    seo_json: Mapped[dict] = mapped_column("seo", JSON, default=dict)
+    generated_by: Mapped[str] = mapped_column(String(20), default="worker")  # worker|automation
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
 def database_url() -> str:
     return (
         os.environ.get("DATABASE_URL")
@@ -387,6 +536,12 @@ __all__ = [
     "TitleVariant",
     "RetentionPoint",
     "BrollAsset",
+    "JobStageEvent",
+    "WorkerRun",
+    "SchedulerRun",
+    "AutomationEvent",
+    "AutomationRule",
+    "CandidateSeo",
     "JobStatus",
     "CandidateStatus",
     "PostStatus",

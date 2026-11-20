@@ -116,6 +116,52 @@ def _build_app(base: Path):
     web_out_env = os.environ.get("CLIPFORGE_WEB_OUT", "").strip()
     web_out = Path(web_out_env) if web_out_env else base / "web" / "out"
     if (web_out / "index.html").is_file():
+        # Serve the static export BEFORE API routing — but only for
+        # paths that look like files. A plain ``app.mount("/",
+        # StaticFiles(...))`` loses to the API routes: GET
+        # /channels/{platform} would claim the Next.js RSC payload
+        # /channels/index.txt and 404 it as an "unknown platform", so
+        # every Channels visit logged console 404s (the page still
+        # loaded via Next's full-page fallback, but noisily). This
+        # middleware serves a path only when its last segment has a
+        # file extension (index.txt, index.html, favicon.ico, _next
+        # assets) and the file really exists under web_out; everything
+        # else passes through untouched, so GET /channels still returns
+        # the API's JSON list and /channels/ still reaches the mount
+        # below. The mount stays: it serves directory indexes
+        # (/channels/ → index.html) and the UI root.
+        from urllib.parse import unquote
+
+        from starlette.responses import FileResponse
+
+        web_root = web_out.resolve()
+
+        class _StaticFirstMiddleware:
+            def __init__(self, app):
+                self.app = app
+
+            async def __call__(self, scope, receive, send):
+                if scope["type"] == "http":
+                    raw_path = unquote(scope.get("path", "/"))
+                    last = raw_path.rstrip("/").rsplit("/", 1)[-1]
+                    if "." in last:
+                        candidate = (web_root / raw_path.lstrip("/")).resolve()
+                        try:
+                            candidate.relative_to(web_root)
+                        except ValueError:
+                            candidate = None  # path traversal: let the API answer
+                        if candidate is not None and candidate.is_file():
+                            await FileResponse(candidate)(scope, receive, send)
+                            return
+                await self.app(scope, receive, send)
+
+        # Starlette refuses add_middleware once the app has served a
+        # request (the middleware stack is cached), so clear the cache
+        # first — this only matters when _build_app runs after first
+        # use, e.g. in tests; at real startup the stack is empty.
+        app.middleware_stack = None
+        app.add_middleware(_StaticFirstMiddleware)
+
         from fastapi.staticfiles import StaticFiles
 
         # Mounted last, so /health, /docs, /jobs, ... keep working.

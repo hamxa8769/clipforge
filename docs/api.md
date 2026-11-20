@@ -1,11 +1,11 @@
-# API Reference — ClipForge v0.1.0
+# API Reference — ClipForge v0.3.0
 
 Base URL (local dev): `http://localhost:8000`. Interactive docs: `/docs`.
 The app is `apps/api/clipforge_api/app.py` (imported as
 `clipforge_api.app`); run it from `apps/api` with
 `PYTHONPATH=src uvicorn clipforge_api.app:app --port 8000`.
 
-Auth in v0.1.0: none on local dev (single-user). API-key auth is planned
+Auth in v0.3.0: none on local dev (single-user). API-key auth is planned
 before any shared deployment; do not expose the dev server publicly.
 
 All responses are JSON. Publishing is **dry-run by default**: the
@@ -36,7 +36,7 @@ Trimming a candidate narrows its `start_s`/`end_s` within the original span.
 ### `GET /health`
 
 ```json
-{ "status": "ok", "dry_run": true, "version": "0.2.1", "database_url_scheme": "sqlite" }
+{ "status": "ok", "dry_run": true, "version": "0.3.0", "database_url_scheme": "sqlite" }
 ```
 
 ### `POST /jobs` → `201`
@@ -128,6 +128,57 @@ Shows thresholds only — never promised earnings.
 
 Connected social accounts. Tokens are stored as the **name** of an
 environment variable only (`token_env_var`) — never a token value.
+Legacy account-record endpoint, kept for compatibility: the canonical
+channel-status endpoint is `GET /channels` below (the only one that
+knows OAuth token state, expiry, scopes, daily caps, and the
+review/audit notice).
+
+### `GET /channels` · `GET /channels/{platform}`
+
+**Canonical channel-status endpoint (v0.3.0).** One status card per
+platform, from the real backend: `status` (`connected` | `expired` |
+`not_connected`), account name / avatar / ref, scopes granted,
+per-channel daily cap, token expiry, token source (`oauth` | `env` |
+`none`), the platform review/audit notice, and the working fallback
+while review is pending. Never hardcoded. The Channels page uses this
+endpoint; `GET /accounts` remains as the legacy account-record
+endpoint for compatibility.
+
+### `GET /auth/{platform}/start`
+
+Returns `{authorize_url, redirect_uri, state}` for the Connect button
+to open in the browser. `409` when the platform app credentials are not
+configured yet — save them in Settings first.
+
+### `GET /auth/callback/{platform}?code=&state=`
+
+Platform redirect target. Exchanges the code for tokens (single-use,
+10-minute state), fetches the account profile, stores the token
+encrypted, and upserts the `SocialAccount` row. Returns a small HTML
+page ("connected — close this window"); `400` with the exact reason
+when the platform refused or the state is bad.
+
+### `POST /channels/{platform}/refresh` · `POST /channels/{platform}/disconnect`
+
+Refresh (YouTube/TikTok refresh-token grant) or extend (Meta 60-day
+long-lived exchange) the stored token; disconnect deletes it and marks
+the account row `disconnected`. Both return the updated channel card.
+
+### `GET /settings` · `PUT /settings`
+
+Masked credentials + preferences + environment status. `GET` returns
+`configured` + `last4` only — never a secret value. `PUT` is a partial
+update: omitted fields are kept, `""` on a secret clears it. Covers the
+LLM key / base URL / model, per-platform client id/secret, dry-run
+override, default privacy per platform, data folder, FFmpeg status, and
+monetization thresholds.
+
+### `POST /settings/test-connection/{service}`
+
+Live auth check for `youtube` | `instagram` | `facebook` | `tiktok` |
+`llm`, using the stored credential. `200` with `{ok: true, message}`
+on success; `502` with the exact provider error otherwise (e.g. token
+expired, key rejected 401, network failure) — never a bare 500.
 
 ### `GET /analytics` · `GET /analytics/{account_id}`
 
@@ -137,6 +188,147 @@ Retention / viewed-vs-swiped signals feeding the next clip picks.
 
 Run due posts now (dry-run by default). Same engine the scheduler loop
 uses: caps, idempotency, backoff.
+
+### `GET /scheduler/status`
+
+Runner state (see `docs/API-CONTRACT.md` §4): `{running, last_run_at,
+next_run_at, due_now, last_error, last_run: {id, status, dry_run,
+processed, failed_count, duration_s} | null}`. `next_run_at` is
+`null`: the scheduler only runs on demand — no cron schedule is
+configured in this release. `running` is true only while a run is
+executing (runs are synchronous, so it is almost always false between
+calls).
+
+## Live workflow + automation (v0.3.0)
+
+The end-to-end pipeline is a visible live workflow — see
+`docs/workflow.md` for a curl walk-through. Every job exposes its live
+stage, per-stage progress %, an ETA, stage logs, retry/cancel, and an
+honest error state. Nothing is faked: a step that could not run because
+a key or tool is missing leaves the job `blocked` and names the exact
+missing dependency.
+
+### Pipeline stages
+
+| Stage | Progress | What happens |
+|---|---|---|
+| `ingest` | 0–10% | Upload or YouTube download (own content only). |
+| `transcribe` | 10–30% | Whisper transcription (or the fallback-text demo path). |
+| `score` | 30–45% | Highlight scoring; candidates below `MIN_SCORE_THRESHOLD`
+  (50) become alternates, never clips. |
+| `render` | 45–80% | 9:16 reframe + captions per qualifying clip. |
+| `seo` | 80–90% | Per-platform title/description/hashtag variants. |
+| `review` | 90–100% | Human review. The job ends here unless the
+  auto-approve-high-score rule approved a clip (then `ready`). |
+
+### `GET /jobs/{id}` (detail)
+
+Adds to the list shape: `stage`, `progress_pct`, `eta_s` (seconds,
+from the average of the last 20 finished worker runs; `null` with no
+history), `demo` (true when the transcript came from the fallback-text
+path), `blocked_by` (`{code, dependency, kind, detail,
+required_action} | null`), `stages` (per-stage `{stage, status,
+started_at, finished_at, duration_s, detail}`), `worker_runs` (last 5),
+`failed_stage` (latest failed/blocked stage, or `null`),
+`started_at`, `finished_at`, `duration_s` (latest worker run),
+`alternates` (below-threshold candidates from the latest score stage).
+
+`blocked` vs `failed`: a missing dependency (no FFmpeg, no yt-dlp,
+no LLM key) → job `blocked` (retryable once the dependency exists);
+a missing/invalid source file → job `failed`.
+
+### `GET /dependencies`
+
+Machine + key inventory, presence only, never values:
+`{dependencies: [{name, kind, present, detail, required_action}],
+blocked: [...]}`. Kinds: `tool` (ffmpeg, ffprobe, yt-dlp), `package`
+(faster-whisper, cv2), `api_key` (`OPENAI_API_KEY`,
+`CLIPFORGE_LLM_API_KEY`, `YOUTUBE_REFRESH_TOKEN`,
+`META_ACCESS_TOKEN`, `TIKTOK_ACCESS_TOKEN`), `flag`
+(`TIKTOK_DIRECT_POST_OPT_IN`).
+
+### `POST /jobs/upload` → `201`
+
+Multipart upload (`.mp4` / `.mov`, up to 10 GiB) with the same
+`title` / `own_content` / `transcript_text` / `top_n` / `caption_style`
+fields as `POST /jobs`. Creates the job in `pending`; run it with
+`POST /jobs/{id}/run`.
+
+### `POST /jobs/{id}/run` · `POST /jobs/{id}/retry` · `POST /jobs/{id}/cancel`
+
+- `run`: run a pending/queued job synchronously (200, job detail).
+- `retry`: reset a `failed` or `blocked` job to `pending`, drop its
+  candidates + SEO, keep stage/run history, and re-run it (200, same
+  job — no new id, so no `retry_of` field). 409 for any other status.
+- `cancel`: cancel a pending/queued/failed/blocked job (200); closes
+  any orphan running worker run. 409 otherwise.
+
+### `GET /jobs/{id}/logs`
+
+`{logs: [{ts, stage, level, message}]}` — the stage event log,
+newest last. A failed/blocked stage's error is here and in
+`failed_stage` on the job detail.
+
+### `GET /worker/queue` · `POST /worker/run-next`
+
+The background queue, visible via API: `{running: [{job_id, job_title,
+status, stage, started_at, duration_s}], queued: [{id, title,
+source_type, status, created_at}], next: {id, title} | null,
+recent_runs: [...]}`. `POST /worker/run-next` runs the oldest
+queued/pending job synchronously and returns `{ran, queue}` (or
+`{ran: null, queue}` when the queue is empty). The worker itself is
+`python -m clipforge.worker run <id> | run-next | queue`
+(options `--database-url` / `--data-dir` come before the subcommand).
+
+### `GET /automation/feed?kind=&job_id=&clip_candidate_id=&limit=`
+
+Every automation action + skip, newest first: `{id, kind, action,
+detail, job_id, clip_candidate_id, post_id, created_at}`. This is the
+audit trail — what the automation did, and what it deliberately did
+not do.
+
+### `GET /automation/rules` · `PUT /automation/rules`
+
+`GET` → `{rules: [{id, key, kind, label, name, enabled, description,
+config, updated_at}]}`. `key` is the frontend toggle key
+(`retention_feedback`, `auto_seo`, `staggered_schedule`,
+`auto_approve_high_score`); `kind` is the backend rule name
+(`auto_pick_next_clip`, `auto_seo_on_approve`, `auto_queue_approved`,
+`staggered_schedule`, `auto_approve_high_score`).
+
+`PUT /automation/rules` `{key, enabled}` → the updated rule. 409 only
+for `dry_run_guard` (server-locked via `CLIPFORGE_DRY_RUN`); 422 for
+an unknown key. `POST /automation/rules` upserts a rule;
+`PATCH /automation/rules/{id}` edits one.
+
+Rules (defaults): `auto_seo_on_approve` on, `auto_pick_next_clip` on,
+`auto_queue_approved` on, `staggered_schedule` on,
+`auto_approve_high_score` **off** (score ≥ 95 + hook ≥ 9 approves the
+*clip* only — post approval before publishing still applies).
+
+### `POST /automation/run` · `POST /automation/pick-next/{job_id}`
+
+- `run`: one automation pass — auto-pick the next clip per job
+  (retention feedback: early drop-off penalises the hook, retaining
+  formats are boosted) and auto-queue approved clips.
+  `{run: {picked: [...], queued: [...]}}`.
+- `pick-next`: the next clip for one job, with the retention
+  adjustment explained (`{candidate_id, score, adjusted_score,
+  reason, ...}`).
+
+Auto-queue only queues platforms whose *channel* is connected
+(`GET /channels`: OAuth token or legacy env token). A bare
+`SocialAccount` row (`GET /accounts`, legacy) does **not** connect a
+channel — it only links the post and carries the cap override. Queued
+posts are `pending_approval` and respect the per-platform daily caps
+(channel card value: provider default or the account override).
+Staggering puts each platform's post in its own window (Instagram 11,
+Facebook 13, YouTube 15, TikTok 19 UTC).
+
+### `GET /clips/{candidate_id}/seo`
+
+Stored SEO variants for one clip: `{candidate_id, seo: {platform:
+{title, description, hashtags, ...}}}`.
 
 ## Errors
 
@@ -150,9 +342,10 @@ uses: caps, idempotency, backoff.
 
 ## Dry-run semantics
 
-- `dry_run=true` (default on publish, and `CLIPFORGE_DRY_RUN=true` in the
-  environment): adapters validate everything and return the exact payload
-  they *would* send. No token is used, no post is created.
+- `dry_run=true` (default on publish, and dry-run on in Settings or
+  `CLIPFORGE_DRY_RUN=true` in the environment): adapters validate
+  everything and return the exact payload they *would* send. No token
+  is used, no post is created.
 - `dry_run=false`: only meaningful with real, approved OAuth tokens,
-  approved posts, and `CLIPFORGE_DRY_RUN=false`. Flip it per environment,
+  approved posts, and dry-run off in Settings. Flip it per environment,
   never per request, and never in a test.
