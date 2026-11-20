@@ -72,6 +72,22 @@ with `title`, `description`, `hashtags`).
 `.../reject` and `.../trim` (`{"start_s": ..., "end_s": ...}` — must lie
 inside the candidate's span, otherwise 422).
 
+> **Contract gap (frontend, 2026-11-20):** the candidate payload returns
+> trim-aware `start_s`/`end_s` (i.e. the current trim, if any) but not the
+> candidate's **original** span. The trim endpoint validates against the
+> original span in the DB, so the web UI can only narrow within the span it
+> was given — it cannot widen a previous trim back out. If widening is ever
+> needed, return `orig_start_s`/`orig_end_s` (or `trim_start_s`/
+> `trim_end_s` separately) from `GET /jobs/{id}/candidates`.
+
+### `GET /media/clips/{job_id}/{filename}` · `GET /media/uploads/{filename}`
+
+Read-only file serving for the web player's `<video>` tag: the rendered
+9:16 clip (`data/clips/<job_id>/clip_01.mp4`, …) and source uploads
+(`data/uploads/…`). Only `.mp4`/`.webm`/`.mov`, filenames only — no
+sub-paths, no traversal outside the data dir. Unknown files are `404`.
+The media root is `CLIPFORGE_DATA_DIR` (default `./data`).
+
 ### `POST /posts` → `201`
 
 Create a post from an **approved** candidate (otherwise **409**).

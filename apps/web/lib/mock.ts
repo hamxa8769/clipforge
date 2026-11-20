@@ -16,7 +16,7 @@ export const demoCandidates: Candidate[] = [
     hook_line: "Stop posting every day — it is hurting your reach.",
     reason: "Contrarian opinion bomb in the first 3 seconds, clear practical value, quotable line.",
     transcript_excerpt: "…most creators think volume wins. It does not. The algorithm rewards completion, not frequency — one strong clip a week beats seven forgettable ones…",
-    start_s: 342, end_s: 378, status: "pending",
+    start_s: 342, end_s: 378, status: "pending", n: 1, file_path: null,
     seo: {
       youtube: seo("Stop Posting Every Day (It Hurts Your Reach)", "Why posting daily can hurt Shorts reach — and what to do instead. Full episode linked.", ["#YouTubeShorts", "#CreatorTips", "#Growth"]),
       tiktok: seo("Stop posting every day", "Posting daily is hurting your reach. Here is why — and the fix. #creatortips", ["#creatortips", "#growth", "#contentcreator", "#fyp", "#learnontiktok"]),
@@ -29,7 +29,7 @@ export const demoCandidates: Candidate[] = [
     hook_line: "The one metric that actually predicts a viral clip.",
     reason: "Revelation + practical value; hook is strong but payoff arrives late (around 8s).",
     transcript_excerpt: "…views lie. The metric that matters is viewed-versus-swiped-away — if people stay past the first three seconds, everything else follows…",
-    start_s: 512, end_s: 545, status: "pending",
+    start_s: 512, end_s: 545, status: "pending", n: 2, file_path: null,
     seo: {
       youtube: seo("The 1 Metric That Predicts Viral Shorts", "Viewed-vs-swiped-away beats raw views. How to read it and fix a weak hook.", ["#YouTubeShorts", "#Analytics", "#Shorts"]),
       tiktok: seo("This metric predicts viral clips", "Forget views. Watch this one number instead.", ["#creatortips", "#analytics", "#viral", "#growth"]),
@@ -42,7 +42,7 @@ export const demoCandidates: Candidate[] = [
     hook_line: "We tried posting at 7pm for a month — here is what happened.",
     reason: "Story peak with a real result, but the hook is slow and the clip needs a tighter trim.",
     transcript_excerpt: "…for thirty days we posted at seven in the evening, same format, same length. Reach went up on TikTok, flat everywhere else…",
-    start_s: 891, end_s: 930, status: "pending",
+    start_s: 891, end_s: 930, status: "pending", n: 3, file_path: null,
     seo: {
       youtube: seo("We Posted at 7pm for 30 Days — Results", "A month-long posting-time experiment across all four platforms.", ["#YouTubeShorts", "#Experiment", "#Growth"]),
       tiktok: seo("Posting at 7pm for 30 days", "The results surprised us. Full breakdown in the comments.", ["#experiment", "#growth", "#tiktokgrowth"]),
@@ -53,10 +53,10 @@ export const demoCandidates: Candidate[] = [
 ];
 
 export const demoPosts: Post[] = [
-  { id: "post-001", clip_id: "cand-001", platform: "Instagram", caption: "Stop posting every day — daily posting is not the growth hack you think it is. Save this for your next content plan.", scheduled_at: "2026-11-21T11:00:00", status: "pending" },
-  { id: "post-002", clip_id: "cand-001", platform: "Facebook", caption: "Practical takeaway: consistency beats volume. One strong Reel a week outperforms seven rushed ones.", scheduled_at: "2026-11-21T13:00:00", status: "pending" },
-  { id: "post-003", clip_id: "cand-001", platform: "YouTube", caption: "Stop Posting Every Day (It Hurts Your Reach) — why posting daily can hurt Shorts reach.", scheduled_at: "2026-11-21T15:00:00", status: "pending" },
-  { id: "post-004", clip_id: "cand-002", platform: "TikTok", caption: "Forget views. Watch this one number instead. #creatortips", scheduled_at: "2026-11-21T19:00:00", status: "pending" },
+  { id: "post-001", clip_id: "cand-001", platform: "Instagram", caption: "Stop posting every day — daily posting is not the growth hack you think it is. Save this for your next content plan.", scheduled_at: "2026-11-21T11:00:00", status: "pending_approval" },
+  { id: "post-002", clip_id: "cand-001", platform: "Facebook", caption: "Practical takeaway: consistency beats volume. One strong Reel a week outperforms seven rushed ones.", scheduled_at: "2026-11-21T13:00:00", status: "pending_approval" },
+  { id: "post-003", clip_id: "cand-001", platform: "YouTube", caption: "Stop Posting Every Day (It Hurts Your Reach) — why posting daily can hurt Shorts reach.", scheduled_at: "2026-11-21T15:00:00", status: "pending_approval" },
+  { id: "post-004", clip_id: "cand-002", platform: "TikTok", caption: "Forget views. Watch this one number instead. #creatortips", scheduled_at: "2026-11-21T19:00:00", status: "pending_approval" },
 ];
 
 export const demoMonetization: Monetization[] = [

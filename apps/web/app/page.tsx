@@ -1,13 +1,15 @@
 import Link from "next/link";
-import { apiGet, type Job } from "@/lib/api";
+import { apiGet, getJobs, PROCESSING_STATUSES } from "@/lib/api";
 import { demoJobs } from "@/lib/mock";
 import { Card, DemoBadge, StatusPill } from "@/components/ui";
 
 export default async function Dashboard() {
-  const jobs = (await apiGet<Job[]>("/jobs")) ?? demoJobs;
+  const jobs = (await getJobs()) ?? demoJobs;
   const live = (await apiGet<unknown>("/health")) !== null;
   const ready = jobs.filter((j) => j.status === "ready").length;
-  const processing = jobs.filter((j) => ["queued", "transcribing", "scoring"].includes(j.status)).length;
+  // Statuses are normalised in getJobs(): the backend sends "pending", never
+  // "queued" — see lib/api.ts normalizeJobStatus.
+  const processing = jobs.filter((j) => PROCESSING_STATUSES.includes(j.status)).length;
   const totalCandidates = jobs.reduce((n, j) => n + (j.candidates ?? 0), 0);
   return (
     <div className="space-y-6">

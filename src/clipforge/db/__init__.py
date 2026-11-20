@@ -137,6 +137,118 @@ class ClipCandidate(Base):
         return max(0.0, end - start)
 
 
+class BrandKit(Base):
+    """Brand kit: colours/fonts/logo/caption style/intro-outro for a channel.
+
+    Applied at render/SEO time (see :mod:`clipforge.brandkits`). A kit
+    never changes the clip itself — it styles captions/SEO copy and the
+    optional intro/outro text.
+    """
+
+    __tablename__ = "brand_kits"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_new_id)
+    name: Mapped[str] = mapped_column(String(120))
+    primary_colour: Mapped[str] = mapped_column(String(7), default="#FFFFFF")
+    secondary_colour: Mapped[str] = mapped_column(String(7), default="#000000")
+    accent_colour: Mapped[str] = mapped_column(String(7), default="#FFD700")
+    font_name: Mapped[str] = mapped_column(String(120), default="DejaVu Sans")
+    caption_style: Mapped[str] = mapped_column(String(30), default="bold-pop")
+    logo_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    intro_text: Mapped[str] = mapped_column(Text, default="")
+    outro_text: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
+class TitleVariant(Base):
+    """One A/B title variant for a clip on one platform.
+
+    ``is_control`` marks the baseline title. Outcomes (views /
+    completion / viewed%) are recorded on the variant when analytics
+    arrive — see :mod:`clipforge.abtest`. A scheduled post references
+    its assigned variant via :attr:`Post.title_variant_id`.
+    """
+
+    __tablename__ = "title_variants"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_new_id)
+    clip_candidate_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("clip_candidates.id"), index=True
+    )
+    platform: Mapped[str] = mapped_column(String(20))
+    title: Mapped[str] = mapped_column(Text)
+    is_control: Mapped[bool] = mapped_column(Boolean, default=False)
+    views: Mapped[int] = mapped_column(Integer, default=0)
+    avg_view_duration_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    completion_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    viewed_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    outcome_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class RetentionPoint(Base):
+    """One retention observation for a published clip.
+
+    Ingested manually (or from a platform export) until platform
+    analytics keys exist — see :mod:`clipforge.retention`. ``source``
+    records where the numbers came from (``manual`` / ``youtube`` /
+    ``meta`` / ``tiktok``); live platform feeds are NOT wired in this
+    release, so ``source`` is ``manual`` unless a feed exists.
+    """
+
+    __tablename__ = "retention_points"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_new_id)
+    post_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("posts.id"), nullable=True, index=True
+    )
+    clip_candidate_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("clip_candidates.id"), nullable=True, index=True
+    )
+    platform: Mapped[str] = mapped_column(String(20))
+    clip_duration_s: Mapped[float] = mapped_column(Float, default=0.0)
+    avg_view_duration_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    completion_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    viewed_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    dropoff_second: Mapped[float | None] = mapped_column(Float, nullable=True)
+    views: Mapped[int] = mapped_column(Integer, default=0)
+    source: Mapped[str] = mapped_column(String(20), default="manual")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class BrollAsset(Base):
+    """B-roll attached to a clip — licensed/source-only (see :mod:`clipforge.broll`).
+
+    ``source_type`` is ``source_video`` (cut from the clip's own source
+    video) or ``uploaded_licensed`` (a file the user uploaded and
+    declared licensed). URLs / third-party downloads are rejected at
+    validation time and never stored. ``declaration`` is the user's
+    source/rights statement for this asset.
+    """
+
+    __tablename__ = "broll_assets"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_new_id)
+    clip_candidate_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("clip_candidates.id"), index=True
+    )
+    source_type: Mapped[str] = mapped_column(String(20))  # source_video|uploaded_licensed
+    source_path: Mapped[str] = mapped_column(Text)
+    source_start_s: Mapped[float] = mapped_column(Float, default=0.0)
+    source_end_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    clip_start_s: Mapped[float] = mapped_column(Float, default=0.0)  # overlay start in clip
+    clip_end_s: Mapped[float | None] = mapped_column(Float, nullable=True)
+    position: Mapped[str] = mapped_column(String(30), default="picture-in-picture")
+    width_frac: Mapped[float] = mapped_column(Float, default=0.45)
+    declaration: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class SocialAccount(Base):
     __tablename__ = "social_accounts"
 
@@ -173,6 +285,12 @@ class Post(Base):
     seo_json: Mapped[dict] = mapped_column("seo", JSON, default=dict)
     video_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     video_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title_variant_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("title_variants.id"), nullable=True
+    )
+    brand_kit_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("brand_kits.id"), nullable=True
+    )
     publish_result_json: Mapped[dict | None] = mapped_column("publish_result", JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0)
@@ -265,6 +383,10 @@ __all__ = [
     "SocialAccount",
     "AnalyticsSnapshot",
     "MonetizationProgress",
+    "BrandKit",
+    "TitleVariant",
+    "RetentionPoint",
+    "BrollAsset",
     "JobStatus",
     "CandidateStatus",
     "PostStatus",

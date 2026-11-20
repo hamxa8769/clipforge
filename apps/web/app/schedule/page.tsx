@@ -1,6 +1,6 @@
-import { apiGet, type Post } from "@/lib/api";
+import { apiGet, getPosts } from "@/lib/api";
 import { demoPosts } from "@/lib/mock";
-import { Card, DemoBadge } from "@/components/ui";
+import { Card, DemoBadge, StatusPill } from "@/components/ui";
 
 const STAGGER = [
   { platform: "Instagram Reels", time: "11:00", note: "11 AM–1 PM is the Reels window; 3–5 Reels/week." },
@@ -10,7 +10,8 @@ const STAGGER = [
 ];
 
 export default async function SchedulePage() {
-  const posts = (await apiGet<Post[]>("/posts")) ?? demoPosts;
+  // Post statuses are normalised in getPosts() (legacy "pending" -> "pending_approval").
+  const posts = (await getPosts()) ?? demoPosts;
   const live = (await apiGet<unknown>("/health")) !== null;
   const sorted = [...posts].sort((a, b) => a.scheduled_at.localeCompare(b.scheduled_at));
   return (
@@ -37,7 +38,7 @@ export default async function SchedulePage() {
               <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-xs font-medium">{p.platform}</span>
               <span className="text-sm font-medium">{new Date(p.scheduled_at).toLocaleString()}</span>
               <span className="min-w-0 flex-1 truncate text-sm text-neutral-400">{p.caption}</span>
-              <span className="text-sm text-neutral-400">{p.status}</span>
+              <StatusPill status={p.status} />
             </li>
           ))}</ul>
         )}

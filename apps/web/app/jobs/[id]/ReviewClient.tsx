@@ -1,28 +1,35 @@
 "use client";
 import { useState } from "react";
-import type { Candidate } from "@/lib/api";
+import type { Candidate, Job } from "@/lib/api";
+import { approveCandidate, rejectCandidate } from "@/lib/api";
 import { Card, StatusPill } from "@/components/ui";
+import ClipPlayer from "@/components/ClipPlayer";
 
 const PLATFORMS = ["youtube", "tiktok", "instagram", "facebook"] as const;
 const PLATFORM_LABEL: Record<string, string> = { youtube: "YouTube", tiktok: "TikTok", instagram: "Instagram", facebook: "Facebook" };
 
-function CandidateCard({ c }: { c: Candidate }) {
+function CandidateCard({ c, job, demo }: { c: Candidate; job: Job; demo: boolean }) {
   const [platform, setPlatform] = useState<string>("youtube");
-  const [start, setStart] = useState(c.start_s);
-  const [end, setEnd] = useState(c.end_s);
   const [aiLabel, setAiLabel] = useState(true);
   const [status, setStatus] = useState(c.status);
   const [note, setNote] = useState("");
   const seo = c.seo[platform];
-  const duration = Math.max(0, end - start);
 
   async function act(action: "approve" | "reject") {
-    // POST to API when live; in demo mode this records the decision locally only.
-    try {
-      await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/candidates/${c.id}/${action}`, { method: "POST" });
-    } catch { /* demo mode: local-only */ }
-    setStatus(action === "approve" ? "approved" : "rejected");
-    setNote(action === "approve" ? "Approved — sent to the approval queue (demo mode: recorded locally)." : "Rejected (demo mode: recorded locally).");
+    // Real endpoint: POST /jobs/{jobId}/candidates/{n}/{approve|reject} (docs/api.md).
+    // The old code called /candidates/{id}/{action}, which does not exist.
+    if (demo) {
+      setStatus(action === "approve" ? "approved" : "rejected");
+      setNote(action === "approve" ? "Approved — recorded locally (demo mode: API unreachable)." : "Rejected (demo mode: recorded locally).");
+      return;
+    }
+    const res = action === "approve" ? await approveCandidate(job.id, c.n) : await rejectCandidate(job.id, c.n);
+    if (res.ok) {
+      setStatus(action === "approve" ? "approved" : "rejected");
+      setNote(action === "approve" ? "Approved — sent to the approval queue." : "Rejected.");
+    } else {
+      setNote(`Could not ${action}: ${res.error ?? "request failed"}.`);
+    }
   }
 
   return (
@@ -38,14 +45,10 @@ function CandidateCard({ c }: { c: Candidate }) {
       <p className="mt-3 text-sm text-neutral-400"><strong className="text-neutral-300">Why this clip:</strong> {c.reason}</p>
       <blockquote className="mt-3 rounded-lg bg-neutral-950 p-3 text-sm italic text-neutral-300">“{c.transcript_excerpt}”</blockquote>
 
-      <div className="mt-4 flex flex-wrap items-end gap-4">
-        <label className="text-sm">Trim start (s)
-          <input type="number" min={0} value={start} onChange={(e) => setStart(Number(e.target.value))} className="mt-1 block w-24 rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5" />
-        </label>
-        <label className="text-sm">Trim end (s)
-          <input type="number" min={0} value={end} onChange={(e) => setEnd(Number(e.target.value))} className="mt-1 block w-24 rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5" />
-        </label>
-        <span className="text-sm text-neutral-400">Duration: {duration}s {duration > 90 && platform !== "youtube" ? "— over 90s: too long for Facebook Reels API" : ""}{duration < 60 && platform === "tiktok" ? "— under 60s: will not earn TikTok Creator Rewards" : ""}</span>
+      <ClipPlayer candidate={c} job={job} demo={demo} />
+
+      <div className="mt-4 flex flex-wrap items-center gap-4">
+        <span className="text-sm text-neutral-400">Clip span: {c.start_s}s – {c.end_s}s</span>
         <label className="ml-auto flex items-center gap-2 text-sm">
           <input type="checkbox" checked={aiLabel} onChange={(e) => setAiLabel(e.target.checked)} className="h-4 w-4 accent-amber-400" />
           AI-assisted edit — label as AI-generated content
@@ -83,7 +86,7 @@ function CandidateCard({ c }: { c: Candidate }) {
   );
 }
 
-export default function ReviewClient({ candidates, demo }: { candidates: Candidate[]; demo: boolean }) {
+export default function ReviewClient({ candidates, job, demo }: { candidates: Candidate[]; job: Job; demo: boolean }) {
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
@@ -92,7 +95,7 @@ export default function ReviewClient({ candidates, demo }: { candidates: Candida
       </div>
       {candidates.length === 0 ? (
         <Card><p className="text-neutral-400">No clip candidates yet — this job is still processing.</p></Card>
-      ) : candidates.map((c) => <CandidateCard key={c.id} c={c} />)}
+      ) : candidates.map((c) => <CandidateCard key={c.id} c={c} job={job} demo={demo} />)}
     </div>
   );
 }

@@ -21,6 +21,7 @@ import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from clipforge.broll import BrollOverlay, build_broll_filter
 from clipforge.captions import write_ass
 from clipforge.highlights import Candidate
 from clipforge.reframe import ReframePlan
@@ -115,6 +116,29 @@ def _crop_x_expression(plan: ReframePlan, clip_start_s: float) -> str:
     return expr
 
 
+def _main_video_filters(
+    plan: ReframePlan | None,
+    clip_start_s: float,
+    source_width: int,
+    source_height: int,
+) -> str:
+    """Crop (face-tracked when a plan is given) + scale + fps + format.
+
+    No captions here — captions are applied after any B-roll overlay
+    so they always sit on top. :func:`build_filter` appends them for
+    the plain path; the B-roll path appends them to the final label.
+    """
+    crop_w = plan.crop_width if plan else max(1, int(round(source_height * 9 / 16)))
+    crop_h = source_height
+    x_expr = (
+        _crop_x_expression(plan, clip_start_s) if plan else str(int((source_width - crop_w) / 2))
+    )
+    return (
+        f"crop={crop_w}:{crop_h}:'{x_expr}':0,scale={TARGET_WIDTH}:{TARGET_HEIGHT},"
+        f"fps={TARGET_FPS},format=yuv420p"
+    )
+
+
 def build_filter(
     plan: ReframePlan | None,
     clip_start_s: float,
@@ -143,15 +167,11 @@ def build_filter(
                 f"[bg][fg]overlay=(W-w)/2:(H-h)/2,{tail}",
             ]
         )
-    x_expr = (
-        _crop_x_expression(plan, clip_start_s) if plan else str(int((source_width - crop_w) / 2))
-    )
-    # The x expression contains commas (if(lt(t,...),...)); quote it so
-    # FFmpeg's filter parser does not split it into separate filters.
+    # The crop-x expression contains commas (if(lt(t,...),...)); it is
+    # quoted inside _main_video_filters so FFmpeg's filter parser does
+    # not split it into separate filters.
     filters = [
-        f"crop={crop_w}:{crop_h}:'{x_expr}':0,scale={TARGET_WIDTH}:{TARGET_HEIGHT}",
-        f"fps={TARGET_FPS}",
-        "format=yuv420p",
+        _main_video_filters(plan, clip_start_s, source_width, source_height),
     ]
     if ass_path:
         filters.append(f"ass={_escape_filter_path(ass_path)}")
@@ -169,6 +189,7 @@ def render_clip(
     blurred_background: bool = False,
     ass_path: str | Path | None = None,
     loudness_lufs: float = TARGET_LUFS,
+    broll: list[BrollOverlay] | None = None,
 ) -> RenderResult:
     """Render one candidate to 1080x1920 MP4; returns verified result.
 
@@ -176,6 +197,13 @@ def render_clip(
     times (``clip.start_s`` / ``clip.end_s``). Captions come from
     ``words`` (clipped to the candidate span) unless ``ass_path`` is
     given explicitly.
+
+    ``broll`` overlays licensed/source-only B-roll (see
+    :mod:`clipforge.broll`) as picture-in-picture cutaways on the
+    9:16 frame, via a multi-input filter-complex. It cannot be
+    combined with ``blurred_background`` (the two modes both rebuild
+    the frame). Each overlay must have a positive duration
+    (``clip_end_s`` or ``source_end_s`` set).
     """
     source = Path(source)
     out = Path(out_path)
@@ -237,10 +265,64 @@ def render_clip(
         f"{duration:.3f}",
         "-i",
         str(source),
-        filter_flag,
-        video_filter,
-        "-af",
-        f"loudnorm=I={loudness_lufs}:TP=-1.5:LRA=11",
+    ]
+    if broll:
+        if blurred_background:
+            raise RenderError("B-roll cannot be combined with blurred_background mode")
+        from clipforge.broll import validate_broll
+
+        overlays = [
+            validate_broll(
+                source_type=ov.source_type,
+                source_path=ov.source_path,
+                declaration=ov.declaration,
+                source_start_s=ov.source_start_s,
+                source_end_s=ov.source_end_s,
+                clip_start_s=ov.clip_start_s,
+                clip_end_s=ov.clip_end_s,
+                position=ov.position,
+                width_frac=ov.width_frac,
+                clip_duration_s=duration,
+                must_exist=True,
+            )
+            for ov in broll
+        ]
+        for ov in overlays:
+            if ov.duration_s() <= 0:
+                raise RenderError(
+                    "B-roll overlay needs a positive duration (set clip_end_s or source_end_s)"
+                )
+            cmd += [
+                "-ss",
+                f"{ov.source_start_s:.3f}",
+                "-t",
+                f"{ov.duration_s():.3f}",
+                "-i",
+                ov.source_path,
+            ]
+        main_filters = _main_video_filters(plan, clip.start_s, src_w, src_h)
+        broll_fragment, final_label = build_broll_filter(overlays)
+        chains = [f"[0:v]{main_filters}[v0]", broll_fragment]
+        if ass_path:
+            chains.append(f"[{final_label}]ass={_escape_filter_path(str(ass_path))}[vout]")
+            final_label = "vout"
+        chains.append(f"[0:a]loudnorm=I={loudness_lufs}:TP=-1.5:LRA=11[aout]")
+        video_filter = ";".join(chains)
+        filter_flag = "-filter_complex"
+        cmd += [
+            filter_flag,
+            video_filter,
+            "-map",
+            f"[{final_label}]",
+            "-map",
+            "[aout]",
+        ]
+    else:
+        cmd += [filter_flag, video_filter]
+        # Plain path: audio loudness via -af. The B-roll path already
+        # normalises audio inside its filter-complex ([aout]).
+        cmd += ["-af", f"loudnorm=I={loudness_lufs}:TP=-1.5:LRA=11"]
+    cmd += [
         "-c:v",
         "libx264",
         "-preset",

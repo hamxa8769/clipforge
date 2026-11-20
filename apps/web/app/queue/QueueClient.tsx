@@ -1,14 +1,16 @@
 "use client";
 import { useState } from "react";
 import type { Post } from "@/lib/api";
-import { Card } from "@/components/ui";
+import { Card, StatusPill } from "@/components/ui";
 
 export default function QueueClient({ posts, demo }: { posts: Post[]; demo: boolean }) {
   const [items, setItems] = useState(posts);
   const [msg, setMsg] = useState("");
   async function act(id: string, action: "approve" | "publish") {
     try { await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000"}/posts/${id}/${action}`, { method: "POST" }); } catch { /* demo */ }
-    setItems((xs) => xs.map((p) => (p.id === id ? { ...p, status: action === "approve" ? "approved" : "published (dry-run)" } : p)));
+    // Optimistic update uses real PostStatus values: a dry-run publish lands
+    // the post in "dry_run", an approval in "approved" (docs/api.md).
+    setItems((xs) => xs.map((p) => (p.id === id ? { ...p, status: action === "approve" ? "approved" : "dry_run" } : p)));
     setMsg(action === "publish" ? "Dry-run publish: no post was sent to any platform." : "Approved — ready to schedule.");
   }
   return (
@@ -22,7 +24,7 @@ export default function QueueClient({ posts, demo }: { posts: Post[]; demo: bool
             <div className="flex flex-wrap items-center gap-3">
               <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-xs font-medium">{p.platform}</span>
               <span className="text-sm text-neutral-400">Scheduled {new Date(p.scheduled_at).toLocaleString()}</span>
-              <span className="ml-auto text-sm text-neutral-400">{p.status}</span>
+              <span className="ml-auto"><StatusPill status={p.status} /></span>
             </div>
             <p className="mt-3 text-sm">{p.caption}</p>
             <div className="mt-4 flex gap-2">
