@@ -137,12 +137,14 @@ in the .deb). The server's default "web/out next to the exe" therefore
 does NOT hold there — so the shell sets `CLIPFORGE_WEB_OUT` to the
 bundled export (`sidecar::bundled_web_out()`, only when
 `binaries/web/out/index.html` exists under the resource dir) and the
-server honours it (`apps/api/clipforge_api/__main__.py`). On Windows
-the same env var covers whatever layout the MSI/NSIS bundler produces;
-the release workflow verifies the sidecar exe + `web/out/index.html`
-are inside the built installer (MSI admin-install extraction) before
-publishing. `cargo tauri dev` (source fallback) uses `apps/web/out`
-when it exists.
+server honours it (`apps/api/clipforge_api/__main__.py`).
+
+Windows MSI (verified in CI, run 44813285416): the same split — the
+sidecar is installed as `<install>\clipforge-server.exe` (the
+`-<target-triple>` suffix is stripped when bundling) while the export
+is at `<install>\binaries\web\out\index.html`. So `CLIPFORGE_WEB_OUT`
+is needed on Windows too; the release workflow proves both files are
+inside the MSI (admin-install extraction) before publishing.
 
 **Headless smoke test (installed .deb, Xvfb — verified 2026-11-20)**
 
