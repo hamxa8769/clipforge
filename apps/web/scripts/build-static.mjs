@@ -15,14 +15,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const nextBin = path.join(
-  root,
-  "node_modules",
-  ".bin",
-  process.platform === "win32" ? "next.cmd" : "next",
-);
+// Run Next's CLI through node directly (node_modules/next/dist/bin/next)
+// instead of the node_modules/.bin/next[.cmd] shim: on Windows,
+// spawnSync cannot execute a .cmd file without a shell and fails with
+// EINVAL (seen in CI on windows-latest). Invoking the CLI with node
+// works identically on Windows and Linux, no shell needed.
+const nextCli = path.join(root, "node_modules", "next", "dist", "bin", "next");
 
-const res = spawnSync(nextBin, ["build"], {
+const res = spawnSync(process.execPath, [nextCli, "build"], {
   cwd: root,
   stdio: "inherit",
   env: { ...process.env, CLIPFORGE_STATIC_EXPORT: "1", NEXT_PUBLIC_API_URL: "" },
