@@ -179,6 +179,10 @@ jobs:
       # No headless launch test on the Windows runner (unreliable there —
       # see the header comment): instead, prove the sidecar exe + web UI
       # are actually inside the built MSI via admin-install extraction.
+      # Note: Tauri strips the `-<target-triple>` suffix when bundling
+      # an externalBin binary, so inside the MSI the sidecar is
+      # clipforge-server.exe (same as in the Linux .deb, where it lands
+      # at /usr/bin/clipforge-server) — match clipforge-server*.exe.
       - name: Verify installer bundle contents
         run: |
           $msi = (Get-ChildItem apps/desktop/src-tauri/target/release/bundle/msi/*.msi | Select-Object -First 1).FullName
@@ -187,13 +191,14 @@ jobs:
           if (-not $nsis) { throw "no setup .exe in target/release/bundle/nsis/" }
           $extract = Join-Path $env:TEMP "clipforge-msi-extract"
           New-Item -ItemType Directory -Force -Path $extract | Out-Null
-          Start-Process msiexec.exe -ArgumentList @("/a", "`"$msi`"", "/qb", "TARGETDIR=`"$extract`"") -Wait -NoNewWindow
-          $sidecar = Get-ChildItem $extract -Recurse -Filter "clipforge-server-x86_64-pc-windows-msvc.exe" -ErrorAction SilentlyContinue
-          $webIndex = Get-ChildItem $extract -Recurse -Filter "index.html" -ErrorAction SilentlyContinue | Where-Object { $_.DirectoryName -match "web.out" }
-          if (-not $sidecar) { throw "sidecar exe NOT inside the MSI bundle" }
-          if (-not $webIndex) { throw "web/out/index.html NOT inside the MSI bundle" }
+          $proc = Start-Process msiexec.exe -ArgumentList @("/a", "`"$msi`"", "/qb", "TARGETDIR=`"$extract`"") -Wait -NoNewWindow -PassThru
+          if ($proc.ExitCode -ne 0) { throw "msiexec /a failed with exit code $($proc.ExitCode)" }
+          $sidecar = Get-ChildItem $extract -Recurse -Filter "clipforge-server*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          $webIndex = Get-ChildItem $extract -Recurse -Filter "index.html" -ErrorAction SilentlyContinue | Where-Object { $_.DirectoryName -match "web.out" } | Select-Object -First 1
+          if (-not $sidecar) { Get-ChildItem $extract -Recurse -File | Select-Object -First 40 FullName; throw "sidecar exe NOT inside the MSI bundle" }
+          if (-not $webIndex) { Get-ChildItem $extract -Recurse -File | Select-Object -First 40 FullName; throw "web/out/index.html NOT inside the MSI bundle" }
           Write-Host "MSI contains sidecar: $($sidecar.FullName)"
-          Write-Host "MSI contains web UI: $($webIndex[0].FullName)"
+          Write-Host "MSI contains web UI: $($webIndex.FullName)"
 
       - name: Upload desktop installers
         uses: actions/upload-artifact@v4
