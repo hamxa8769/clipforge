@@ -85,16 +85,25 @@ def _build_exe() -> Path:
     return exe
 
 
+def _npm() -> str:
+    # On Windows `npm` is npm.cmd — subprocess cannot run a bare "npm"
+    # (CreateProcess does not resolve .cmd the way a shell does), so
+    # resolve the real executable path first.
+    npm = shutil.which("npm.cmd") or shutil.which("npm")
+    if npm is None:
+        raise SystemExit("npm not found — Node.js 20+ is required to build the web UI")
+    return npm
+
+
 def _build_web(stage_web: Path) -> None:
     web = ROOT / "apps" / "web"
     if not (web / "package.json").is_file():
         raise SystemExit("apps/web/package.json not found")
-    if shutil.which("npm") is None:
-        raise SystemExit("npm not found — Node.js 20+ is required to build the web UI")
+    npm = _npm()
     # The web UI calls the API on localhost:8000 by default, which is
     # where the packaged exe listens; bake that in explicitly.
-    _run(["npm", "ci"], cwd=web)
-    _run(["npm", "run", "build"], cwd=web, env={"NEXT_PUBLIC_API_URL": "http://localhost:8000"})
+    _run([npm, "ci"], cwd=web)
+    _run([npm, "run", "build"], cwd=web, env={"NEXT_PUBLIC_API_URL": "http://localhost:8000"})
     standalone = web / ".next" / "standalone"
     if not (standalone / "server.js").is_file():
         raise SystemExit(

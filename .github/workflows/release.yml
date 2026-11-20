@@ -48,7 +48,7 @@ jobs:
 
       - name: Smoke-test the exe
         run: |
-          $exe = (Get-ChildItem dist/stage/*/clipforge-server.exe).FullName
+          $exe = (Get-ChildItem dist/ClipForge-*-Windows/clipforge-server.exe).FullName
           python scripts/smoke_exe.py $exe
 
       - name: Upload Windows zip
@@ -86,7 +86,7 @@ jobs:
         run: python scripts/build_exe.py --with-web
 
       - name: Smoke-test the binary
-        run: python scripts/smoke_exe.py dist/stage/*/clipforge-server
+        run: python scripts/smoke_exe.py dist/ClipForge-*-Linux/clipforge-server
 
       - name: Upload Linux zip
         uses: actions/upload-artifact@v4
