@@ -8,14 +8,18 @@ captions, writes a different title / description / hashtag set for each
 platform, and publishes **only after a human approves** — through the
 platforms' official APIs, and nothing else.
 
-> **Status: v0.2.1 — early alpha.** The clipping pipeline, review UI, and
+> **Status: v0.3.0 — early alpha.** The clipping pipeline, review UI, and
 > publishing adapters are under active development. Nothing in this repo
 > posts to any platform automatically, and `DRY_RUN=true` is the default.
-> v0.2.1 fixes the desktop app showing as a plain unstyled page in v0.2.0
-> (the stylesheet was never bundled) — the app now shows its real dark
-> theme. v0.2.0 added the single double-click desktop app (Windows
-> installer) with the server built in — no terminal, no Node, no separate
-> server window.
+> v0.3.0 makes the app one live, fully working flow: a visible
+> ingest → transcribe → score → render → SEO → review → approve →
+> schedule → publish pipeline with per-stage logs and retry, server-side
+> automation rules, real channel connections (OAuth, encrypted tokens)
+> and API settings. v0.2.1 fixes the desktop app showing as a plain
+> unstyled page in v0.2.0 (the stylesheet was never bundled) — the app
+> now shows its real dark theme. v0.2.0 added the single double-click
+> desktop app (Windows installer) with the server built in — no terminal,
+> no Node, no separate server window.
 
 ---
 
@@ -103,8 +107,8 @@ ruff check . && ruff format --check .
 
 ## Download the desktop app (Windows — no terminal, no Node)
 
-**Download `ClipForge-0.2.1-setup.exe` (or the `.msi`) from
-[GitHub Releases](https://github.com/hamxa8769/clipforge/releases/tag/v0.2.1),
+**Download `ClipForge-0.3.0-setup.exe` (or the `.msi`) from
+[GitHub Releases](https://github.com/hamxa8769/clipforge/releases/tag/v0.3.0),
 double-click it, done.** The app starts its own built-in server
 automatically — there is no terminal window, no Node.js install, and no
 separate server to start. Logs and data live in
@@ -118,7 +122,7 @@ app still runs (review / SEO only) and tells you so.
 
 Every release ships a ready-to-run zip — no Python install required:
 
-- [GitHub Releases](https://github.com/hamxa8769/clipforge/releases/tag/v0.2.1)
+- [GitHub Releases](https://github.com/hamxa8769/clipforge/releases/tag/v0.3.0)
   — `ClipForge-vX.Y.Z-Windows.zip` or `ClipForge-vX.Y.Z-Linux.zip`
   (published with each `v*` release; the asset appears on the release
   page once the release workflow has run).
@@ -159,6 +163,40 @@ Things to know:
 
 Building the exe yourself: `python scripts/build_exe.py --with-web`
 (see `clipforge-server.spec`).
+
+## What's new in v0.3.0
+
+- **Live workflow** — every job shows its real pipeline
+  (ingest → transcribe → score → render → SEO → review) with stage
+  history, progress, ETA, per-stage logs (`GET /jobs/{id}/logs`) and
+  the failed stage + run duration on `GET /jobs/{id}`. A failed job
+  retries in place (`POST /jobs/{id}/retry`) — same job, old candidates
+  re-derived, history kept. See `docs/workflow.md` for the curl
+  walkthrough.
+- **Automation rules on the server** — `GET/PUT /automation/rules`
+  (retention-feedback picking, auto-SEO, staggered scheduling,
+  auto-queue, high-score auto-approve) with an audit feed
+  (`GET /automation/feed`); the Automation page toggles now write to
+  the server instead of the browser. Scheduler state is truthful
+  (`GET /scheduler/status`).
+- **Channels + API settings** — `GET /channels` is the canonical
+  channel status (OAuth token state, expiry, scopes, daily caps,
+  review/audit notice, manual-post-pack fallback); the Settings page
+  saves LLM + per-platform OAuth credentials via `PUT /settings`
+  (encrypted on the server, masked to the last 4 chars) and tests them
+  with `POST /settings/test-connection/{service}`.
+- **Caption fix** — burned-in captions were broken since v0.2.1: the
+  ASS file glued every Dialogue event onto one line, so only the first
+  0.24 s of captions rendered (the rest showed as literal
+  `Dialogue: ...` text). One-line fix in `src/clipforge/captions.py`,
+  covered by `tests/unit/test_captions.py`, verified on a live render.
+- **Static-export serving fix** — `GET /channels/{platform}` used to
+  claim the Next.js RSC payload `/channels/index.txt` and 404 it, so
+  every Channels visit logged console 404s. The server now serves real
+  files under `web/out` before API routing (see
+  `tests/integration/test_web_serving.py`).
+- If you have v0.2.1 installed, just install v0.3.0 over it — no need
+  to uninstall first.
 
 ## What's new in v0.2.1
 
