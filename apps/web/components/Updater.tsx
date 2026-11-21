@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getHealth } from "@/lib/api";
 import { checkForUpdates, downloadAndInstallUpdate, fmtBytes, getUpdateStatus, isTauri, type UpdateInfo, type UpdateStatus } from "@/lib/tauri";
-import { PrimaryButton, ProgressBar, SecondaryButton, Skeleton } from "./ui";
+import { PrimaryButton, ProgressBar, SecondaryButton, Skeleton, ExternalLink } from "./ui";
 
 const RELEASES_URL = "https://github.com/hamxa8769/clipforge/releases";
 
@@ -114,7 +114,7 @@ export function UpdateSection() {
           <p className="text-sm text-neutral-300">
             Update checks need the desktop app, and this build does not have the updater yet. New versions are published on GitHub Releases.
           </p>
-          <a className="text-sm text-sky-400 underline" href={RELEASES_URL} target="_blank" rel="noreferrer">Open ClipForge releases on GitHub</a>
+          <ExternalLink className="text-sm text-sky-400 underline" href={RELEASES_URL}>Open ClipForge releases on GitHub</ExternalLink>
           <p className="text-xs text-neutral-500">Updating never touches your clips, settings or keys — the installer only replaces the app itself.</p>
         </>
       )}
@@ -154,7 +154,7 @@ export function UpdateSection() {
           <p className="text-sm text-red-200">{state.message}</p>
           <div className="flex flex-wrap gap-2">
             <SecondaryButton onClick={() => check()}>Try again</SecondaryButton>
-            <a className="inline-flex items-center justify-center rounded-md bg-neutral-800 px-3 py-1.5 text-sm font-medium text-neutral-200 hover:bg-neutral-700" href={RELEASES_URL} target="_blank" rel="noreferrer">Download from GitHub</a>
+            <ExternalLink className="inline-flex items-center justify-center rounded-md bg-neutral-800 px-3 py-1.5 text-sm font-medium text-neutral-200 hover:bg-neutral-700" href={RELEASES_URL}>Download from GitHub</ExternalLink>
           </div>
         </>
       )}

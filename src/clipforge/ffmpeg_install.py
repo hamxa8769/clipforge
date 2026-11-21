@@ -34,6 +34,30 @@ Download sources (verified 2026-11-21 — see README "FFmpeg install"):
   (``brew install ffmpeg`` is the one-command route) instead of
   pretending to install.
 
+When the primary download fails (transient network error, bad
+checksum, …) the installer retries it once, then tries the fallback
+sources in order — the direct gyan.dev packages URL for the current
+versioned build, then the BtbN build (also linked from
+ffmpeg.org/download.html). Only official, ffmpeg.org-linked sources,
+never a random mirror. A candidate only counts once its binaries are
+extracted and run: a source that answers HTTP 200 with an error page
+(a proxy or captive portal returning HTML instead of the archive) is
+caught by a magic-byte check right after the download, and an archive
+that fails to unpack moves on to the next source instead of failing
+the install. Every attempt is verified the same way: the downloaded
+size must match ``Content-Length`` when the server sends one, and the
+SHA-256 must match the published checksum when one is available —
+``<url>.sha256`` for gyan.dev, the release ``checksums.sha256``
+manifest for BtbN. A checksum mismatch is a hard failure, never a
+silent skip; a missing checksum file is recorded honestly
+(``checksum_verified: false``) and shown in the UI instead of
+pretending the download was verified.
+
+Every failure names the step that failed (``failed_step``: download /
+verify / extract / install) in plain language, and the Windows user
+PATH step reports its own warning (``path_warning``) without failing
+an install that already works inside ClipForge.
+
 The installer is deliberately dependency-light (stdlib + httpx, which
 the API already uses) and side-effect free to import: creating an
 ``FfmpegInstaller`` only reads/writes state under ``data_dir`` when an
@@ -70,6 +94,21 @@ import httpx
 WINDOWS_DOWNLOAD_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 #: Static Linux build, linked from https://ffmpeg.org/download.html.
 LINUX_DOWNLOAD_URL = "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+#: Fallback sources, tried in order after the primary fails (see module
+#: docstring). Only official, ffmpeg.org-linked sources. The gyan.dev
+#: packages URL is version-pinned (9.1 at verification time): when
+#: gyan.dev moves to a newer build it 404s and the installer moves on
+#: to BtbN, whose ``/latest`` URL never rots. BtbN is the "Windows /
+#: Linux builds from BtbN" link on ffmpeg.org/download.html; its
+#: archives have the same ``<top>/bin/{ffmpeg,ffprobe}`` layout, so the
+#: extractor needs no special case.
+WINDOWS_FALLBACK_URLS = (
+    "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.1-essentials_build.zip",
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+)
+LINUX_FALLBACK_URLS = (
+    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz",
+)
 #: The page both URLs are linked from — the human-readable fallback.
 FFMPEG_DOWNLOAD_PAGE = "https://ffmpeg.org/download.html"
 
@@ -113,6 +152,24 @@ _NO_BINARY = (
     "Try again, or install FFmpeg manually from "
     f"{FFMPEG_DOWNLOAD_PAGE}."
 )
+_INCOMPLETE_DOWNLOAD = (
+    "The download stopped before it finished, so it was discarded. "
+    "Check your internet connection and try again."
+)
+_NOT_AN_ARCHIVE = (
+    "The download server returned a web page instead of the FFmpeg archive "
+    "(this can happen behind a proxy or a captive portal). Check your "
+    "internet connection and try again."
+)
+
+#: Human step label shown in front of an install error, so the UI can
+#: say *where* it failed (download / verify / extract / install).
+_STEP_LABELS = {
+    "download": "Download failed",
+    "verify": "Verification failed",
+    "extract": "Extraction failed",
+    "install": "Install failed",
+}
 
 
 def download_url_for_platform(system: str | None = None) -> str | None:
@@ -123,6 +180,16 @@ def download_url_for_platform(system: str | None = None) -> str | None:
     if system == "Linux":
         return LINUX_DOWNLOAD_URL
     return None
+
+
+def download_urls_for_platform(system: str | None = None) -> tuple[str, ...]:
+    """Primary + fallback download URLs for this OS, in try order."""
+    system = system or platform.system()
+    if system == "Windows":
+        return (WINDOWS_DOWNLOAD_URL, *WINDOWS_FALLBACK_URLS)
+    if system == "Linux":
+        return (LINUX_DOWNLOAD_URL, *LINUX_FALLBACK_URLS)
+    return ()
 
 
 def _exe_name(system: str | None = None) -> str:
@@ -232,31 +299,76 @@ def add_to_user_path_windows(bin_dir: str | Path) -> dict:
             0,
             winreg.KEY_READ | winreg.KEY_SET_VALUE,
         )
-        try:
-            try:
-                current, reg_type = winreg.QueryValueEx(key, "Path")
-            except FileNotFoundError:
-                current, reg_type = "", winreg.REG_EXPAND_SZ
-            parts = [p for p in str(current).split(";") if p]
-            if any(os.path.normcase(p) == os.path.normcase(bin_dir) for p in parts):
-                return {"ok": True, "already_present": True, "error": ""}
-            new_value = ";".join([*parts, bin_dir])
-            winreg.SetValueEx(key, "Path", 0, reg_type, new_value)
-        finally:
-            winreg.CloseKey(key)
     except OSError as exc:
-        # Registry write failed (locked down machine, group policy...):
-        # fall back to setx, which edits the same user PATH.
-        return _add_to_user_path_setx(bin_dir, str(exc))
+        # Could not even open the key (locked down machine, group
+        # policy...): fall back to setx, which edits the same user
+        # PATH — without a readable current value, setx is refused
+        # (see _add_to_user_path_setx).
+        return _add_to_user_path_setx(bin_dir, None, str(exc))
+    try:
+        try:
+            current, reg_type = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            current, reg_type = "", winreg.REG_EXPAND_SZ
+        except OSError as exc:
+            # Value unreadable: no current PATH to hand to setx, so the
+            # fallback is refused rather than risking the PATH.
+            return _add_to_user_path_setx(bin_dir, None, str(exc))
+        parts = [p for p in str(current).split(";") if p]
+        if any(os.path.normcase(p) == os.path.normcase(bin_dir) for p in parts):
+            return {"ok": True, "already_present": True, "error": ""}
+        new_value = ";".join([*parts, bin_dir])
+        try:
+            winreg.SetValueEx(key, "Path", 0, reg_type, new_value)
+        except OSError as exc:
+            # Write failed but the current value was read: hand the
+            # full value to setx so it stores the real PATH.
+            return _add_to_user_path_setx(bin_dir, str(current), str(exc))
+    finally:
+        winreg.CloseKey(key)
     _broadcast_environment_change()
     return {"ok": True, "already_present": False, "error": ""}
 
 
-def _add_to_user_path_setx(bin_dir: str, registry_error: str) -> dict:
-    """``setx`` fallback for the user PATH. Last resort only."""
+def _add_to_user_path_setx(bin_dir: str, current_path: str | None, registry_error: str) -> dict:
+    """``setx`` fallback for the user PATH. Last resort only.
+
+    ``current_path`` is the user PATH as read from the registry (None
+    when even the read failed). The full value — current entries plus
+    ``bin_dir`` — is passed to setx, because setx stores its argument
+    verbatim: the old ``"%PATH%;<dir>"`` form only worked when a shell
+    expanded ``%PATH%`` first, and this call has no shell, so it would
+    have stored a literal ``%PATH%`` and wiped the user's existing
+    entries. With no readable current value setx is refused outright
+    rather than risk that. setx also silently truncates values over
+    1024 characters, so a PATH that long is refused too.
+    """
+    if current_path is None:
+        return {
+            "ok": False,
+            "already_present": False,
+            "error": (
+                "Could not add FFmpeg to your Windows PATH "
+                f"(registry: {registry_error}). FFmpeg still works "
+                "inside ClipForge — new terminals will need the folder added by hand."
+            ),
+        }
+    new_value = ";".join([p for p in current_path.split(";") if p] + [bin_dir])
+    if len(new_value) > 1024:
+        return {
+            "ok": False,
+            "already_present": False,
+            "error": (
+                "Could not add FFmpeg to your Windows PATH "
+                f"(registry: {registry_error}; your PATH is too long for the "
+                "setx fallback, which truncates values over 1024 characters). "
+                "FFmpeg still works inside ClipForge — new terminals will need "
+                "the folder added by hand."
+            ),
+        }
     try:
         proc = subprocess.run(
-            ["setx", "Path", f"%PATH%;{bin_dir}"],
+            ["setx", "Path", new_value],
             capture_output=True,
             text=True,
             timeout=30,
@@ -296,14 +408,43 @@ def _broadcast_environment_change() -> None:
 
 
 # ---------------------------------------------------------------- download
-#: ``downloader(url, dest, progress_cb) -> total_bytes | None``.
+@dataclass
+class DownloadResult:
+    """What a download produced: the advertised size and the URL the
+    download actually came from (after redirects).
+
+    The final URL matters for verification: the published checksum
+    describes the file the redirect points at, not the short URL that
+    redirected to it (gyan.dev's ``.sha256`` itself redirects, but a
+    fallback host's may not). ``total_bytes`` is the response
+    ``Content-Length`` when the server sent one, else None.
+    """
+
+    total_bytes: int | None = None
+    final_url: str | None = None
+
+
+#: ``downloader(url, dest, progress_cb) -> DownloadResult``.
 #: ``progress_cb(downloaded, total_or_None)`` is called per chunk.
-Downloader = Callable[[str, Path, Callable[[int, int | None], None]], int | None]
+#: Older downloaders may return a plain ``int`` (total bytes) or None;
+#: the installer treats those as "same URL, that total".
+Downloader = Callable[[str, Path, Callable[[int, int | None], None]], "DownloadResult | int | None"]
+
+
+def _as_download_result(
+    result: DownloadResult | int | None, url: str
+) -> tuple[int | None, str | None]:
+    """Normalise a downloader's return value to (total, final_url)."""
+    if isinstance(result, DownloadResult):
+        return result.total_bytes, result.final_url or url
+    if isinstance(result, int):
+        return result, url
+    return None, url
 
 
 def _download_with_httpx(
     url: str, dest: Path, progress_cb: Callable[[int, int | None], None]
-) -> int | None:
+) -> DownloadResult:
     """Stream a URL to ``dest`` with progress. Follows redirects.
 
     A malformed proxy entry in the environment (e.g. a bracketed IPv6
@@ -331,7 +472,7 @@ def _stream_once(
     *,
     trust_env: bool,
     proxy: str | None,
-) -> int | None:
+) -> DownloadResult:
     total: int | None = None
     downloaded = 0
     with httpx.stream(
@@ -339,21 +480,77 @@ def _stream_once(
     ) as resp:
         resp.raise_for_status()
         total = int(resp.headers["content-length"]) if "content-length" in resp.headers else None
+        final_url = str(resp.url)
         with dest.open("wb") as fh:
             for chunk in resp.iter_bytes(chunk_size=1024 * 256):
                 fh.write(chunk)
                 downloaded += len(chunk)
                 progress_cb(downloaded, total)
-    return total
+    return DownloadResult(total_bytes=total, final_url=final_url)
 
 
-def _fetch_expected_sha256(url: str) -> str | None:
-    """Published checksum for a build (``<url>.sha256``), or None."""
+def _sha256_file(path: Path) -> str:
+    """SHA-256 of a file, streamed (a build archive is ~100 MB)."""
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _parse_sha256_token(text: str) -> str | None:
+    """First token of a checksum file, when it is a bare SHA-256 hex digest."""
     try:
-        resp = _get_checksum(url, trust_env=True, proxy=None)
+        token = text.split()[0].strip().lower()
+    except (ValueError, IndexError):
+        return None
+    return token if len(token) == 64 and all(c in "0123456789abcdef" for c in token) else None
+
+
+def _fetch_expected_sha256(requested_url: str, final_url: str | None = None) -> str | None:
+    """Published checksum for a build, or None when none is published.
+
+    Tries, in order: ``<requested>.sha256`` (gyan.dev: the URL itself
+    303-redirects to the versioned checksum file), ``<final>.sha256``
+    (the URL the download actually came from — the checksum describes
+    that file, not the short URL that redirected to it), and a
+    ``checksums.sha256`` manifest next to the requested URL (BtbN
+    publishes one manifest per release instead of per-file checksums).
+    A missing checksum file is not a failed download: the checksum is
+    best-effort, and the caller records that it could not verify.
+    """
+    final_url = final_url or requested_url
+    for candidate in (requested_url + ".sha256", final_url + ".sha256"):
+        text = _fetch_url_text(candidate)
+        if text is not None:
+            token = _parse_sha256_token(text)
+            if token is not None:
+                return token
+    manifest = _fetch_url_text(_manifest_url(requested_url))
+    if manifest is None:
+        return None
+    wanted = requested_url.rstrip("/").rsplit("/", 1)[-1]
+    for line in manifest.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1].lstrip("*") == wanted:
+            token = parts[0].strip().lower()
+            if len(token) == 64 and all(c in "0123456789abcdef" for c in token):
+                return token
+    return None
+
+
+def _manifest_url(url: str) -> str:
+    """``checksums.sha256`` next to ``url`` (same directory)."""
+    return url.rstrip("/").rsplit("/", 1)[0] + "/checksums.sha256"
+
+
+def _fetch_url_text(url: str) -> str | None:
+    """GET ``url`` as text, or None when it is missing/unreachable."""
+    try:
+        resp = _get_text(url, trust_env=True, proxy=None)
     except httpx.InvalidURL:
         try:
-            resp = _get_checksum(url, trust_env=False, proxy=_proxy_url_from_env())
+            resp = _get_text(url, trust_env=False, proxy=_proxy_url_from_env())
         except (httpx.HTTPError, ValueError, IndexError):
             return None
     except (httpx.HTTPError, ValueError, IndexError):
@@ -363,16 +560,13 @@ def _fetch_expected_sha256(url: str) -> str | None:
     try:
         if resp.status_code != 200:
             return None
-        token = resp.text.split()[0].strip().lower()
-        return token if len(token) == 64 and all(c in "0123456789abcdef" for c in token) else None
+        return resp.text
     except (ValueError, IndexError):
         return None
 
 
-def _get_checksum(url: str, *, trust_env: bool, proxy: str | None) -> httpx.Response:
-    return httpx.get(
-        url + ".sha256", follow_redirects=True, timeout=30.0, trust_env=trust_env, proxy=proxy
-    )
+def _get_text(url: str, *, trust_env: bool, proxy: str | None) -> httpx.Response:
+    return httpx.get(url, follow_redirects=True, timeout=30.0, trust_env=trust_env, proxy=proxy)
 
 
 def _plain_error(exc: BaseException) -> str:
@@ -401,12 +595,18 @@ def _plain_error(exc: BaseException) -> str:
         return _DAMAGED_ARCHIVE
     if isinstance(exc, ValueError) and "checksum mismatch" in str(exc):
         return _CHECKSUM_MISMATCH
-    if isinstance(exc, (tarfile.TarError, EOFError, OSError)) and "damaged" in str(exc).lower():
+    if isinstance(exc, ValueError) and "stopped early" in str(exc):
+        return _INCOMPLETE_DOWNLOAD
+    if isinstance(exc, ValueError) and "not an archive" in str(exc):
+        return _NOT_AN_ARCHIVE
+    if isinstance(exc, (zipfile.BadZipFile, tarfile.TarError)):
+        return _DAMAGED_ARCHIVE
+    if isinstance(exc, (EOFError, OSError)) and "damaged" in str(exc).lower():
         return _DAMAGED_ARCHIVE
     if isinstance(exc, FileNotFoundError):
         return _NO_BINARY
     text = str(exc) or exc.__class__.__name__
-    return f"FFmpeg install failed: {text} Try again."
+    return f"{text} Try again."
 
 
 # ---------------------------------------------------------------- installer
@@ -427,6 +627,13 @@ class InstallState:
     platform: str = field(default_factory=platform.system)
     path_added: bool | None = None
     checksum_verified: bool | None = None
+    #: Step that failed ("" when nothing failed): download / verify /
+    #: extract / install. The UI shows it so the user knows *where* the
+    #: install stopped instead of guessing from a bare error.
+    failed_step: str = ""
+    #: Non-fatal Windows PATH warning on an otherwise successful install
+    #: ("" when the PATH update worked or did not apply).
+    path_warning: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -443,6 +650,8 @@ class InstallState:
             "platform": self.platform,
             "path_added": self.path_added,
             "checksum_verified": self.checksum_verified,
+            "failed_step": self.failed_step,
+            "path_warning": self.path_warning,
         }
 
 
@@ -470,6 +679,12 @@ class FfmpegInstaller:
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._last_state_write = 0.0
+        # Step the current run is in (download / verify / extract /
+        # install); the error handler reports it as ``failed_step``.
+        self._phase = "download"
+        # True once a fallback download source has been tried, so the
+        # error can say every official source failed.
+        self._tried_fallback = False
         self._state = InstallState(download_url=download_url_for_platform() or "")
         self._load_state_file()
 
@@ -549,6 +764,8 @@ class FfmpegInstaller:
                     "Install FFmpeg with one command instead: brew install ffmpeg "
                     f"(or download it from {FFMPEG_DOWNLOAD_PAGE}), then restart ClipForge."
                 ),
+                failed_step="",
+                path_warning="",
             )
             return self.status()
         existing = resolve_ffmpeg_path(self.data_dir)
@@ -562,6 +779,8 @@ class FfmpegInstaller:
                 version=version,
                 path=existing,
                 found=True,
+                failed_step="",
+                path_warning="",
             )
             return self.status()
         self._set_state(
@@ -573,6 +792,8 @@ class FfmpegInstaller:
             error="",
             path_added=None,
             checksum_verified=None,
+            failed_step="",
+            path_warning="",
         )
         thread = threading.Thread(
             target=self._run_install, args=(url,), daemon=True, name="ffmpeg-install"
@@ -585,15 +806,15 @@ class FfmpegInstaller:
     def _run_install(self, url: str) -> None:
         system = platform.system()
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self._phase = "download"
+        self._tried_fallback = False
         try:
             with tempfile.TemporaryDirectory(prefix=".ffmpeg-install-", dir=self.data_dir) as tmp:
                 tmpdir = Path(tmp)
                 archive = tmpdir / ("ffmpeg.zip" if system == "Windows" else "ffmpeg.tar.xz")
-                self._download(url, archive)
-                self._verify_checksum(url, archive)
                 new_install = tmpdir / "new-install"
-                self._extract(archive, new_install, system)
-                self._verify_binaries(new_install, system)
+                self._download_extract_verify(url, archive, new_install, system)
+                self._phase = "install"
                 self._set_state(state="installing", progress_pct=90.0, message="Installing FFmpeg…")
                 self._swap_into_place(new_install)
                 installed = bundled_ffmpeg_path(self.data_dir, system)
@@ -602,36 +823,100 @@ class FfmpegInstaller:
                     raise FileNotFoundError("installed FFmpeg did not run")
                 ensure_bundled_on_path(self.data_dir, system)
                 path_added: bool | None = None
+                path_warning = ""
                 if system == "Windows":
                     result = add_to_user_path_windows(self.bin_dir)
                     path_added = bool(result["ok"])
+                    if not result["ok"]:
+                        # Non-fatal: FFmpeg already works inside
+                        # ClipForge; only new terminals would miss it.
+                        # Surface it instead of silently reporting a
+                        # clean install.
+                        path_warning = result["error"]
                 self._notify_installed(str(installed))
+                message = "FFmpeg is installed and ready — clipping will work now."
+                if path_added:
+                    message += (
+                        " It was also added to your Windows PATH, so new terminals find it too."
+                    )
+                elif path_warning:
+                    message += f" {path_warning}"
                 self._set_state(
                     state="done",
                     progress_pct=100.0,
-                    message=(
-                        "FFmpeg is installed and ready — clipping will work now."
-                        + (
-                            " It was also added to your Windows PATH, so new terminals find it too."
-                            if path_added
-                            else ""
-                        )
-                    ),
+                    message=message,
                     error="",
                     version=version,
                     path=str(installed),
                     found=True,
                     path_added=path_added,
+                    path_warning=path_warning,
+                    failed_step="",
                 )
         except Exception as exc:  # noqa: BLE001  (install must report, not crash)
+            error = _plain_error(exc)
+            label = _STEP_LABELS.get(self._phase)
+            if label:
+                error = f"{label}: {error}"
+            if self._phase in ("download", "verify") and self._tried_fallback:
+                error += " Tried every official download source and none worked."
             self._set_state(
                 state="error",
                 progress_pct=0.0,
                 message="",
-                error=_plain_error(exc),
+                error=error,
+                failed_step=self._phase,
             )
 
-    def _download(self, url: str, archive: Path) -> None:
+    def _download_extract_verify(
+        self, primary_url: str, archive: Path, new_install: Path, system: str
+    ) -> None:
+        """Download + verify + extract one candidate, else the next.
+
+        A candidate only counts once its binaries are extracted and
+        run: a source that answers HTTP 200 with an error page (proxy /
+        captive portal) sails through the download and the checksum
+        (none published for that build) and only dies at extraction —
+        so an extraction failure retries the next source instead of
+        failing the install. The primary gets one retry on a failure;
+        each fallback gets one attempt. A failed attempt deletes its
+        partial files before the next try, so a truncated download can
+        never be mistaken for a complete one. Raises the last failure
+        when every official source has failed.
+        """
+        candidates = download_urls_for_platform()
+        if primary_url not in candidates:
+            candidates = (primary_url, *candidates)
+        last_exc: Exception | None = None
+        for index, candidate in enumerate(candidates):
+            if index > 0:
+                self._tried_fallback = True
+            attempts = 2 if index == 0 else 1
+            for _attempt in range(attempts):
+                try:
+                    final_url = self._download(candidate, archive)
+                    self._verify_checksum(candidate, final_url, archive)
+                    self._extract(archive, new_install, system)
+                    self._verify_binaries(new_install, system)
+                    self._set_state(download_url=candidate)
+                    return
+                except Exception as exc:  # noqa: BLE001  (try the next source)
+                    last_exc = exc
+                    if archive.exists():
+                        archive.unlink(missing_ok=True)
+                    shutil.rmtree(new_install, ignore_errors=True)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("no download source available")
+
+    def _download(self, url: str, archive: Path) -> str | None:
+        """Download ``url`` to ``archive``; return the final URL after redirects.
+
+        A download that stops early is a download failure, not a
+        damaged archive: when the server advertised a size
+        (``Content-Length``) the file on disk must match it exactly.
+        """
+        self._phase = "download"
         self._set_state(state="downloading", message="Downloading FFmpeg…")
         lo, hi = _PHASE_PROGRESS["downloading"]
 
@@ -643,24 +928,53 @@ class FfmpegInstaller:
                 progress_pct=min(hi, pct),
             )
 
-        self._downloader(url, archive, _progress)
+        result = self._downloader(url, archive, _progress)
+        total, final_url = _as_download_result(result, url)
         if not archive.is_file() or archive.stat().st_size == 0:
             raise ValueError("download produced an empty file")
+        if total is not None and archive.stat().st_size != total:
+            raise ValueError(
+                f"download stopped early: got {archive.stat().st_size} of {total} bytes"
+            )
+        self._check_archive_magic(archive)
+        return final_url
 
-    def _verify_checksum(self, url: str, archive: Path) -> None:
+    def _check_archive_magic(self, archive: Path) -> None:
+        """Fail fast when the download is not an archive at all.
+
+        A proxy or captive portal can answer HTTP 200 with an HTML
+        error page instead of the build; the size check passes (the
+        page has a Content-Length) and the checksum is often
+        unavailable, so without this the install would only die later
+        at extraction with a confusing unpack error. Windows builds
+        are zips (``PK``), Linux builds are xz tarballs (``\\xfd7zXZ``).
+        """
+        system = platform.system()
+        expected = b"PK" if system == "Windows" else b"\xfd7zXZ\x00"
+        with archive.open("rb") as fh:
+            head = fh.read(len(expected))
+        if not head.startswith(expected):
+            raise ValueError("download is not an archive file (the server returned a web page?)")
+
+    def _verify_checksum(self, requested_url: str, final_url: str | None, archive: Path) -> None:
+        self._phase = "verify"
         self._set_state(state="verifying", progress_pct=72.0, message="Checking the download…")
-        expected = _fetch_expected_sha256(url)
+        expected = _fetch_expected_sha256(requested_url, final_url)
         if expected is None:
-            # Checksum file unreachable: the download is still over HTTPS
-            # from the official source, so proceed and say so honestly.
-            self._set_state(checksum_verified=None)
+            # Checksum file unreachable or not published for this build
+            # (johnvansickle publishes none): the download is still
+            # over HTTPS from the official source, so proceed — but
+            # record honestly that it was NOT verified instead of
+            # leaving the UI to assume it was.
+            self._set_state(checksum_verified=False)
             return
-        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        digest = _sha256_file(archive)
         if digest != expected:
             raise ValueError(f"checksum mismatch: {digest} != {expected}")
         self._set_state(checksum_verified=True)
 
     def _extract(self, archive: Path, new_install: Path, system: str) -> None:
+        self._phase = "extract"
         self._set_state(state="extracting", progress_pct=78.0, message="Unpacking FFmpeg…")
         bin_dir = new_install / "bin"
         bin_dir.mkdir(parents=True)
@@ -672,7 +986,8 @@ class FfmpegInstaller:
                     members = [
                         m
                         for m in zf.infolist()
-                        if m.filename.endswith(("/bin/" + exe, "/bin/" + probe))
+                        if m.filename in ("bin/" + exe, "bin/" + probe)
+                        or m.filename.endswith(("/bin/" + exe, "/bin/" + probe))
                     ]
                     if not members:
                         raise FileNotFoundError("no ffmpeg binary in archive")
@@ -723,6 +1038,14 @@ class FfmpegInstaller:
                 shutil.rmtree(child, ignore_errors=True) if child.is_dir() else child.unlink(
                     missing_ok=True
                 )
+        # Guarantee runnable binaries whatever the archive layout was:
+        # zipfile does not restore stored modes, so a member extracted
+        # straight into bin/ (flat layout, no versioned top folder)
+        # would otherwise stay non-executable and fail verification.
+        for name in (exe, probe):
+            target = bin_dir / name
+            if target.is_file():
+                target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         self._set_state(progress_pct=88.0)
 
     def _verify_binaries(self, new_install: Path, system: str) -> Path:
@@ -768,14 +1091,18 @@ __all__ = [
     "FFMPEG_DOWNLOAD_PAGE",
     "INSTALL_DIR_NAME",
     "LINUX_DOWNLOAD_URL",
+    "LINUX_FALLBACK_URLS",
     "STATES",
     "WINDOWS_DOWNLOAD_URL",
+    "WINDOWS_FALLBACK_URLS",
+    "DownloadResult",
     "FfmpegInstaller",
     "InstallState",
     "add_to_user_path_windows",
     "bundled_ffmpeg_path",
     "bundled_ffprobe_path",
     "download_url_for_platform",
+    "download_urls_for_platform",
     "ensure_bundled_on_path",
     "ffmpeg_version",
     "resolve_ffmpeg_path",

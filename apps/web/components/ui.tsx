@@ -10,6 +10,7 @@
 //   and never demo numbers presented as live channel stats.
 import type { ReactNode } from "react";
 import Link from "next/link";
+import { openExternal } from "@/lib/tauri";
 
 export function DemoBadge() {
   return <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-xs font-medium text-sky-300">Demo data — API unreachable</span>;
@@ -134,6 +135,37 @@ export function SecondaryButton({ children, href, onClick, disabled }: { childre
   const cls = "inline-flex items-center justify-center rounded-md bg-neutral-800 px-3 py-1.5 text-sm font-medium text-neutral-200 hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-50";
   if (href) return <Link href={href} onClick={onClick} className={cls}>{children}</Link>;
   return <button onClick={onClick} disabled={disabled} className={cls}>{children}</button>;
+}
+
+/**
+ * Anchor to an EXTERNAL (http/https) URL — the only external anchor in
+ * the UI. A plain `<a target="_blank">` does not open in the desktop
+ * app (the Tauri WebView swallows it; v0.4.1 had no capability granting
+ * the opener plugin), so the click is intercepted and routed through
+ * `openExternal()`, which asks the desktop shell to open the system
+ * browser. The `href` stays on the element so the URL is visible on
+ * hover and copyable (right-click → Copy link address), and in a plain
+ * browser `openExternal` falls back to `window.open`.
+ *
+ * Internal navigation must keep using Next <Link> / PrimaryButton href —
+ * never this component.
+ */
+export function ExternalLink({ href, className, children }: { href: string; className?: string; children: ReactNode }) {
+  return (
+    <a
+      href={href}
+      title={href}
+      target="_blank"
+      rel="noreferrer"
+      className={className}
+      onClick={(e) => {
+        e.preventDefault();
+        void openExternal(href);
+      }}
+    >
+      {children}
+    </a>
+  );
 }
 
 /**

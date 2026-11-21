@@ -620,6 +620,10 @@ export interface FfmpegInstallStatus {
   platform: string;
   path_added: boolean | null;
   checksum_verified: boolean | null;
+  /** Step that failed ("" when nothing failed): download / verify / extract / install. */
+  failed_step: string;
+  /** Non-fatal Windows PATH warning on an otherwise successful install ("" when none). */
+  path_warning: string;
 }
 
 const FFMPEG_INSTALL_STATES: FfmpegInstallState[] = [
@@ -644,6 +648,8 @@ export function normalizeFfmpegInstallStatus(raw: unknown): FfmpegInstallStatus 
     platform: typeof r.platform === "string" ? r.platform : "",
     path_added: typeof r.path_added === "boolean" ? r.path_added : null,
     checksum_verified: typeof r.checksum_verified === "boolean" ? r.checksum_verified : null,
+    failed_step: typeof r.failed_step === "string" ? r.failed_step : "",
+    path_warning: typeof r.path_warning === "string" ? r.path_warning : "",
   };
 }
 

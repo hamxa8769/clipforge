@@ -18,6 +18,7 @@ import {
   type AnalyticsSnapshot, type ChannelStatus,
 } from "@/lib/api";
 import { demoAnalytics } from "@/lib/mock";
+import { openExternal } from "@/lib/tauri";
 import { Card, DemoBadge, EmptyState, fmtCompact, fmtNum, PlatformDot, platformLabel, PrimaryButton, SecondaryButton, Skeleton } from "@/components/ui";
 
 const PLATFORMS = ["youtube", "instagram", "facebook", "tiktok"] as const;
@@ -85,8 +86,16 @@ export default function ChannelsPage() {
       setNotice(`${platformLabel(platform)} is not configured yet — save the app client id and secret in Settings first.`);
       return;
     }
-    window.open(started.authorize_url, "_blank", "noopener");
-    setNotice(`Opened ${platformLabel(platform)} in a new tab — grant access there, then come back and this page will show Connected (refresh the page after granting).`);
+    // openExternal() opens the sign-in page in the system browser. A
+    // plain window.open() opens NOTHING inside the Tauri desktop app —
+    // v0.4.1 claimed the page was opened while nothing happened. Only
+    // report "opened" when the open actually succeeded.
+    const opened = await openExternal(started.authorize_url);
+    if (!opened) {
+      setNotice(`Could not open the ${platformLabel(platform)} sign-in page in your browser — copy this link and paste it into Chrome, grant access there, then come back and refresh this page: ${started.authorize_url}`);
+      return;
+    }
+    setNotice(`Opened ${platformLabel(platform)} in your browser — grant access there, then come back and this page will show Connected (refresh the page after granting).`);
   }
 
   async function refresh(platform: string) {

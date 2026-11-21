@@ -13,6 +13,8 @@
 // against those exact names; until the Rust side lands them, every
 // updater call resolves to null and the UI says updates are not
 // available in this build yet.
+import { isExternalUrl } from "./external-links";
+
 declare global {
   interface Window {
     __TAURI__?: { core?: { invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> } };
@@ -82,4 +84,38 @@ export function fmtBytes(n: number | undefined | null): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Open an external URL in the user's system browser (Chrome).
+ *
+ * This is the ONLY way the UI opens an external link. Do not use
+ * `window.open(url, "_blank")` or a plain `<a target="_blank">` for
+ * external URLs: inside the Tauri desktop app the WebView has no
+ * new-window handler, so `window.open` opens nothing, and a plain anchor
+ * only reaches the browser through the opener plugin — which the ACL
+ * denies unless a capability grants it (v0.4.1 had no capability file
+ * at all, so NO link in the app opened: not Connect YouTube, not the
+ * developer consoles, not FFmpeg / releases links).
+ *
+ * In the desktop app this invokes the Rust `open_external_url` command,
+ * which opens the URL with the OS default browser via the opener plugin
+ * (granted by `capabilities/default.json`). In a plain browser it falls
+ * back to `window.open`. Returns `true` only when a browser window/tab
+ * was actually opened — callers must not claim "opened" on `false`
+ * (v0.4.1's Connect step did exactly that). Non-http(s) URLs are
+ * refused here and again on the Rust side.
+ */
+export async function openExternal(url: string): Promise<boolean> {
+  if (!isExternalUrl(url)) return false;
+  if (isTauri()) {
+    const opened = await tauriInvoke<boolean>("open_external_url", { url });
+    if (opened === true) return true;
+    // Command missing (older desktop build) or refused: fall through to
+    // window.open, which works in a plain browser and is a no-op in the
+    // WebView — the caller still reports the failure honestly.
+  }
+  if (typeof window === "undefined") return false;
+  const w = window.open(url, "_blank", "noopener,noreferrer");
+  return w !== null;
 }

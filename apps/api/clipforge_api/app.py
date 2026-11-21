@@ -1444,8 +1444,17 @@ def ffmpeg_status():
     ``state`` is one of idle / downloading / verifying / extracting /
     installing / done / error / unsupported; ``progress_pct`` moves
     0 → 100 through a run; ``error`` is a plain-language message (or
-    ""), never a traceback. ``found`` / ``path`` / ``version`` say
-    whether FFmpeg is usable right now, whatever installed it.
+    ""), never a traceback — it starts with the step that failed
+    ("Download failed: …" / "Verification failed: …" / "Extraction
+    failed: …" / "Install failed: …"), and ``failed_step`` carries that
+    step machine-readably (download / verify / extract / install).
+    ``path_warning`` is a non-fatal Windows PATH warning on an
+    otherwise successful install; ``checksum_verified`` is True when
+    the published SHA-256 matched, False when no checksum file was
+    available for the build (the download still came over HTTPS from
+    the official source), None before verification ran. ``found`` /
+    ``path`` / ``version`` say whether FFmpeg is usable right now,
+    whatever installed it.
     """
     return _ffmpeg_installer().status()
 

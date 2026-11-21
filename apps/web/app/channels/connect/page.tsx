@@ -24,7 +24,8 @@ import {
   type AppSettingsView, type ChannelStatus, type ConnectGuide,
 } from "@/lib/api";
 import { guideFor, type PlatformGuide } from "@/lib/connect";
-import { Card, EmptyState, PlatformDot, platformLabel, PrimaryButton, SecondaryButton, Skeleton } from "@/components/ui";
+import { openExternal } from "@/lib/tauri";
+import { Card, EmptyState, ExternalLink, PlatformDot, platformLabel, PrimaryButton, SecondaryButton, Skeleton } from "@/components/ui";
 
 const PLATFORMS = ["youtube", "instagram", "facebook", "tiktok"] as const;
 const STEPS = ["Pick a platform", "Create the app", "Paste the keys", "Connect", "Test"] as const;
@@ -79,6 +80,7 @@ function WizardInner() {
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [oauthOpened, setOauthOpened] = useState(false);
+  const [oauthUrl, setOauthUrl] = useState<string | null>(null);
   const [waiting, setWaiting] = useState(false);
   const [channel, setChannel] = useState<ChannelStatus | null>(null);
   const [testState, setTestState] = useState<{ ok: boolean; summary: string; nextStep: string } | null>(null);
@@ -166,15 +168,27 @@ function WizardInner() {
     if (!platform) return;
     setError(null);
     setNotice(null);
+    setOauthUrl(null);
     const started = await startOAuth(platform);
     if (!started) {
       setError("ClipForge could not start the sign-in — the client ID or secret may be missing or wrong. Go back a step and check the keys.");
       return;
     }
-    window.open(started.authorize_url, "_blank", "noopener");
+    // openExternal() opens the sign-in page in the system browser. A
+    // plain window.open() opens NOTHING inside the Tauri desktop app
+    // (the WebView has no new-window handler) — v0.4.1 claimed the page
+    // was opened while nothing happened. Only report "opened" when the
+    // open actually succeeded; on failure show the link itself so the
+    // user can paste it into Chrome by hand.
+    const opened = await openExternal(started.authorize_url);
+    if (!opened) {
+      setOauthUrl(started.authorize_url);
+      setError(`ClipForge could not open the ${platformLabel(platform)} sign-in page in your browser. Copy the link below and paste it into Chrome, sign in there, then press "I granted access — check now".`);
+      return;
+    }
     setOauthOpened(true);
     setWaiting(true);
-    setNotice(`Signed-in page opened in a new tab. Sign in on ${platformLabel(platform)} and grant access, then come back here — this page checks for the connection automatically.`);
+    setNotice(`Signed-in page opened in your browser. Sign in on ${platformLabel(platform)} and grant access, then come back here — this page checks for the connection automatically.`);
     pollRef.current = setInterval(async () => {
       const channels = await getChannels();
       const found = channels?.find((c) => c.platform === platform);
@@ -277,9 +291,9 @@ function WizardInner() {
           <p className="mt-1 text-sm text-neutral-400">Do this once in {serverGuide?.console_name ?? guide.consoleName}. {guide.whatYouNeed}</p>
           {(serverGuide?.console_url || guide.consoleUrl) && (
             <p className="mt-3">
-              <a className="inline-flex items-center justify-center rounded-md bg-neutral-800 px-3 py-1.5 text-sm font-medium text-neutral-200 hover:bg-neutral-700" href={serverGuide?.console_url || guide.consoleUrl} target="_blank" rel="noreferrer">
+              <ExternalLink className="inline-flex items-center justify-center rounded-md bg-neutral-800 px-3 py-1.5 text-sm font-medium text-neutral-200 hover:bg-neutral-700" href={serverGuide?.console_url || guide.consoleUrl}>
                 Open {serverGuide?.console_name ?? guide.consoleName} ↗
-              </a>
+              </ExternalLink>
             </p>
           )}
           <ol className="mt-4 space-y-4">
@@ -289,7 +303,7 @@ function WizardInner() {
                 <div>
                   <p className="text-sm font-medium">{s.title}</p>
                   <p className="mt-0.5 text-sm leading-relaxed text-neutral-400">{s.detail}</p>
-                  {s.link && <a className="mt-1 inline-block text-sm text-sky-400 underline" href={s.link.url} target="_blank" rel="noreferrer">{s.link.label} ↗</a>}
+                  {s.link && <ExternalLink className="mt-1 inline-block text-sm text-sky-400 underline" href={s.link.url}>{s.link.label} ↗</ExternalLink>}
                 </div>
               </li>
             ))}
@@ -362,7 +376,7 @@ function WizardInner() {
       {step === 4 && platform && (
         <Card>
           <h2 className="text-lg font-semibold">Step 4 — Connect {platformLabel(platform)}</h2>
-          <p className="mt-1 text-sm text-neutral-400">This opens {platformLabel(platform)}&apos;s own sign-in page in a new tab. Sign in there and grant access — ClipForge never sees your password. The token is stored encrypted on the server.</p>
+          <p className="mt-1 text-sm text-neutral-400">This opens {platformLabel(platform)}&apos;s own sign-in page in your browser. Sign in there and grant access — ClipForge never sees your password. The token is stored encrypted on the server.</p>
           <div className="mt-5 text-center">
             <button
               onClick={() => connect()}
@@ -372,6 +386,16 @@ function WizardInner() {
               Connect {platformLabel(platform)}
             </button>
           </div>
+          {oauthUrl && !oauthOpened && (
+            <div className="mt-5 space-y-2 text-center">
+              <p className="text-sm text-neutral-300">The sign-in page did not open automatically — copy this link into your browser:</p>
+              <span className="flex gap-2">
+                <input readOnly className="w-full rounded-md border border-neutral-700 bg-neutral-900 px-3 py-2 font-mono text-xs" value={oauthUrl} aria-label="Sign-in link" />
+                <CopyButton text={oauthUrl} label="Copy" />
+              </span>
+              <p><SecondaryButton onClick={() => connect()}>Try opening the sign-in page again</SecondaryButton></p>
+            </div>
+          )}
           {oauthOpened && (
             <div className="mt-5 space-y-3 text-center">
               <p className="text-sm text-neutral-300">{waiting ? "Waiting for you to grant access on the platform's page…" : "Checking…"}</p>

@@ -29,9 +29,11 @@ from fastapi.testclient import TestClient
 from clipforge.ffmpeg_install import (
     LINUX_DOWNLOAD_URL,
     WINDOWS_DOWNLOAD_URL,
+    DownloadResult,
     FfmpegInstaller,
     add_to_user_path_windows,
     download_url_for_platform,
+    download_urls_for_platform,
     ensure_bundled_on_path,
     resolve_ffmpeg_path,
 )
@@ -73,10 +75,10 @@ def _fake_zip_bytes() -> bytes:
 def _fake_downloader(payload: bytes):
     """A downloader that writes ``payload`` and reports progress like a real one."""
 
-    def _download(url: str, dest: Path, progress_cb) -> int | None:
+    def _download(url: str, dest: Path, progress_cb) -> DownloadResult:
         dest.write_bytes(payload)
         progress_cb(len(payload), len(payload))
-        return len(payload)
+        return DownloadResult(total_bytes=len(payload), final_url=url)
 
     return _download
 
@@ -96,7 +98,7 @@ def no_checksum(monkeypatch: pytest.MonkeyPatch):
     """Checksum file unreachable — install must still proceed (HTTPS source)."""
     import clipforge.ffmpeg_install as mod
 
-    monkeypatch.setattr(mod, "_fetch_expected_sha256", lambda url: None)
+    monkeypatch.setattr(mod, "_fetch_expected_sha256", lambda *args: None)
 
 
 def _wait_done(installer: FfmpegInstaller, timeout_s: float = 10.0) -> dict:
@@ -194,7 +196,7 @@ def test_checksum_mismatch_fails_cleanly(tmp_path: Path, monkeypatch: pytest.Mon
     import clipforge.ffmpeg_install as mod
 
     payload = _fake_tarxz_bytes()
-    monkeypatch.setattr(mod, "_fetch_expected_sha256", lambda url: "0" * 64)
+    monkeypatch.setattr(mod, "_fetch_expected_sha256", lambda *args: "0" * 64)
     installer = FfmpegInstaller(tmp_path, downloader=_fake_downloader(payload))
     installer.start_install(force=True)
     status = _wait_done(installer)
@@ -209,7 +211,7 @@ def test_matching_checksum_is_recorded(tmp_path: Path, monkeypatch: pytest.Monke
 
     payload = _fake_tarxz_bytes()
     monkeypatch.setattr(
-        mod, "_fetch_expected_sha256", lambda url: hashlib.sha256(payload).hexdigest()
+        mod, "_fetch_expected_sha256", lambda *args: hashlib.sha256(payload).hexdigest()
     )
     installer = FfmpegInstaller(tmp_path, downloader=_fake_downloader(payload))
     installer.start_install(force=True)
@@ -262,9 +264,10 @@ def test_second_start_while_running_returns_live_status(tmp_path: Path, no_check
 
     def _slow(url: str, dest: Path, progress_cb):
         time.sleep(1.0)
-        dest.write_bytes(_fake_tarxz_bytes())
-        progress_cb(1, 1)
-        return 1
+        payload = _fake_tarxz_bytes()
+        dest.write_bytes(payload)
+        progress_cb(len(payload), len(payload))
+        return DownloadResult(total_bytes=len(payload), final_url=url)
 
     installer = FfmpegInstaller(tmp_path, downloader=_slow)
     first = installer.start_install(force=True)
@@ -372,7 +375,7 @@ def api_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("CLIPFORGE_DATA_DIR", str(tmp_path))
     import clipforge.ffmpeg_install as mod
 
-    monkeypatch.setattr(mod, "_fetch_expected_sha256", lambda url: None)
+    monkeypatch.setattr(mod, "_fetch_expected_sha256", lambda *args: None)
     import importlib
 
     app_mod = importlib.import_module("clipforge_api.app")
@@ -401,7 +404,7 @@ def test_api_status_reports_idle_before_install(api_client) -> None:
 def test_api_install_then_status_reports_done(api_client, monkeypatch: pytest.MonkeyPatch) -> None:
     import clipforge.ffmpeg_install as mod
 
-    monkeypatch.setattr(mod, "_fetch_expected_sha256", lambda url: None)
+    monkeypatch.setattr(mod, "_fetch_expected_sha256", lambda *args: None)
     client, installer = api_client
     resp = client.post("/ffmpeg/install?force=true")
     assert resp.status_code == 202
@@ -473,6 +476,7 @@ def test_download_retries_direct_when_proxy_env_is_broken(
 
     class _FakeResp:
         headers: dict = {}
+        url = "https://example.invalid/x"
 
         def __enter__(self):
             return self
@@ -496,8 +500,511 @@ def test_download_retries_direct_when_proxy_env_is_broken(
 
     monkeypatch.setattr(mod.httpx, "stream", _fake_stream)
     dest = tmp_path / "f.bin"
-    total = mod._download_with_httpx("https://example.invalid/x", dest, lambda d, t: None)
+    result = mod._download_with_httpx("https://example.invalid/x", dest, lambda d, t: None)
     expected_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
     assert calls == [(True, None), (False, expected_proxy)]
     assert dest.read_bytes() == b"fake-bytes"
-    assert total is None
+    assert result.total_bytes is None
+    assert result.final_url == "https://example.invalid/x"
+
+
+# ------------------------------------------------- v0.4.2 hardening: redirect,
+# size + checksum against the redirected file, retry + fallback sources,
+# step-tagged errors, PATH failure surfacing.
+def test_checksum_is_fetched_for_the_redirected_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The checksum describes the file the redirect points at, not the
+    short URL that redirected to it: the installer asks for the
+    checksum of the FINAL url the download came from."""
+    import clipforge.ffmpeg_install as mod
+
+    payload = _fake_tarxz_bytes()
+    seen: list[tuple[str, str | None]] = []
+
+    def _record(requested_url: str, final_url: str | None = None) -> str:
+        seen.append((requested_url, final_url))
+        return hashlib.sha256(payload).hexdigest()
+
+    monkeypatch.setattr(mod, "_fetch_expected_sha256", _record)
+
+    def _redirecting_downloader(url: str, dest: Path, progress_cb) -> DownloadResult:
+        dest.write_bytes(payload)
+        progress_cb(len(payload), len(payload))
+        # gyan.dev 303s to the versioned package; the download came
+        # from there, so that is the file the checksum must describe.
+        return DownloadResult(
+            total_bytes=len(payload),
+            final_url="https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.1-essentials_build.zip",
+        )
+
+    installer = FfmpegInstaller(tmp_path, downloader=_redirecting_downloader)
+    installer.start_install(force=True)
+    status = _wait_done(installer)
+    assert status["state"] == "done", status
+    assert status["checksum_verified"] is True
+    assert seen == [
+        (
+            LINUX_DOWNLOAD_URL,
+            "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.1-essentials_build.zip",
+        )
+    ]
+
+
+def test_download_reports_final_url_after_redirect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """httpx follows the redirect; the downloader reports the URL the
+    bytes actually came from."""
+    import clipforge.ffmpeg_install as mod
+
+    payload = b"redirected-bytes"
+
+    class _FakeResp:
+        headers = {"content-length": str(len(payload))}
+        url = "https://example.invalid/packages/ffmpeg-9.1-essentials_build.zip"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def raise_for_status(self):
+            pass
+
+        def iter_bytes(self, chunk_size=1):
+            yield payload
+
+    monkeypatch.setattr(
+        mod.httpx,
+        "stream",
+        lambda *a, **k: _FakeResp(),  # noqa: ARG005
+    )
+    dest = tmp_path / "f.zip"
+    result = mod._download_with_httpx(
+        "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+        dest,
+        lambda d, t: None,
+    )
+    assert dest.read_bytes() == payload
+    assert result.total_bytes == len(payload)
+    assert result.final_url == "https://example.invalid/packages/ffmpeg-9.1-essentials_build.zip"
+
+
+def test_truncated_download_fails_as_download_not_damaged_archive(
+    tmp_path: Path, no_checksum
+) -> None:
+    """A download that stops early must say so at the download step —
+    not fail later at extraction as a 'damaged archive'."""
+    payload = _fake_tarxz_bytes()
+
+    def _truncated(url: str, dest: Path, progress_cb) -> DownloadResult:
+        # Server advertised the full size; only half the bytes arrived.
+        dest.write_bytes(payload[: len(payload) // 2])
+        progress_cb(len(payload) // 2, len(payload))
+        return DownloadResult(total_bytes=len(payload), final_url=url)
+
+    installer = FfmpegInstaller(tmp_path, downloader=_truncated)
+    installer.start_install(force=True)
+    status = _wait_done(installer)
+    assert status["state"] == "error", status
+    assert status["failed_step"] == "download"
+    assert status["error"].startswith("Download failed:")
+    assert "stopped" in status["error"].lower()
+    assert not (tmp_path / "ffmpeg").exists()
+
+
+def test_checksum_mismatch_names_the_verify_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import clipforge.ffmpeg_install as mod
+
+    payload = _fake_tarxz_bytes()
+    monkeypatch.setattr(mod, "_fetch_expected_sha256", lambda *args: "0" * 64)
+    installer = FfmpegInstaller(tmp_path, downloader=_fake_downloader(payload))
+    installer.start_install(force=True)
+    status = _wait_done(installer)
+    assert status["state"] == "error", status
+    assert status["failed_step"] == "verify"
+    assert status["error"].startswith("Verification failed:")
+    assert "checksum" in status["error"].lower()
+    assert not (tmp_path / "ffmpeg").exists()
+
+
+def test_missing_checksum_is_recorded_not_hidden(tmp_path: Path, no_checksum) -> None:
+    """No checksum file published for this build: the install proceeds
+    (HTTPS from the official source) but says so — checksum_verified
+    is False, not a silent None the UI could read as 'verified'."""
+    installer = FfmpegInstaller(tmp_path, downloader=_fake_downloader(_fake_tarxz_bytes()))
+    installer.start_install(force=True)
+    status = _wait_done(installer)
+    assert status["state"] == "done", status
+    assert status["checksum_verified"] is False
+
+
+def test_checksum_manifest_lookup_for_btbN(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BtbN publishes one checksums.sha256 manifest per release, not
+    per-file .sha256 files — the installer reads the hash for the asset
+    from the manifest next to the download URL."""
+    import clipforge.ffmpeg_install as mod
+
+    manifest = (
+        "7b9b1e63f3ee423bc1d16ca36174d7dada1a805a715b308af60a1487da521c54"
+        "  ffmpeg-master-latest-linux64-gpl.tar.xz\n"
+        "72bfeff541fcdf3421a555bc466dada18a8b4d158944b8ea8aa7b67302908553"
+        "  ffmpeg-master-latest-win64-gpl.zip\n"
+    )
+
+    def _fake_fetch(url: str) -> str | None:
+        if url.endswith("checksums.sha256"):
+            return manifest
+        return None
+
+    monkeypatch.setattr(mod, "_fetch_url_text", _fake_fetch)
+    got = mod._fetch_expected_sha256(
+        "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/"
+        "ffmpeg-master-latest-linux64-gpl.tar.xz"
+    )
+    assert got == "7b9b1e63f3ee423bc1d16ca36174d7dada1a805a715b308af60a1487da521c54"
+
+
+def test_per_file_sha256_wins_over_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
+    """gyan.dev's <url>.sha256 is tried first; the manifest is only a
+    fallback for hosts that publish one."""
+    import clipforge.ffmpeg_install as mod
+
+    def _fake_fetch(url: str) -> str | None:
+        if url.endswith(".sha256") and "checksums" not in url:
+            return "b9bbbb3acece000cbeec994f856649354e52c773807841e78908374b24d658fd\n"
+        return None
+
+    monkeypatch.setattr(mod, "_fetch_url_text", _fake_fetch)
+    got = mod._fetch_expected_sha256(
+        "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+        "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.1-essentials_build.zip",
+    )
+    assert got == "b9bbbb3acece000cbeec994f856649354e52c773807841e78908374b24d658fd"
+
+
+def test_primary_retry_then_fallback_source(tmp_path: Path, no_checksum) -> None:
+    """Primary fails twice (one retry), the fallback succeeds: the
+    install still completes, and the status says which URL was used."""
+    payload = _fake_tarxz_bytes()
+    calls: list[str] = []
+
+    def _flaky(url: str, dest: Path, progress_cb) -> DownloadResult:
+        calls.append(url)
+        if url == LINUX_DOWNLOAD_URL:
+            raise ConnectionError("primary host unreachable")
+        dest.write_bytes(payload)
+        progress_cb(len(payload), len(payload))
+        return DownloadResult(total_bytes=len(payload), final_url=url)
+
+    installer = FfmpegInstaller(tmp_path, downloader=_flaky)
+    installer.start_install(force=True)
+    status = _wait_done(installer)
+    assert status["state"] == "done", status
+    assert calls.count(LINUX_DOWNLOAD_URL) == 2  # first try + one retry
+    fallback = download_urls_for_platform("Linux")[1]
+    assert calls.count(fallback) == 1
+    assert status["download_url"] == fallback
+
+
+def test_transient_primary_failure_retried_once(tmp_path: Path, no_checksum) -> None:
+    """A single blip on the primary does not fail the install: the
+    same URL is retried once before any fallback is tried."""
+    payload = _fake_tarxz_bytes()
+    calls: list[str] = []
+
+    def _blip_then_ok(url: str, dest: Path, progress_cb) -> DownloadResult:
+        calls.append(url)
+        if len(calls) == 1:
+            raise ConnectionError("connection reset")
+        dest.write_bytes(payload)
+        progress_cb(len(payload), len(payload))
+        return DownloadResult(total_bytes=len(payload), final_url=url)
+
+    installer = FfmpegInstaller(tmp_path, downloader=_blip_then_ok)
+    installer.start_install(force=True)
+    status = _wait_done(installer)
+    assert status["state"] == "done", status
+    assert calls == [LINUX_DOWNLOAD_URL, LINUX_DOWNLOAD_URL]
+
+
+def test_all_sources_failing_says_so(tmp_path: Path, no_checksum) -> None:
+    """Every official source down: the error names the download step
+    and says all sources were tried, instead of blaming the last one."""
+    installer = FfmpegInstaller(
+        tmp_path,
+        downloader=lambda url, dest, progress_cb: (_ for _ in ()).throw(
+            ConnectionError("no network here")
+        ),
+    )
+    installer.start_install(force=True)
+    status = _wait_done(installer)
+    assert status["state"] == "error", status
+    assert status["failed_step"] == "download"
+    assert "every official download source" in status["error"]
+
+
+def test_flat_zip_layout_without_top_folder_installs(
+    tmp_path: Path, no_checksum, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Extraction is layout-agnostic: a zip whose binaries sit directly
+    under bin/ (no versioned top-level folder) installs the same way
+    as the nested gyan.dev layout."""
+    import clipforge.ffmpeg_install as mod
+
+    monkeypatch.setattr(mod.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        mod,
+        "add_to_user_path_windows",
+        lambda bin_dir: {"ok": True, "already_present": False, "error": ""},
+    )
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, payload in (
+            ("bin/ffmpeg.exe", FAKE_FFMPEG_SCRIPT),
+            ("bin/ffprobe.exe", FAKE_FFPROBE_SCRIPT),
+        ):
+            info = zipfile.ZipInfo(name)
+            info.external_attr = 0o755 << 16
+            zf.writestr(info, payload)
+    installer = FfmpegInstaller(tmp_path, downloader=_fake_downloader(buf.getvalue()))
+    installer.start_install(force=True)
+    status = _wait_done(installer)
+    assert status["state"] == "done", status
+    assert (tmp_path / "ffmpeg" / "bin" / "ffmpeg.exe").is_file()
+    assert (tmp_path / "ffmpeg" / "bin" / "ffprobe.exe").is_file()
+
+
+def test_already_installed_never_calls_downloader(tmp_path: Path, no_checksum) -> None:
+    """Short-circuit: FFmpeg already present means no download at all."""
+    installer = FfmpegInstaller(tmp_path, downloader=_fake_downloader(_fake_tarxz_bytes()))
+    installer.start_install(force=True)
+    assert _wait_done(installer)["state"] == "done"
+
+    calls: list[str] = []
+
+    def _must_not_run(url: str, dest: Path, progress_cb):
+        calls.append(url)
+        raise AssertionError("downloader must not run when FFmpeg is installed")
+
+    second = FfmpegInstaller(tmp_path, downloader=_must_not_run)
+    status = second.start_install()
+    assert status["state"] == "done"
+    assert status["failed_step"] == ""
+    assert calls == []
+
+
+def test_legacy_int_returning_downloader_still_works(tmp_path: Path, no_checksum) -> None:
+    """Downloaders written against the old protocol (returning a plain
+    total-bytes int) keep working: total = the int, final URL = the
+    requested URL."""
+
+    def _legacy(url: str, dest: Path, progress_cb) -> int:
+        payload = _fake_tarxz_bytes()
+        dest.write_bytes(payload)
+        progress_cb(len(payload), len(payload))
+        return len(payload)
+
+    installer = FfmpegInstaller(tmp_path, downloader=_legacy)
+    installer.start_install(force=True)
+    status = _wait_done(installer)
+    assert status["state"] == "done", status
+
+
+# ------------------------------------------------- Windows PATH failure surfacing
+def test_windows_path_failure_is_a_warning_not_a_silent_done(
+    tmp_path: Path, no_checksum, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The PATH update fails but FFmpeg itself installed: the install
+    still reports done (clipping works inside ClipForge) — but the
+    failure is surfaced in path_warning and in the message, not
+    swallowed."""
+    import clipforge.ffmpeg_install as mod
+
+    monkeypatch.setattr(mod.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        mod,
+        "add_to_user_path_windows",
+        lambda bin_dir: {
+            "ok": False,
+            "already_present": False,
+            "error": (
+                "Could not add FFmpeg to your Windows PATH "
+                "(registry: access denied; setx failed). FFmpeg still works "
+                "inside ClipForge — new terminals will need the folder added by hand."
+            ),
+        },
+    )
+    installer = FfmpegInstaller(tmp_path, downloader=_fake_downloader(_fake_zip_bytes()))
+    installer.start_install(force=True)
+    status = _wait_done(installer)
+    assert status["state"] == "done", status
+    assert status["path_added"] is False
+    assert status["path_warning"]  # surfaced, not discarded
+    assert "Windows PATH" in status["path_warning"]
+    assert "Windows PATH" in status["message"]
+    assert status["failed_step"] == ""
+
+
+def test_setx_fallback_passes_the_full_path_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Registry write fails but the read worked: setx gets the FULL
+    current PATH plus the new dir — never a literal '%PATH%', which no
+    shell expands here and which would have wiped the user's entries."""
+    import clipforge.ffmpeg_install as mod
+
+    monkeypatch.setattr(mod.platform, "system", lambda: "Windows")
+    fake = _fake_winreg_module(r"C:\Windows;C:\Windows\System32")
+    monkeypatch.setitem(__import__("sys").modules, "winreg", fake)
+
+    def _fail_write(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise OSError("access denied")
+
+    fake.SetValueEx = _fail_write  # type: ignore[method-assign]
+    seen: list = []
+
+    def _record_run(argv, **kwargs):  # noqa: ANN001, ANN003
+        seen.append(argv)
+        return type("P", (), {"returncode": 0})()
+
+    monkeypatch.setattr(mod.subprocess, "run", _record_run)
+    monkeypatch.setattr(mod, "_broadcast_environment_change", lambda: None)
+    result = add_to_user_path_windows(r"C:\clipforge\ffmpeg\bin")
+    assert result["ok"] is True
+    assert seen == [["setx", "Path", r"C:\Windows;C:\Windows\System32;C:\clipforge\ffmpeg\bin"]]
+    assert "%PATH%" not in seen[0][2]
+
+
+def test_setx_refused_when_registry_unreadable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The registry cannot even be read: setx is refused outright —
+    with no readable current PATH it would have stored a literal
+    '%PATH%' and destroyed the user's existing entries."""
+    import clipforge.ffmpeg_install as mod
+
+    monkeypatch.setattr(mod.platform, "system", lambda: "Windows")
+    fake = _fake_winreg_module("")
+    monkeypatch.setitem(__import__("sys").modules, "winreg", fake)
+
+    def _raise(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise OSError("access denied")
+
+    fake.OpenKey = _raise  # type: ignore[method-assign]
+    calls: list = []
+    monkeypatch.setattr(
+        mod.subprocess,
+        "run",
+        lambda *a, **k: calls.append(a) or type("P", (), {"returncode": 0})(),
+    )
+    result = add_to_user_path_windows(r"C:\ffmpeg\bin")
+    assert result["ok"] is False
+    assert "PATH" in result["error"]
+    assert "Traceback" not in result["error"]
+    assert calls == []  # setx never ran
+
+
+def test_setx_refused_when_path_would_be_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """setx silently truncates values over 1024 characters: a PATH
+    that long is refused instead of cutting the user's PATH in half."""
+    import clipforge.ffmpeg_install as mod
+
+    monkeypatch.setattr(mod.platform, "system", lambda: "Windows")
+    fake = _fake_winreg_module(";".join(f"C:\\dir{i}" for i in range(120)))
+    monkeypatch.setitem(__import__("sys").modules, "winreg", fake)
+
+    def _fail_write(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise OSError("access denied")
+
+    fake.SetValueEx = _fail_write  # type: ignore[method-assign]
+    calls: list = []
+    monkeypatch.setattr(
+        mod.subprocess,
+        "run",
+        lambda *a, **k: calls.append(a) or type("P", (), {"returncode": 0})(),
+    )
+    result = add_to_user_path_windows(r"C:\ffmpeg\bin")
+    assert result["ok"] is False
+    assert "1024" in result["error"]
+    assert calls == []  # setx never ran
+
+
+def test_html_error_page_falls_back_to_next_source(tmp_path: Path, no_checksum) -> None:
+    """A proxy/captive portal answering HTTP 200 with an HTML error
+    page instead of the archive: the magic-byte check catches it at
+    the download step and the installer moves on to the fallback
+    instead of dying at extraction."""
+    from clipforge.ffmpeg_install import download_urls_for_platform
+
+    payload = _fake_tarxz_bytes()
+    html_page = b"<html><body>Proxy error: host unreachable</body></html>"
+    calls: list[str] = []
+
+    def _proxy_poisoned(url: str, dest: Path, progress_cb) -> DownloadResult:
+        calls.append(url)
+        if url == LINUX_DOWNLOAD_URL:
+            dest.write_bytes(html_page)
+            progress_cb(len(html_page), len(html_page))
+            return DownloadResult(total_bytes=len(html_page), final_url=url)
+        dest.write_bytes(payload)
+        progress_cb(len(payload), len(payload))
+        return DownloadResult(total_bytes=len(payload), final_url=url)
+
+    installer = FfmpegInstaller(tmp_path, downloader=_proxy_poisoned)
+    installer.start_install(force=True)
+    status = _wait_done(installer)
+    assert status["state"] == "done", status
+    fallback = download_urls_for_platform("Linux")[1]
+    assert status["download_url"] == fallback
+    assert calls.count(LINUX_DOWNLOAD_URL) == 2  # first try + one retry
+    assert calls.count(fallback) == 1
+
+
+def test_corrupt_archive_falls_back_to_next_source(tmp_path: Path, no_checksum) -> None:
+    """An archive that unpacks wrong on the primary (right magic, bad
+    contents) moves on to the fallback instead of failing the install
+    with an unpack error."""
+    from clipforge.ffmpeg_install import download_urls_for_platform
+
+    payload = _fake_tarxz_bytes()
+    calls: list[str] = []
+
+    def _corrupt_primary(url: str, dest: Path, progress_cb) -> DownloadResult:
+        calls.append(url)
+        if url == LINUX_DOWNLOAD_URL:
+            # xz magic, then garbage: passes the magic check, dies at
+            # extraction.
+            bad = b"\xfd7zXZ\x00" + b"garbage-garbage-garbage"
+            dest.write_bytes(bad)
+            progress_cb(len(bad), len(bad))
+            return DownloadResult(total_bytes=len(bad), final_url=url)
+        dest.write_bytes(payload)
+        progress_cb(len(payload), len(payload))
+        return DownloadResult(total_bytes=len(payload), final_url=url)
+
+    installer = FfmpegInstaller(tmp_path, downloader=_corrupt_primary)
+    installer.start_install(force=True)
+    status = _wait_done(installer)
+    assert status["state"] == "done", status
+    fallback = download_urls_for_platform("Linux")[1]
+    assert status["download_url"] == fallback
+
+
+def test_tarfile_error_is_plain_language() -> None:
+    """An unpack failure must never leak a raw multi-line tarfile
+    exception into the UI."""
+    import tarfile
+
+    from clipforge.ffmpeg_install import _plain_error
+
+    message = _plain_error(
+        tarfile.ReadError(
+            "file could not be opened successfully:\n"
+            "- method gz: ReadError('not a gzip file')\n"
+            "- method xz: ReadError('not an lzma file')"
+        )
+    )
+    assert "ReadError" not in message
+    assert "damaged" in message.lower()
+    assert "\n" not in message

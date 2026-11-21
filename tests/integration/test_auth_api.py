@@ -114,6 +114,43 @@ def test_oauth_start_requires_credentials(client: TestClient) -> None:
     assert "Settings" in resp.json()["detail"]
 
 
+def test_oauth_start_authorize_url_is_a_valid_google_url(client: TestClient) -> None:
+    """The URL the Connect button opens must be a real Google sign-in URL.
+
+    Regression guard for the v0.4.2 "no link opens" fix: the desktop
+    shell only opens http(s) URLs (see `open_external_url` /
+    `isExternalUrl`), so a malformed authorize URL would be refused and
+    the wizard would report the failure instead of opening anything.
+    """
+    from urllib.parse import parse_qs, urlparse
+
+    client.put(
+        "/settings",
+        json={"credentials": {"youtube": {"client_id": "cid", "client_secret": "csec"}}},
+    )
+    start = client.get("/auth/youtube/start")
+    assert start.status_code == 200
+    body = start.json()
+
+    parsed = urlparse(body["authorize_url"])
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "accounts.google.com"
+    assert parsed.path == "/o/oauth2/v2/auth"
+    params = parse_qs(parsed.query)
+    assert params["client_id"] == ["cid"]
+    assert params["response_type"] == ["code"]
+    assert params["access_type"] == ["offline"]  # refresh token, no re-prompt
+    assert params["state"] == [body["state"]]
+    assert params["state"][0]  # state present (CSRF, single-use)
+    # Loopback redirect the wizard shows the user — must be the exact
+    # callback the server serves, or Google refuses the grant.
+    assert params["redirect_uri"] == [body["redirect_uri"]]
+    redirect = urlparse(body["redirect_uri"])
+    assert redirect.scheme == "http"
+    assert redirect.netloc.startswith("127.0.0.1:")
+    assert redirect.path == "/auth/callback/youtube"
+
+
 def test_oauth_full_flow_connect_refresh_disconnect(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

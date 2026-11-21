@@ -13,9 +13,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ffmpegInstallRunning, getFfmpegInstallStatus, getSettings, installFfmpeg,
-  type FfmpegInstallStatus,
+  type FfmpegInstallState, type FfmpegInstallStatus,
 } from "@/lib/api";
-import { PrimaryButton, ProgressBar, SecondaryButton } from "./ui";
+import { PrimaryButton, ProgressBar, SecondaryButton, ExternalLink } from "./ui";
 
 export function useFfmpegInstaller(onInstalled?: () => void) {
   const [status, setStatus] = useState<FfmpegInstallStatus | null>(null);
@@ -24,6 +24,15 @@ export function useFfmpegInstaller(onInstalled?: () => void) {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const onInstalledRef = useRef(onInstalled);
   onInstalledRef.current = onInstalled;
+  // Fires onInstalled once when the install flips to done. Kept in an
+  // effect (not inside the setStatus updater, which React requires to
+  // be pure and may double-invoke) so the banner/settings re-check
+  // runs exactly once per completed install.
+  const prevStateRef = useRef<FfmpegInstallState | null>(null);
+  useEffect(() => {
+    if (status?.state === "done" && prevStateRef.current !== "done") onInstalledRef.current?.();
+    prevStateRef.current = status?.state ?? null;
+  }, [status]);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
@@ -32,10 +41,7 @@ export function useFfmpegInstaller(onInstalled?: () => void) {
   const refresh = useCallback(async () => {
     const next = await getFfmpegInstallStatus();
     if (next) {
-      setStatus((prev) => {
-        if (next.state === "done" && prev?.state !== "done") onInstalledRef.current?.();
-        return next;
-      });
+      setStatus(next);
       if (!ffmpegInstallRunning(next)) stopPolling();
     }
     return next;
@@ -86,6 +92,15 @@ export function FfmpegInstallSection({ onInstalled }: { onInstalled?: () => void
           {status?.version ? <span className="text-neutral-500"> ({status.version})</span> : null}
           {status?.path ? <span className="block truncate font-mono text-xs text-neutral-500">{status.path}</span> : null}
         </p>
+        {status?.path_warning ? (
+          <p className="text-sm text-amber-300" role="status">{status.path_warning}</p>
+        ) : null}
+        {status?.checksum_verified === false ? (
+          <p className="text-xs text-neutral-500">
+            The download checksum could not be checked (no checksum file was published for this
+            build) — the file still came over HTTPS from the official site.
+          </p>
+        ) : null}
         <SecondaryButton onClick={() => start(true)} disabled={starting || running}>
           {running ? "Reinstalling…" : "Reinstall FFmpeg"}
         </SecondaryButton>
@@ -104,9 +119,9 @@ export function FfmpegInstallSection({ onInstalled }: { onInstalled?: () => void
           {starting ? "Starting…" : running ? "Installing…" : error ? "Try installing FFmpeg again" : "Install FFmpeg"}
         </PrimaryButton>
         {status?.download_url && !running && (
-          <a className="text-sm text-sky-400 underline" href={status.download_url} target="_blank" rel="noreferrer">
+          <ExternalLink className="text-sm text-sky-400 underline" href={status.download_url}>
             Download it manually instead
-          </a>
+          </ExternalLink>
         )}
       </div>
       {running && status && (

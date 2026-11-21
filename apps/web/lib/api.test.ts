@@ -357,12 +357,35 @@ test("normalizeFfmpegInstallStatus passes a full status through", () => {
     message: "Downloading FFmpeg…", error: "", version: "", path: "",
     found: false, download_url: "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
     platform: "Windows", path_added: null, checksum_verified: null,
+    failed_step: "", path_warning: "",
   });
   assert.ok(s);
   assert.equal(s?.state, "downloading");
   assert.equal(s?.progress_pct, 42.5);
   assert.equal(s?.total_bytes, 100000000);
   assert.equal(s?.download_url, "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip");
+  assert.equal(s?.failed_step, "");
+  assert.equal(s?.path_warning, "");
+});
+
+test("normalizeFfmpegInstallStatus passes failed_step and path_warning through", () => {
+  const failed = normalizeFfmpegInstallStatus({
+    state: "error", progress_pct: 0, downloaded_bytes: 0, total_bytes: null,
+    message: "", error: "Download failed: Could not reach the download server.",
+    version: "", path: "", found: false, download_url: "", platform: "Windows",
+    path_added: null, checksum_verified: null, failed_step: "download", path_warning: "",
+  });
+  assert.equal(failed?.failed_step, "download");
+  assert.equal(failed?.error, "Download failed: Could not reach the download server.");
+  const warned = normalizeFfmpegInstallStatus({
+    state: "done", progress_pct: 100, downloaded_bytes: 0, total_bytes: null,
+    message: "FFmpeg is installed and ready.", error: "",
+    version: "ffmpeg version 9.1", path: "C:\\ffmpeg\\bin\\ffmpeg.exe", found: true,
+    download_url: "", platform: "Windows", path_added: false, checksum_verified: true,
+    failed_step: "", path_warning: "Could not add FFmpeg to your Windows PATH.",
+  });
+  assert.equal(warned?.path_added, false);
+  assert.equal(warned?.path_warning, "Could not add FFmpeg to your Windows PATH.");
 });
 
 test("normalizeFfmpegInstallStatus rejects unknown states and non-objects", () => {
@@ -372,7 +395,7 @@ test("normalizeFfmpegInstallStatus rejects unknown states and non-objects", () =
 });
 
 test("ffmpegInstallRunning is true only while a run is active", () => {
-  const base = { progress_pct: 0, downloaded_bytes: 0, total_bytes: null, message: "", error: "", version: "", path: "", found: false, download_url: "", platform: "Linux", path_added: null, checksum_verified: null };
+  const base = { progress_pct: 0, downloaded_bytes: 0, total_bytes: null, message: "", error: "", version: "", path: "", found: false, download_url: "", platform: "Linux", path_added: null, checksum_verified: null, failed_step: "", path_warning: "" };
   for (const state of ["downloading", "verifying", "extracting", "installing"] as const) {
     assert.equal(ffmpegInstallRunning({ ...base, state }), true);
   }

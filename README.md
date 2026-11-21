@@ -8,10 +8,14 @@ captions, writes a different title / description / hashtag set for each
 platform, and publishes **only after a human approves** — through the
 platforms' official APIs, and nothing else.
 
-> **Status: v0.4.1 — production-level single-window app.** The clipping
+> **Status: v0.4.2 — production-level single-window app.** The clipping
 > pipeline, review UI, and publishing adapters are under active
 > development. Nothing in this repo posts to any platform automatically,
-> and `DRY_RUN=true` is the default. v0.4.1 fixes the two things users
+> and `DRY_RUN=true` is the default. v0.4.2 fixes the two things users
+> actually hit in v0.4.1: links inside the desktop app did nothing at
+> all (no Tauri capability granted the opener, so every external link
+> was silently denied), and the FFmpeg installer could report success
+> on a bad or truncated download. v0.4.1 fixes the two things users
 > actually hit in v0.4.0: "Connect a channel" no longer shows raw API
 > JSON (the server now serves the wizard page for browser navigations),
 > and FFmpeg installs itself with one click instead of asking for a
@@ -223,6 +227,32 @@ Things to know:
 Building the exe yourself: `python scripts/build_exe.py --with-web`
 (see `clipforge-server.spec`).
 
+## What's new in v0.4.2
+
+- **Links inside the desktop app now open in your browser** — every
+  external link (Google Cloud Console, the API Library, Credentials,
+  the download link in the FFmpeg installer, the update download) now
+  goes through the Tauri opener plugin and opens in the system browser.
+  Root cause of the v0.4.1 bug: no Tauri capability file existed, so
+  every opener invoke from the loopback-served UI was denied by the
+  ACL, silently — `window.open` was never intercepted either. The app
+  now ships `capabilities/default.json` granting the opener (and the
+  other commands the UI actually uses), an `open_external_url` command
+  that only allows plain `http(s)` URLs, and an `ExternalLink`
+  component used by every external anchor.
+- **FFmpeg installer is hardened** — the installer now checks the
+  checksum against the final URL after redirects, verifies the
+  download size and the zip magic bytes, retries once and then tries
+  the official fallback sources, handles flat zips (no top-level
+  folder), and reports the failed step plus a PATH warning instead of
+  a silent success. A Windows PATH failure no longer claims a clean
+  install. The installer UI shows the warning and refreshes its
+  state after a successful install.
+- If you have v0.4.1 installed, update from inside the app
+  (Settings → Updates, or the "Update available" banner) — no need to
+  download anything by hand. Installing v0.4.2 over v0.4.1 keeps your
+  clips, settings, and keys.
+
 ## What's new in v0.4.1
 
 - **"Connect a channel" no longer shows raw JSON** — a full-page
@@ -240,8 +270,13 @@ Building the exe yourself: `python scripts/build_exe.py --with-web`
   checks the published SHA-256 when one exists, installs it into the
   data folder, verifies `ffmpeg -version`, saves the path, and adds it
   to the Windows user PATH — with download progress, plain-language
-  errors, and retry. Clipping works right after, no restart, no manual
-  download. Same installer from the command line:
+  errors that name the failed step (download / verify / extract /
+  install), and retry. A failed download is retried once, then the
+  installer tries the fallback sources in order (the direct gyan.dev
+  packages URL, then the BtbN build, both linked from ffmpeg.org);
+  a Windows PATH failure is shown as a warning instead of silently
+  reporting a clean install. Clipping works right after, no restart,
+  no manual download. Same installer from the command line:
   `python scripts/install-ffmpeg.py`. macOS is not auto-installed yet
   (`brew install ffmpeg` instead). A **Reinstall FFmpeg** button in
   Settings / onboarding re-installs over an existing FFmpeg.

@@ -237,6 +237,50 @@ fn ffmpeg_download_url() -> &'static str {
     ffmpeg::FFMPEG_DOWNLOAD_URL
 }
 
+/// Open an external URL in the user's system browser.
+///
+/// The web UI runs inside the Tauri WebView, where `window.open(url,
+/// "_blank")` opens nothing (the WebView has no new-window handler) and
+/// plain `<a target="_blank">` links only reach the browser through the
+/// opener plugin's `open_url` command — which the ACL denies unless a
+/// capability grants it (see `capabilities/default.json`). Every
+/// external link in the UI therefore goes through this command (via
+/// `openExternal()` in `apps/web/lib/tauri.ts`), so there is exactly one
+/// place that decides what may leave the app. Returns `true` only when
+/// the OS accepted the open — the UI must not claim "opened" otherwise.
+///
+/// Only `http://` and `https://` URLs are allowed, with no whitespace,
+/// control characters or backslashes — no `file:`, `javascript:`,
+/// `data:` or other schemes that could escape the browser.
+#[tauri::command]
+fn open_external_url(app: AppHandle, url: String) -> Result<bool, String> {
+    if !is_allowed_external_url(&url) {
+        return Err("Refusing to open a non-http(s) URL.".into());
+    }
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| format!("Could not open the link in your browser: {e}"))?;
+    Ok(true)
+}
+
+/// Allow-list check for `open_external_url` — pure, so it is
+/// unit-testable without a running Tauri app. Must stay in sync with
+/// `isExternalUrl` in `apps/web/lib/external-links.ts`: a bad URL is
+/// refused on both sides.
+fn is_allowed_external_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    let rest = lower
+        .strip_prefix("http://")
+        .or_else(|| lower.strip_prefix("https://"));
+    match rest {
+        Some(rest) if !rest.is_empty() => !url
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '\\'),
+        _ => false,
+    }
+}
+
 #[tauri::command]
 fn open_data_folder_app(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
@@ -407,6 +451,7 @@ fn main() {
             get_settings,
             save_settings,
             ffmpeg_download_url,
+            open_external_url,
             open_data_folder_app,
             show_main_window,
             quit_app,
@@ -507,4 +552,52 @@ fn main() {
             stop_sidecar_if_running(&state);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_url_allow_list_accepts_the_links_the_ui_opens() {
+        // Every external URL the UI can produce (OAuth authorize URLs,
+        // developer consoles, FFmpeg downloads, GitHub releases).
+        for url in [
+            "https://accounts.google.com/o/oauth2/v2/auth?client_id=x",
+            "https://console.cloud.google.com/apis/credentials",
+            "https://console.cloud.google.com/apis/library/youtube.googleapis.com",
+            "https://developers.facebook.com/apps",
+            "https://developers.tiktok.com/",
+            "https://www.facebook.com/v19.0/dialog/oauth",
+            "https://www.tiktok.com/v2/auth/authorize/",
+            "https://ffmpeg.org/download.html",
+            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+            "https://github.com/hamxa8769/clipforge/releases",
+            "http://127.0.0.1:17847/auth/callback/youtube",
+            "HTTPS://EXAMPLE.COM/UPPER",
+        ] {
+            assert!(is_allowed_external_url(url), "{url} should be allowed");
+        }
+    }
+
+    #[test]
+    fn external_url_allow_list_refuses_anything_but_http() {
+        for url in [
+            "",
+            "https://",
+            "http://",
+            "ftp://example.com/x",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "data:text/html,<h1>x</h1>",
+            "mailto:someone@example.com",
+            "/channels/connect",
+            "https://example.com/has space",
+            "https://example.com/tab\there",
+            "https://example.com/back\\slash",
+            "https://example.com\nnewline",
+        ] {
+            assert!(!is_allowed_external_url(url), "{url:?} should be refused");
+        }
+    }
 }
