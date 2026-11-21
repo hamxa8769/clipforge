@@ -134,6 +134,9 @@ def _delete_post(post_id: str) -> None:
             session.commit()
     finally:
         session.close()
+
+
+def _seed_post(candidate_id: str, status: str = "approved", **overrides) -> str:
     """Seed a Post directly (bypasses the create-post licence gate — this
     is how a pre-existing / slipped-through post is simulated)."""
     session = get_session()
@@ -333,6 +336,7 @@ def test_approval_queue_post_displays_licence_record():
     assert post["source_channel"] == "Free Nature Films"
     assert post["attribution_text"] == CREDIT
     assert CREDIT in (post["seo"].get("description") or "")
+    _delete_post(post["id"])
 
 
 def test_create_post_refuses_standard_licence_source():
@@ -352,6 +356,7 @@ def test_publish_refuses_standard_licence_even_if_post_exists():
     assert "Standard licence" in res.text
     # The post was NOT published and NOT failed — it stays approved.
     assert client.get(f"/posts/{post_id}").json()["status"] == "approved"
+    _delete_post(post_id)
 
 
 def test_publish_cc_clip_dry_run_succeeds_with_credit():
@@ -375,6 +380,7 @@ def test_publish_cc_clip_dry_run_succeeds_with_credit():
     published = client.post(f"/posts/{post_id}/publish", params={"dry_run": True})
     assert published.status_code == 200, published.text
     assert published.json()["status"] == "dry_run"
+    _delete_post(post_id)
 
 
 def test_scheduler_skips_standard_licence_post():
@@ -396,3 +402,4 @@ def test_scheduler_skips_standard_licence_post():
     mine = [r for r in results if r["post_id"] == post_id]
     assert mine and mine[0]["status"] == "skipped_licence"
     assert client.get(f"/posts/{post_id}").json()["status"] == "scheduled"
+    _delete_post(post_id)
