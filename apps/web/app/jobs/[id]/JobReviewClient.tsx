@@ -113,11 +113,22 @@ export default function JobReviewClient({ id }: { id: string }) {
         <h2 className="mb-4 text-lg font-semibold">Pipeline</h2>
         <PipelineSteps job={job} />
         <div className="mt-4">
-          <ProgressBar value={failed ? 0 : pipelineProgress(job.status)} tone={failed ? "danger" : pipelineProgress(job.status) >= 100 ? "success" : "default"} />
-          <p className="mt-1.5 text-xs text-neutral-500">
-            {failed ? "Failed — see the error below." : `${pipelineProgress(job.status)}% complete · ${job.candidates} clip candidate(s) so far`}
-            {live && PROCESSING_STATUSES.includes(job.status) ? " · live, updating every 10s" : ""}
-          </p>
+          {/* Prefer the server's real progress (GET /jobs/{id} progress_pct):
+              the status-derived estimate said 38% for a finished review job
+              whose run was actually 95% done. Fall back to the estimate
+              only when the server reports no progress yet (0). */}
+          {(() => {
+            const progress = job.progress_pct > 0 ? Math.round(job.progress_pct) : pipelineProgress(job.status);
+            return (
+              <>
+                <ProgressBar value={failed ? 0 : progress} tone={failed ? "danger" : progress >= 100 ? "success" : "default"} />
+                <p className="mt-1.5 text-xs text-neutral-500">
+                  {failed ? "Failed — see the error below." : `${progress}% complete · ${job.candidates} clip candidate(s) so far`}
+                  {live && PROCESSING_STATUSES.includes(job.status) ? " · live, updating every 10s" : ""}
+                </p>
+              </>
+            );
+          })()}
         </div>
         {failed && job.error && (
           <div className="mt-4">

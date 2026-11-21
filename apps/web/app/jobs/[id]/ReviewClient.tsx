@@ -94,7 +94,7 @@ export default function ReviewClient({ candidates, job, demo }: { candidates: Ca
         {demo && <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-xs font-medium text-sky-300">Demo data — API unreachable</span>}
       </div>
       {candidates.length === 0 ? (
-        <Card><p className="text-neutral-400">{job.status === "failed" ? "No clip candidates — this job failed before producing any. Retry it from the pipeline card above." : "No clip candidates yet — this job is still processing."}</p></Card>
+        <Card><p className="text-neutral-400">{job.status === "failed" ? "No clip candidates — this job failed before producing any. Retry it from the pipeline card above." : job.status === "review" || job.status === "ready" ? "No clip candidates — this run finished, but no moment scored high enough to become a clip. Try a longer or livelier source video, or retry the job." : "No clip candidates yet — this job is still processing."}</p></Card>
       ) : candidates.map((c) => <CandidateCard key={c.id} c={c} job={job} demo={demo} />)}
     </div>
   );

@@ -1,11 +1,18 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { API_URL } from "@/lib/api";
 import type { Post } from "@/lib/api";
 import { Card, StatusPill } from "@/components/ui";
 
 export default function QueueClient({ posts, demo }: { posts: Post[]; demo: boolean }) {
   const [items, setItems] = useState(posts);
+  // `posts` arrives twice: demo seed data first, then the live list once
+  // the parent's fetch lands. useState only reads the initial prop, so
+  // without this the queue showed the demo posts forever (and Approve /
+  // Publish posted to demo ids that do not exist) even with the API live.
+  useEffect(() => {
+    setItems(posts);
+  }, [posts]);
   const [msg, setMsg] = useState("");
   async function act(id: string, action: "approve" | "publish") {
     try { await fetch(`${API_URL}/posts/${id}/${action}`, { method: "POST" }); } catch { /* demo */ }
@@ -24,7 +31,7 @@ export default function QueueClient({ posts, demo }: { posts: Post[]; demo: bool
           <li key={p.id}><Card>
             <div className="flex flex-wrap items-center gap-3">
               <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-xs font-medium">{p.platform}</span>
-              <span className="text-sm text-neutral-400">Scheduled {new Date(p.scheduled_at).toLocaleString()}</span>
+              <span className="text-sm text-neutral-400">{p.scheduled_at ? `Scheduled ${new Date(p.scheduled_at).toLocaleString()}` : "Not scheduled yet"}</span>
               <span className="ml-auto"><StatusPill status={p.status} /></span>
             </div>
             <p className="mt-3 text-sm">{p.caption}</p>

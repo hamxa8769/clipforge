@@ -23,7 +23,7 @@ import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from clipforge.workflow import ffmpeg_missing_message
 
@@ -100,9 +100,34 @@ def ffprobe_info(path: Path) -> dict:
         raise IngestError(f"ffprobe returned unparsable output for {path}") from exc
 
 
+def _local_path(path: str | Path) -> Path:
+    """Normalise a local source reference to a filesystem path.
+
+    Plain paths pass through untouched. A ``file://`` URL (what API
+    clients and copy-pasted paths often produce — ``POST /jobs`` accepts
+    a ``source_url`` for local jobs) is unwrapped to its path, percent
+    decoded, so ``Path`` never sees the literal ``file:/...`` string:
+    before this, such a job failed ingest with the confusing
+    ``source file does not exist: file:/...``. ``file://host/...`` with
+    a non-localhost host is left alone so it still fails loudly instead
+    of silently resolving to a wrong local path.
+    """
+    text = str(path)
+    parsed = urlparse(text)
+    if parsed.scheme.lower() != "file":
+        return Path(text)
+    if parsed.netloc not in ("", "localhost"):
+        return Path(text)
+    decoded = unquote(parsed.path)
+    # Windows drive URL: file:///C:/clip.mp4 -> C:/clip.mp4
+    if len(decoded) >= 3 and decoded[0] == "/" and decoded[2] == ":" and decoded[1].isalpha():
+        decoded = decoded[1:]
+    return Path(decoded)
+
+
 def validate_local_file(path: str | Path) -> SourceInfo:
     """Validate a local mp4/mov file and return its :class:`SourceInfo`."""
-    p = Path(path)
+    p = _local_path(path)
     if not p.exists():
         raise IngestError(f"source file does not exist: {p}")
     if not p.is_file():

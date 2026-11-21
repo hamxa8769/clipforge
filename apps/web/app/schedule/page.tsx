@@ -84,7 +84,7 @@ export default function SchedulePage() {
                 <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-xs font-medium">{p.platform}</span>
                 {/* Locale-formatted date: suppress the hydration warning, the
                     static prerender uses the build machine's locale. */}
-                <span className="text-sm font-medium" suppressHydrationWarning>{new Date(p.scheduled_at).toLocaleString()}</span>
+                <span className="text-sm font-medium" suppressHydrationWarning>{p.scheduled_at ? new Date(p.scheduled_at).toLocaleString() : "unscheduled"}</span>
                 <span className="min-w-0 flex-1 truncate text-sm text-neutral-400">{p.caption}</span>
                 <StatusPill status={p.status} />
               </div>
