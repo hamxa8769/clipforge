@@ -8,10 +8,12 @@ captions, writes a different title / description / hashtag set for each
 platform, and publishes **only after a human approves** — through the
 platforms' official APIs, and nothing else.
 
-> **Status: v0.5.0 — production-level single-window app.** The clipping
+> **Status: v0.6.0 — production-level single-window app.** The clipping
 > pipeline, review UI, and publishing adapters are under active
 > development. Nothing in this repo posts to any platform automatically,
-> and `DRY_RUN=true` is the default. v0.5.0 adds a live dashboard, a
+> and `DRY_RUN=true` is the default. v0.6.0 adds live niche trending
+> search with a trending-to-agent loop, and a Growth view that turns your
+> own posted-clip stats into advice. v0.5.0 adds a live dashboard, a
 > per-job pipeline view, the ClipForge Agent (approval-first auto-clipping
 > with an optional Gemini AI engine), and a five-step guided setup. v0.4.2
 > fixes the two things users actually hit in v0.4.1: links inside the desktop app did nothing at
@@ -228,6 +230,31 @@ Things to know:
 
 Building the exe yourself: `python scripts/build_exe.py --with-web`
 (see `clipforge-server.spec`).
+
+## What's new in v0.6.0
+
+- **Trending** — live YouTube trending search per niche (views/hour
+  velocity + engagement, ranked by a documented trend score). Works with
+  a connected YouTube channel or a saved YouTube Data API key; with
+  neither, it says so plainly instead of inventing videos.
+- **Trending → Agent loop** — a trending video is the topic only. The
+  agent matches it to your own source video on that topic, runs the
+  normal pipeline with SEO seeded from the trending title, and queues
+  posts approval-first. A trending video URL is refused as a clip
+  source — the agent clips only your own videos.
+- **Growth view** — monitors your published posts, fetches current
+  YouTube stats, and turns the real numbers into advice: best posting
+  hours, best titles, niche ranking, what to post next. Every
+  recommendation is labelled with its basis ("from your N posted clips"
+  once 5+ clips have stats, otherwise YouTube best practice); no
+  performance data is ever invented. TikTok / Instagram / Facebook stats
+  are honestly "unsupported" for now.
+- **Web fix** — browser navigations on UI-shaped paths with no page now
+  redirect instead of showing raw API JSON.
+- If you have v0.5.0 installed, update from inside the app
+  (Settings → Updates, or the "Update available" banner) — no need to
+  download anything by hand. Installing v0.6.0 over v0.5.0 keeps your
+  clips, settings, and keys.
 
 ## What's new in v0.5.0
 
