@@ -81,7 +81,12 @@ function fmtMB(bytes: number): string {
 export function FfmpegInstallSection({ onInstalled }: { onInstalled?: () => void }) {
   const { status, starting, startError, start } = useFfmpegInstaller(onInstalled);
   const running = ffmpegInstallRunning(status);
-  const done = status?.state === "done" && status.found;
+  // "Ready" means FFmpeg is usable — `found` is the authority, not the
+  // install state: on a machine where FFmpeg is already on PATH the
+  // installer never ran, so state is "idle" while found is true.
+  // (Before v0.5.0 this required state === "done", so a system FFmpeg
+  // wrongly rendered as "FFmpeg is missing" next to a "found" pill.)
+  const done = status?.found === true;
   const error = status?.state === "error" || status?.state === "unsupported" ? status.error : null;
 
   if (done) {

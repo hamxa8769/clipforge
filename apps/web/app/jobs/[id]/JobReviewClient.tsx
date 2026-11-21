@@ -102,6 +102,7 @@ export default function JobReviewClient({ id }: { id: string }) {
       <div className="flex flex-wrap items-center gap-3">
         <p className="text-sm text-neutral-400">Job {job.id} · {job.source} · {job.status}</p>
         <span className="ml-auto flex gap-2">
+          <SecondaryButton href={`/pipeline?job=${encodeURIComponent(job.id)}`}>Full pipeline view</SecondaryButton>
           <SecondaryButton href="/automation">Automation</SecondaryButton>
           {failed && <PrimaryButton onClick={onRetry} disabled={retrying}>{retrying ? "Retrying…" : "Retry job"}</PrimaryButton>}
         </span>

@@ -1043,3 +1043,231 @@ export async function getOnboarding(): Promise<OnboardingState | null> {
 export async function updateOnboarding(patch: Partial<OnboardingState>): Promise<ApiResult> {
   return apiPutJson("/onboarding", patch);
 }
+
+// ---------------------------------------------------------------------------
+// Agent + Gemini LLM (v0.5.0, worker 2 owns the backend engine; this file
+// only speaks its contract — see the task handoff):
+//   GET  /api/agent/status -> {enabled, running, current_job, accounts[]}
+//   GET/PUT /api/agent/config -> {enabled, source_type, source_url, niche,
+//                                  auto_post (default false), rights_confirmed}
+//   POST /api/agent/start | /api/agent/stop -> {ok, state}
+//   GET  /api/llm/providers -> [{id, label, configured, ...}] (masked)
+//   POST /api/llm/gemini/test {api_key} -> {ok, model, message}
+//   POST /api/llm/gemini/save {api_key}
+//
+// The engine may not have landed yet on this branch: every getter returns
+// null when the endpoint is absent (apiGet returns null for any non-2xx),
+// and every action returns {ok:false} with a plain error — the pages
+// render an honest "not available in this build yet" state instead of
+// crashing or faking an agent. Nothing here invents agent activity.
+// ---------------------------------------------------------------------------
+
+/** Niche presets offered by the Agent page + setup wizard (free text also allowed). */
+export const NICHE_PRESETS = ["gaming", "tech", "vlogging", "education", "finance", "fitness", "cooking", "music"] as const;
+
+export interface AgentAccountStatus {
+  platform: string; account: string; status: string;
+  progress_pct: number; queued: number; approved: number; published: number;
+}
+
+export interface AgentStatus {
+  enabled: boolean; running: boolean;
+  current_job: string | null;
+  accounts: AgentAccountStatus[];
+}
+
+export function normalizeAgentAccount(raw: unknown): AgentAccountStatus {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  return {
+    platform: String(r.platform ?? ""),
+    account: String(r.account ?? ""),
+    status: String(r.status ?? ""),
+    progress_pct: num(r.progress_pct),
+    queued: num(r.queued),
+    approved: num(r.approved),
+    published: num(r.published),
+  };
+}
+
+export function normalizeAgentStatus(raw: unknown): AgentStatus | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (typeof r.enabled !== "boolean" || typeof r.running !== "boolean") return null;
+  return {
+    enabled: r.enabled,
+    running: r.running,
+    current_job: typeof r.current_job === "string" ? r.current_job : null,
+    accounts: Array.isArray(r.accounts) ? r.accounts.map(normalizeAgentAccount) : [],
+  };
+}
+
+/** GET /api/agent/status — null when the agent engine has not landed yet. */
+export async function getAgentStatus(): Promise<AgentStatus | null> {
+  const raw = await apiGet<unknown>("/api/agent/status");
+  return raw === null ? null : normalizeAgentStatus(raw);
+}
+
+export type AgentSourceType = "video" | "channel";
+
+export interface AgentConfig {
+  enabled: boolean;
+  source_type: AgentSourceType;
+  source_url: string;
+  niche: string;
+  auto_post: boolean;
+  rights_confirmed: boolean;
+}
+
+export function normalizeAgentConfig(raw: unknown): AgentConfig | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (typeof r.enabled !== "boolean") return null;
+  return {
+    enabled: r.enabled,
+    source_type: r.source_type === "channel" ? "channel" : "video",
+    source_url: typeof r.source_url === "string" ? r.source_url : "",
+    niche: typeof r.niche === "string" ? r.niche : "",
+    auto_post: r.auto_post === true,
+    rights_confirmed: r.rights_confirmed === true,
+  };
+}
+
+/** GET /api/agent/config — null when the agent engine has not landed yet. */
+export async function getAgentConfig(): Promise<AgentConfig | null> {
+  const raw = await apiGet<unknown>("/api/agent/config");
+  return raw === null ? null : normalizeAgentConfig(raw);
+}
+
+/** PUT /api/agent/config — the agent cannot be enabled without rights_confirmed. */
+export async function saveAgentConfig(config: Partial<AgentConfig>): Promise<ApiResult> {
+  return apiPutJson("/api/agent/config", config);
+}
+
+/** POST /api/agent/start | /api/agent/stop. */
+export async function startAgent(): Promise<ApiResult> {
+  return apiPostJson("/api/agent/start");
+}
+
+export async function stopAgent(): Promise<ApiResult> {
+  return apiPostJson("/api/agent/stop");
+}
+
+export interface LlmProvider {
+  id: string; label: string; configured: boolean; model: string;
+  /** True when this is the engine the agent would use right now. */
+  active: boolean;
+}
+
+export function normalizeLlmProvider(raw: unknown): LlmProvider | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (typeof r.id !== "string" || !r.id) return null;
+  // The wire sends `name` ("Gemini", "OpenAI-compatible"); older shapes
+  // sent `label`. Either works; the id is the last resort.
+  const label = typeof r.label === "string" && r.label
+    ? r.label
+    : typeof r.name === "string" && r.name ? r.name : r.id;
+  return {
+    id: r.id,
+    label,
+    configured: r.configured === true,
+    model: typeof r.model === "string" ? r.model : "",
+    active: r.active === true,
+  };
+}
+
+export function normalizeLlmProviders(raw: unknown): LlmProvider[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map(normalizeLlmProvider).filter((p): p is LlmProvider => p !== null);
+}
+
+/** GET /api/llm/providers — null when the LLM service has not landed yet. */
+export async function getLlmProviders(): Promise<LlmProvider[] | null> {
+  const raw = await apiGet<unknown>("/api/llm/providers");
+  return raw === null ? null : normalizeLlmProviders(raw);
+}
+
+/** POST /api/llm/gemini/test {api_key} — plain {ok, model, message} result. */
+export async function testGeminiKey(apiKey: string): Promise<ApiResult> {
+  return apiPostJson("/api/llm/gemini/test", { api_key: apiKey });
+}
+
+/** POST /api/llm/gemini/save {api_key} — the key is stored server-side only. */
+export async function saveGeminiKey(apiKey: string): Promise<ApiResult> {
+  return apiPostJson("/api/llm/gemini/save", { api_key: apiKey });
+}
+
+/** Which engine is actually writing titles / picking clips right now.
+ * Prefers the backend's `active` flag; falls back to configured flags.
+ * NOTE: the "rules" provider reports configured=true always (it needs
+ * no key), so it must never count as an AI engine — only Gemini /
+ * OpenAI configured counts, and with neither it is the rule engine. */
+export function activeEngineName(providers: LlmProvider[] | null): string {
+  if (providers === null) return "rule-based engine";
+  const active = providers.find((p) => p.active);
+  if (active) {
+    if (active.id === "gemini") return "Gemini";
+    if (active.id === "openai") return "OpenAI";
+    return "rule-based engine";
+  }
+  const gemini = providers.find((p) => p.id === "gemini");
+  if (gemini?.configured) return "Gemini";
+  const openai = providers.find((p) => p.id === "openai");
+  if (openai?.configured) return "OpenAI";
+  return "rule-based engine";
+}
+
+// ---------------------------------------------------------------------------
+// Setup-wizard state (v0.5.0): GET/POST /api/setup/state — persisted
+// server-side in <data_dir>/setup.json (apps/api/clipforge_api/setup.py).
+// Falls back to null on an older server without the endpoint; the wizard
+// then keeps its progress in memory + the /onboarding prefs only.
+// ---------------------------------------------------------------------------
+
+export const SETUP_STEP_KEYS = ["ffmpeg", "gemini", "channel", "niche_source", "agent"] as const;
+export type SetupStepKey = (typeof SETUP_STEP_KEYS)[number];
+
+export const SETUP_STEP_LABELS: Record<SetupStepKey, string> = {
+  ffmpeg: "FFmpeg",
+  gemini: "Gemini key",
+  channel: "First channel",
+  niche_source: "Niche & source",
+  agent: "Turn on the agent",
+};
+
+export interface SetupState {
+  current_step: number;
+  steps: Record<SetupStepKey, boolean>;
+  niche: string;
+  source_type: AgentSourceType;
+  source_url: string;
+  completed: boolean;
+}
+
+export function normalizeSetupState(raw: unknown): SetupState {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const stepsRaw = (r.steps ?? {}) as Record<string, unknown>;
+  const steps = {} as Record<SetupStepKey, boolean>;
+  for (const key of SETUP_STEP_KEYS) steps[key] = stepsRaw[key] === true;
+  const current = typeof r.current_step === "number" && Number.isFinite(r.current_step) ? Math.trunc(r.current_step) : 0;
+  return {
+    current_step: Math.max(0, Math.min(SETUP_STEP_KEYS.length - 1, current)),
+    steps,
+    niche: typeof r.niche === "string" ? r.niche : "",
+    source_type: r.source_type === "channel" ? "channel" : "video",
+    source_url: typeof r.source_url === "string" ? r.source_url : "",
+    completed: r.completed === true,
+  };
+}
+
+/** Partial setup-state update: any subset of fields, and any subset of steps. */
+export type SetupStatePatch = Omit<Partial<SetupState>, "steps"> & {
+  steps?: Partial<Record<SetupStepKey, boolean>>;
+};
+export async function getSetupState(): Promise<SetupState | null> {
+  const raw = await apiGet<unknown>("/api/setup/state");
+  return raw === null ? null : normalizeSetupState(raw);
+}
+
+/** POST /api/setup/state — partial update; omitted = keep. */
+export async function saveSetupState(patch: SetupStatePatch): Promise<ApiResult> {
+  return apiPostJson("/api/setup/state", patch);
+}

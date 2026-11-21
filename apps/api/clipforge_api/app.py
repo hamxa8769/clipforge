@@ -362,6 +362,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- v0.5.0 worker 3: setup-wizard state router (NEW FILE
+# apps/api/clipforge_api/setup.py — GET/POST /api/setup/state only).
+# It owns its own setup.json; it does NOT touch the agent engine or the
+# LLM key store (worker 2 owns those). ---------------------------------
+from clipforge_api.setup import router as setup_router  # noqa: E402
+
+app.include_router(setup_router)
+
 
 def _job_out(job: Job, db: Session, detail: bool = False) -> dict:
     """Job summary. ``detail=True`` adds the live-workflow view: stage

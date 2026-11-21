@@ -23,9 +23,10 @@ import {
 } from "@/lib/api";
 import { UpdateSection } from "@/components/Updater";
 import { FfmpegInstallSection } from "@/components/FfmpegInstaller";
+import GeminiSetup from "@/components/GeminiSetup";
 import { REPLAY_EVENT } from "@/components/Onboarding";
 import Link from "next/link";
-import { Card, DemoBadge, PrimaryButton, SecondaryButton, Skeleton, Toggle } from "@/components/ui";
+import { Card, CardHeader, DemoBadge, PrimaryButton, SecondaryButton, Skeleton, Toggle } from "@/components/ui";
 
 const PLATFORMS = ["youtube", "instagram", "facebook", "tiktok"] as const;
 const PLATFORM_LABELS: Record<string, string> = {
@@ -185,6 +186,11 @@ export default function SettingsPage() {
           </Card>
 
           <Card>
+            <CardHeader title="Gemini — the AI engine" hint="Optional, but smarter than the built-in engine" />
+            <GeminiSetup />
+          </Card>
+
+          <Card>
             <h2 className="mb-1 text-lg font-semibold">Channels</h2>
             <p className="mb-4 text-sm text-neutral-400">
               Connect each platform once with the guided wizard — it shows you where to create the developer app and where to paste the keys.
@@ -286,6 +292,8 @@ export default function SettingsPage() {
             <p className="mt-3 text-sm text-neutral-400">
               Need the first-run guide again?{" "}
               <button className="text-sky-400 underline" onClick={replayOnboarding}>Replay onboarding</button>
+              {" "}or open the{" "}
+              <Link className="text-sky-400 underline" href="/setup">full setup wizard</Link>.
             </p>
           </Card>
 

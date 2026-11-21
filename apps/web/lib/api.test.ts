@@ -29,6 +29,11 @@ import {
   normalizePostStatus,
   normalizeSettings,
   pipelineProgress,
+  normalizeAgentStatus,
+  normalizeAgentConfig,
+  normalizeLlmProviders,
+  activeEngineName,
+  normalizeSetupState,
   normalizeWorkerQueue,
   pipelineStageStates,
   resolveApiUrl,
@@ -416,6 +421,65 @@ test("normalizeSettings keeps the ffmpeg version when present", () => {
   });
   assert.equal(s?.ffmpeg.found, true);
   assert.equal(s?.ffmpeg.version, "ffmpeg version 9.1");
+});
+
+test("normalizeAgentStatus requires enabled/running booleans", () => {
+  assert.equal(normalizeAgentStatus(null), null);
+  assert.equal(normalizeAgentStatus({ enabled: true }), null);
+  const s = normalizeAgentStatus({
+    enabled: true, running: true, current_job: "job-1",
+    accounts: [{ platform: "youtube", account: "My Channel", status: "running", progress_pct: 40, queued: 2, approved: 1, published: 3 }],
+  });
+  assert.equal(s?.enabled, true);
+  assert.equal(s?.current_job, "job-1");
+  assert.equal(s?.accounts[0]?.published, 3);
+  assert.equal(normalizeAgentStatus({ enabled: false, running: false })?.accounts.length, 0);
+});
+
+test("normalizeAgentConfig defaults source_type to video and auto_post to false", () => {
+  const c = normalizeAgentConfig({ enabled: false });
+  assert.equal(c?.source_type, "video");
+  assert.equal(c?.auto_post, false);
+  assert.equal(c?.rights_confirmed, false);
+  assert.equal(normalizeAgentConfig({ enabled: true, source_type: "channel", niche: "tech", auto_post: true, rights_confirmed: true })?.source_type, "channel");
+  assert.equal(normalizeAgentConfig(null), null);
+});
+
+test("normalizeLlmProviders drops entries without an id", () => {
+  const ps = normalizeLlmProviders([
+    { id: "gemini", label: "Gemini", configured: true, model: "gemini-2.0-flash", active: true },
+    { label: "no id" },
+    { id: "openai", label: "OpenAI", configured: false, model: "", active: false },
+  ]);
+  assert.equal(ps.length, 2);
+  assert.equal(ps[0].model, "gemini-2.0-flash");
+  assert.equal(normalizeLlmProviders("nope").length, 0);
+});
+
+test("activeEngineName names Gemini only when it is configured", () => {
+  assert.equal(activeEngineName(null), "rule-based engine");
+  assert.equal(activeEngineName([]), "rule-based engine");
+  assert.equal(activeEngineName([{ id: "gemini", label: "Gemini", configured: false, model: "", active: false }]), "rule-based engine");
+  assert.equal(activeEngineName([{ id: "gemini", label: "Gemini", configured: true, model: "gemini-2.0-flash", active: true }]), "Gemini");
+  assert.equal(activeEngineName([{ id: "openai", label: "OpenAI", configured: true, model: "", active: false }]), "OpenAI");
+  // The rules provider is always configured=true — it must never read as an AI engine.
+  assert.equal(activeEngineName([
+    { id: "gemini", label: "Gemini", configured: false, model: "", active: false },
+    { id: "openai", label: "OpenAI", configured: false, model: "", active: false },
+    { id: "rules", label: "Rule-based", configured: true, model: "", active: true },
+  ]), "rule-based engine");
+});
+
+test("normalizeSetupState clamps the step and defaults every step to false", () => {
+  const s = normalizeSetupState({ current_step: 99, steps: { ffmpeg: true }, niche: "tech", source_type: "channel" });
+  assert.equal(s.current_step, 4);
+  assert.equal(s.steps.ffmpeg, true);
+  assert.equal(s.steps.agent, false);
+  assert.equal(s.source_type, "channel");
+  const empty = normalizeSetupState(null);
+  assert.equal(empty.current_step, 0);
+  assert.equal(empty.completed, false);
+  assert.equal(empty.source_type, "video");
 });
 
 test("normalizeWorkerQueue maps GET /worker/queue (v0.5.0 dashboard feed)", () => {
