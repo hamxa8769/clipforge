@@ -1877,3 +1877,251 @@ export async function getTrendingJob(jobId: string): Promise<TrendingJob | null>
   const raw = await apiGet<unknown>(`/api/trending/jobs/${encodeURIComponent(jobId)}`);
   return raw === null ? null : normalizeTrendingJob(raw);
 }
+
+// ---------------------------------------------------------------------------
+// ClipForge Pro (v0.8.0) — new backend endpoints. Every getter returns
+// null / a plain error when the endpoint has not landed yet; pages render
+// an honest "not available in this build yet" state instead of fake data.
+// ---------------------------------------------------------------------------
+
+/** One AI clip suggestion from POST /detection/analyze. */
+export interface DetectionCandidate {
+  start: number; end: number; score: number;
+  hook_score: number; peak_score: number; payoff_score: number;
+  emotion_score: number; visual_score: number; completeness_score: number;
+  title: string; reason: string;
+}
+
+export function normalizeDetectionCandidate(raw: unknown): DetectionCandidate {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  return {
+    start: num(r.start), end: num(r.end), score: num(r.score),
+    hook_score: num(r.hook_score), peak_score: num(r.peak_score),
+    payoff_score: num(r.payoff_score), emotion_score: num(r.emotion_score),
+    visual_score: num(r.visual_score), completeness_score: num(r.completeness_score),
+    title: typeof r.title === "string" ? r.title : "",
+    reason: typeof r.reason === "string" ? r.reason : "",
+  };
+}
+
+/** POST /detection/analyze — AI clip suggestions for a source video. */
+export async function analyzeDetection(
+  segments: { start: number; end: number; text?: string }[],
+  duration: number,
+  niche?: string,
+): Promise<{ candidates: DetectionCandidate[]; error: string | null }> {
+  const res = await apiPostJson("/detection/analyze", { segments, duration, ...(niche ? { niche } : {}) });
+  if (!res.ok) return { candidates: [], error: res.error ?? "Clip analysis failed." };
+  const c = (res.data as { candidates?: unknown } | null)?.candidates;
+  return { candidates: Array.isArray(c) ? c.map(normalizeDetectionCandidate) : [], error: null };
+}
+
+/** Performance profile, exactly as GET /perf/profile returns it. */
+export type PerfProfileName = "auto" | "low" | "balanced" | "high";
+export interface PerfProfile {
+  profile: string; reason: string;
+  cpu_cores: number | null; ram_gb: number | null; gpu: string | null;
+  override: boolean;
+}
+
+export function normalizePerfProfile(raw: unknown): PerfProfile | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (typeof r.profile !== "string") return null;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  // API shape: {profile, mode, hardware: {cpu_cores, ram_gb, gpu, platform}, settings}
+  const hw = (r.hardware ?? {}) as Record<string, unknown>;
+  const mode = typeof r.mode === "string" ? r.mode : "auto";
+  return {
+    profile: r.profile,
+    reason: typeof r.reason === "string" ? r.reason : "",
+    cpu_cores: num(hw.cpu_cores ?? r.cpu_cores),
+    ram_gb: num(hw.ram_gb ?? r.ram_gb),
+    gpu: typeof hw.gpu === "string" ? hw.gpu : typeof r.gpu === "string" ? r.gpu : null,
+    override: mode !== "auto",
+  };
+}
+
+/** GET /perf/profile — null when the endpoint has not landed yet. */
+export async function getPerfProfile(): Promise<PerfProfile | null> {
+  const raw = await apiGet<unknown>("/perf/profile");
+  return raw === null ? null : normalizePerfProfile(raw);
+}
+
+/** POST /perf/profile — set the override (auto = let the app decide). */
+export async function setPerfProfile(profile: PerfProfileName): Promise<ApiResult> {
+  return apiPostJson("/perf/profile", { profile });
+}
+
+/** One item in a batch run. */
+export interface BatchItem {
+  source: string; state: string; progress: number; clips: number;
+}
+export interface BatchStatus {
+  batch_id: string; status: string; items: BatchItem[];
+}
+
+export function normalizeBatchStatus(raw: unknown): BatchStatus | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (typeof r.batch_id !== "string" && typeof r.id !== "string") return null;
+  const items = Array.isArray(r.items) ? r.items : [];
+  return {
+    batch_id: typeof r.batch_id === "string" ? r.batch_id : String(r.id ?? ""),
+    status: typeof r.status === "string" ? r.status : "",
+    items: items.map((it) => {
+      const q = (it ?? {}) as Record<string, unknown>;
+      const res = (q.result ?? {}) as Record<string, unknown>;
+      const clips =
+        typeof q.clips === "number"
+          ? q.clips
+          : typeof res.clips === "number"
+            ? res.clips
+            : 0;
+      return {
+        source: typeof q.source === "string" ? q.source : "",
+        state: typeof q.state === "string" ? q.state : "queued",
+        progress: typeof q.progress === "number" ? q.progress : 0,
+        clips,
+      } satisfies BatchItem;
+    }),
+  };
+}
+
+/** POST /batch — start a batch over up to 20 sources. Returns the batch id or an error. */
+export async function startBatch(sources: { url?: string; path?: string }[]): Promise<{ batch_id: string | null; error: string | null }> {
+  const res = await apiPostJson("/batch", { sources });
+  if (!res.ok) return { batch_id: null, error: res.error ?? "Could not start the batch." };
+  const id = (res.data as { batch_id?: unknown } | null)?.batch_id;
+  return { batch_id: typeof id === "string" ? id : null, error: typeof id === "string" ? null : "The server did not return a batch id." };
+}
+
+/** GET /batch/{id} — pollable batch progress. */
+export async function getBatch(id: string): Promise<BatchStatus | null> {
+  const raw = await apiGet<unknown>(`/batch/${encodeURIComponent(id)}`);
+  return raw === null ? null : normalizeBatchStatus(raw);
+}
+
+/** POST /batch/{id}/pause | /resume. */
+export async function pauseBatch(id: string): Promise<ApiResult> {
+  return apiPostJson(`/batch/${encodeURIComponent(id)}/pause`);
+}
+export async function resumeBatch(id: string): Promise<ApiResult> {
+  return apiPostJson(`/batch/${encodeURIComponent(id)}/resume`);
+}
+
+/** X (Twitter) connection status, exactly as GET /x/status returns it. */
+export interface XStatus { connected: boolean; account: string | null; note: string; }
+
+export function normalizeXStatus(raw: unknown): XStatus | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (typeof r.connected !== "boolean") return null;
+  return {
+    connected: r.connected,
+    account: typeof r.account === "string" ? r.account : null,
+    note: typeof r.note === "string" ? r.note : "",
+  };
+}
+
+/** GET /x/status — null when the endpoint has not landed yet. */
+export async function getXStatus(): Promise<XStatus | null> {
+  const raw = await apiGet<unknown>("/x/status");
+  return raw === null ? null : normalizeXStatus(raw);
+}
+
+/** POST /x/connect — returns the authorize URL to open in the system browser. */
+export async function connectX(): Promise<{ url: string | null; error: string | null }> {
+  const res = await apiPostJson("/x/connect");
+  if (!res.ok) return { url: null, error: res.error ?? "Could not start X connect." };
+  const url = (res.data as { url?: unknown } | null)?.url;
+  return { url: typeof url === "string" ? url : null, error: typeof url === "string" ? null : "The server did not return a sign-in URL." };
+}
+
+/** POST /x/publish — publish a clip to X with text. */
+export async function publishToX(clipId: string, text: string): Promise<ApiResult> {
+  return apiPostJson("/x/publish", { clip_id: clipId, text });
+}
+
+/** One revenue row from GET /monetization/revenue. */
+export interface RevenueRow {
+  platform: string; views: number; rpm: number | null;
+  earnings: number | null; currency: string; basis: string;
+}
+
+export function normalizeRevenue(raw: unknown): RevenueRow[] {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const rows = Array.isArray(r.platforms) ? r.platforms : [];
+  return rows.map((row) => {
+    const q = (row ?? {}) as Record<string, unknown>;
+    const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+    return {
+      platform: typeof q.platform === "string" ? q.platform : "",
+      views: num(q.views),
+      rpm: typeof q.rpm === "number" ? q.rpm : null,
+      earnings: typeof q.earnings === "number" ? q.earnings : null,
+      currency: typeof q.currency === "string" ? q.currency : "",
+      basis: typeof q.basis === "string" ? q.basis : "",
+    } satisfies RevenueRow;
+  });
+}
+
+/** GET /monetization/revenue — null when the endpoint has not landed yet. */
+export async function getRevenue(): Promise<RevenueRow[] | null> {
+  const raw = await apiGet<unknown>("/monetization/revenue");
+  return raw === null ? null : normalizeRevenue(raw);
+}
+
+/** POST /monetization/affiliate — attach an affiliate link to a clip. */
+export async function addAffiliateLink(clipId: string, url: string): Promise<ApiResult> {
+  return apiPostJson("/monetization/affiliate", { clip_id: clipId, url });
+}
+
+/** One A/B variant with its results. */
+export interface AbVariant { title: string; thumbnail?: string | null; views: number; ctr: number | null; }
+
+export function normalizeAbVariants(raw: unknown): AbVariant[] {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const rows = Array.isArray(r.variants) ? r.variants : [];
+  return rows.map((row) => {
+    const q = (row ?? {}) as Record<string, unknown>;
+    return {
+      title: typeof q.title === "string" ? q.title : "",
+      thumbnail: typeof q.thumbnail === "string" ? q.thumbnail : null,
+      views: typeof q.views === "number" ? q.views : 0,
+      ctr: typeof q.ctr === "number" ? q.ctr : null,
+    } satisfies AbVariant;
+  });
+}
+
+/** POST /monetization/ab — create A/B title/thumbnail variants for a clip. */
+export async function createAbTest(clipId: string, variants: { title: string; thumbnail?: string }[]): Promise<ApiResult> {
+  return apiPostJson("/monetization/ab", { clip_id: clipId, variants });
+}
+
+/** GET /monetization/ab/{clip_id} — results for a clip's A/B test. */
+export async function getAbResults(clipId: string): Promise<AbVariant[] | null> {
+  const raw = await apiGet<unknown>(`/monetization/ab/${encodeURIComponent(clipId)}`);
+  return raw === null ? null : normalizeAbVariants(raw);
+}
+
+/** One copyright-scan flag from POST /publish/scan. */
+export interface PublishScanFlag { type: string; message: string; severity: string; }
+
+export function normalizePublishScan(raw: unknown): PublishScanFlag[] {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const flags = Array.isArray(r.flags) ? r.flags : [];
+  return flags.map((f) => {
+    const q = (f ?? {}) as Record<string, unknown>;
+    return {
+      type: typeof q.type === "string" ? q.type : "",
+      message: typeof q.message === "string" ? q.message : "",
+      severity: typeof q.severity === "string" ? q.severity : "info",
+    } satisfies PublishScanFlag;
+  });
+}
+
+/** POST /publish/scan — copyright / policy scan before publishing a clip. */
+export async function scanPublish(clipId: string): Promise<{ flags: PublishScanFlag[]; error: string | null }> {
+  const res = await apiPostJson("/publish/scan", { clip_id: clipId });
+  if (!res.ok) return { flags: [], error: res.error ?? "Copyright scan failed." };
+  return { flags: normalizePublishScan(res.data), error: null };
+}

@@ -6,11 +6,23 @@
 // (subscribers / followers / watch_hours / shorts_views / views_30d).
 // The bare /monetization endpoint defaults every metric to 0, which
 // previously made every live channel read 0% here.
+//
+// v0.8.0: revenue table (GET /monetization/revenue — views, RPM and
+// earnings per platform, each labelled with its basis: "from platform
+// API" or "not reported by API"), an affiliate-link inserter
+// (POST /monetization/affiliate) and A/B title/thumbnail tests
+// (POST /monetization/ab, GET /monetization/ab/{clip_id}). Earnings are
+// only ever shown when the platform API reports them — nothing is
+// invented, and an empty state says so plainly.
 "use client";
 import { useEffect, useState } from "react";
-import { apiGet, getAnalytics, getMonetizationFor, latestSnapshotPerPlatform, type Monetization } from "@/lib/api";
+import {
+  apiGet, createAbTest, getAbResults, getAnalytics, getMonetizationFor, getRevenue,
+  addAffiliateLink, latestSnapshotPerPlatform,
+  type AbVariant, type Monetization, type RevenueRow,
+} from "@/lib/api";
 import { demoAnalytics, demoMonetization } from "@/lib/mock";
-import { Card, DemoBadge, ProgressBar, Skeleton } from "@/components/ui";
+import { Card, CardHeader, DemoBadge, EmptyState, ErrorBanner, PrimaryButton, ProgressBar, SecondaryButton, Skeleton } from "@/components/ui";
 
 function fmt(n: number) { return n.toLocaleString(); }
 
@@ -19,6 +31,25 @@ const PLATFORMS = ["youtube", "tiktok", "instagram", "facebook"] as const;
 export default function MonetizationPage() {
   const [items, setItems] = useState<Monetization[] | null>(null);
   const [live, setLive] = useState(false);
+  const [revenue, setRevenue] = useState<RevenueRow[] | null>(null);
+  const [revenueLoaded, setRevenueLoaded] = useState(false);
+
+  // Affiliate inserter.
+  const [affClipId, setAffClipId] = useState("");
+  const [affUrl, setAffUrl] = useState("");
+  const [affBusy, setAffBusy] = useState(false);
+  const [affNotice, setAffNotice] = useState<string | null>(null);
+
+  // A/B test.
+  const [abClipId, setAbClipId] = useState("");
+  const [abTitleA, setAbTitleA] = useState("");
+  const [abTitleB, setAbTitleB] = useState("");
+  const [abThumbB, setAbThumbB] = useState("");
+  const [abBusy, setAbBusy] = useState(false);
+  const [abNotice, setAbNotice] = useState<string | null>(null);
+  const [abResults, setAbResults] = useState<AbVariant[] | null>(null);
+  const [abLoading, setAbLoading] = useState(false);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -28,7 +59,7 @@ export default function MonetizationPage() {
       if (cancelled) return;
       const isLive = health !== null;
       setLive(isLive);
-      if (!isLive) { setItems(demoMonetization); return; }
+      if (!isLive) { setItems(demoMonetization); setRevenueLoaded(true); return; }
       const latest = latestSnapshotPerPlatform(fetchedAnalytics ?? []);
       const rows: Monetization[] = [];
       for (const p of PLATFORMS) {
@@ -40,12 +71,47 @@ export default function MonetizationPage() {
         });
         if (r) rows.push(...r);
       }
-      setItems(rows);
+      if (!cancelled) setItems(rows);
+      const rev = await getRevenue();
+      if (!cancelled) { setRevenue(rev); setRevenueLoaded(true); }
     })();
     return () => {
       cancelled = true;
     };
   }, []);
+
+  async function onAddAffiliate() {
+    if (!affClipId.trim() || !affUrl.trim()) { setAffNotice("Enter a clip ID and an affiliate URL first."); return; }
+    setAffBusy(true);
+    setAffNotice(null);
+    const res = await addAffiliateLink(affClipId.trim(), affUrl.trim());
+    setAffBusy(false);
+    setAffNotice(res.ok ? "Affiliate link attached to the clip — it will appear in the clip's description when published." : (res.error ?? "Could not attach the affiliate link. The monetization service may not be installed in this build yet."));
+  }
+
+  async function onCreateAb() {
+    if (!abClipId.trim() || !abTitleA.trim() || !abTitleB.trim()) { setAbNotice("Enter a clip ID and two titles first."); return; }
+    setAbBusy(true);
+    setAbNotice(null);
+    const res = await createAbTest(abClipId.trim(), [
+      { title: abTitleA.trim() },
+      { title: abTitleB.trim(), ...(abThumbB.trim() ? { thumbnail: abThumbB.trim() } : {}) },
+    ]);
+    setAbBusy(false);
+    if (!res.ok) { setAbNotice(res.error ?? "Could not create the A/B test. The monetization service may not be installed in this build yet."); return; }
+    setAbNotice("A/B test created — results appear below once the variants have been shown.");
+    await onLoadAb();
+  }
+
+  async function onLoadAb() {
+    if (!abClipId.trim()) { setAbNotice("Enter a clip ID first."); return; }
+    setAbLoading(true);
+    const results = await getAbResults(abClipId.trim());
+    setAbLoading(false);
+    setAbResults(results);
+    if (results === null) setAbNotice("A/B results are not available in this build yet.");
+  }
+
   const loading = items === null;
   return (
     <div className="space-y-6">
@@ -58,7 +124,7 @@ export default function MonetizationPage() {
       ) : (
         <div className="grid gap-4 md:grid-cols-2">
           {items.map((m) => (
-            <Card key={`${m.platform}-${m.program}`}>
+            <Card key={`${m.platform}-${m.program}`} className="glass">
               <div className="flex items-center gap-3">
                 <h2 className="text-lg font-semibold">{m.platform}</h2>
                 <span className="text-sm text-neutral-400">{m.program}</span>
@@ -78,6 +144,123 @@ export default function MonetizationPage() {
           ))}
         </div>
       )}
+
+      {/* v0.8.0 — revenue from the platform APIs, with the basis labelled. */}
+      <Card className="glass">
+        <CardHeader title="Revenue" hint="Only what the platform APIs report — nothing invented" />
+        {!revenueLoaded ? (
+          <Skeleton className="h-32" />
+        ) : revenue === null ? (
+          <p className="text-sm text-neutral-400">Revenue reporting is not available in this build yet — the monetization service has not landed on the server.</p>
+        ) : revenue.length === 0 ? (
+          <EmptyState title="No revenue reported yet" body="No platform has reported earnings for your clips. Revenue appears here only when a platform's API reports it — ClipForge never estimates or invents earnings." />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs uppercase tracking-wide text-neutral-500">
+                  <th className="py-2 pr-3">Platform</th>
+                  <th className="py-2 pr-3 text-right">Views</th>
+                  <th className="py-2 pr-3 text-right">RPM</th>
+                  <th className="py-2 pr-3 text-right">Earnings</th>
+                  <th className="py-2">Basis</th>
+                </tr>
+              </thead>
+              <tbody>
+                {revenue.map((r) => (
+                  <tr key={r.platform} className="border-t border-neutral-800">
+                    <td className="py-2 pr-3 font-medium capitalize">{r.platform}</td>
+                    <td className="py-2 pr-3 text-right">{fmt(r.views)}</td>
+                    <td className="py-2 pr-3 text-right">{r.rpm === null ? "—" : `${r.currency} ${r.rpm.toFixed(2)}`}</td>
+                    <td className="py-2 pr-3 text-right font-medium">{r.earnings === null ? "—" : `${r.currency} ${r.earnings.toFixed(2)}`}</td>
+                    <td className="py-2 text-xs text-neutral-400">{r.basis || (r.earnings === null ? "Not reported by API" : "From platform API")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <p className="mt-3 text-xs text-neutral-500">“Not reported by API” means the platform does not share earnings for this account — it is not zero earnings, it is unknown. RPM and earnings only appear when the platform reports them.</p>
+          </div>
+        )}
+      </Card>
+
+      {/* v0.8.0 — affiliate link inserter. */}
+      <Card className="glass">
+        <CardHeader title="Affiliate links" hint="Attach a link to a clip's description" />
+        <p className="mb-3 text-sm text-neutral-400">Paste an affiliate URL for a clip — it is added to the clip&apos;s description when the clip is published. Only use links for products you genuinely recommend, and disclose that the link is an affiliate link in the description.</p>
+        <div className="grid gap-3 md:grid-cols-[220px_1fr_auto]">
+          <label className="block text-sm">
+            <span className="text-neutral-400">Clip ID</span>
+            <input className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 font-mono text-sm" value={affClipId} onChange={(e) => setAffClipId(e.target.value)} placeholder="clip_01" aria-label="Clip ID for affiliate link" />
+          </label>
+          <label className="block text-sm">
+            <span className="text-neutral-400">Affiliate URL</span>
+            <input className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 font-mono text-sm" value={affUrl} onChange={(e) => setAffUrl(e.target.value)} placeholder="https://…/product?ref=…" aria-label="Affiliate URL" />
+          </label>
+          <div className="flex items-end">
+            <PrimaryButton onClick={onAddAffiliate} disabled={affBusy}>{affBusy ? "Attaching…" : "Attach link"}</PrimaryButton>
+          </div>
+        </div>
+        {affNotice && <p className="mt-3 rounded-lg border border-sky-500/40 bg-sky-500/10 p-3 text-sm text-sky-100">{affNotice}</p>}
+      </Card>
+
+      {/* v0.8.0 — A/B title / thumbnail tests. */}
+      <Card className="glass">
+        <CardHeader title="A/B tests — titles & thumbnails" hint="Two variants, measured by views" />
+        <p className="mb-3 text-sm text-neutral-400">Create two title variants for a clip (variant B can also carry a different thumbnail). Results below show views per variant once the test has run — no winner is declared until both variants have real views.</p>
+        <div className="grid gap-3 md:grid-cols-2">
+          <label className="block text-sm">
+            <span className="text-neutral-400">Clip ID</span>
+            <input className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 font-mono text-sm" value={abClipId} onChange={(e) => setAbClipId(e.target.value)} placeholder="clip_01" aria-label="Clip ID for A/B test" />
+          </label>
+          <label className="block text-sm">
+            <span className="text-neutral-400">Variant B thumbnail URL (optional)</span>
+            <input className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 font-mono text-sm" value={abThumbB} onChange={(e) => setAbThumbB(e.target.value)} placeholder="https://…/thumb-b.jpg" aria-label="Variant B thumbnail URL" />
+          </label>
+          <label className="block text-sm">
+            <span className="text-neutral-400">Variant A — title</span>
+            <input className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm" value={abTitleA} onChange={(e) => setAbTitleA(e.target.value)} placeholder="Title A" aria-label="Variant A title" />
+          </label>
+          <label className="block text-sm">
+            <span className="text-neutral-400">Variant B — title</span>
+            <input className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm" value={abTitleB} onChange={(e) => setAbTitleB(e.target.value)} placeholder="Title B" aria-label="Variant B title" />
+          </label>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <PrimaryButton onClick={onCreateAb} disabled={abBusy}>{abBusy ? "Creating…" : "Create A/B test"}</PrimaryButton>
+          <SecondaryButton onClick={onLoadAb} disabled={abLoading || !abClipId.trim()}>{abLoading ? "Loading…" : "Load results"}</SecondaryButton>
+        </div>
+        {abNotice && <p className="mt-3 rounded-lg border border-sky-500/40 bg-sky-500/10 p-3 text-sm text-sky-100">{abNotice}</p>}
+        {abResults !== null && (
+          <div className="mt-4">
+            {abResults.length === 0 ? (
+              <p className="text-sm text-neutral-400">No A/B results for this clip yet — the test may still be running, or no variant has been shown.</p>
+            ) : (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-xs uppercase tracking-wide text-neutral-500">
+                    <th className="py-2 pr-3">Variant</th>
+                    <th className="py-2 pr-3 text-right">Views</th>
+                    <th className="py-2 text-right">CTR</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {abResults.map((v, i) => (
+                    <tr key={i} className="border-t border-neutral-800">
+                      <td className="py-2 pr-3">
+                        <span className="font-medium">{v.title}</span>
+                        {v.thumbnail && <span className="block text-xs text-neutral-500">Thumbnail: <span className="font-mono">{v.thumbnail}</span></span>}
+                      </td>
+                      <td className="py-2 pr-3 text-right">{fmt(v.views)}</td>
+                      <td className="py-2 text-right">{v.ctr === null ? "—" : `${(v.ctr * 100).toFixed(1)}%`}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+      </Card>
+
       <Card>
         <h2 className="text-lg font-semibold">What not to expect</h2>
         <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-neutral-400">

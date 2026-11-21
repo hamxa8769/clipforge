@@ -428,6 +428,28 @@ app.include_router(trending_router)
 # v0.7.0 (Worker A): GET /api/videos/license (licence check).
 app.include_router(videos_router)
 
+# --- v0.8.0: ClipForge Pro routers (detection / perf / batch / X /
+# monetization / publish-scan). Registered here, before __main__ adds
+# the "/" StaticFiles mount, so browser navigations to the new pages
+# are served as HTML and API calls still return JSON.
+from clipforge_api.batch import router as batch_router  # noqa: E402
+from clipforge_api.detection import router as detection_router  # noqa: E402
+from clipforge_api.monetization_api import (  # noqa: E402
+    publish_router,
+)
+from clipforge_api.monetization_api import (
+    router as monetization_router,
+)
+from clipforge_api.perf import router as perf_router  # noqa: E402
+from clipforge_api.x_platform import router as x_router  # noqa: E402
+
+app.include_router(detection_router)
+app.include_router(perf_router)
+app.include_router(batch_router)
+app.include_router(x_router)
+app.include_router(monetization_router)
+app.include_router(publish_router)
+
 
 def _job_out(job: Job, db: Session, detail: bool = False) -> dict:
     """Job summary. ``detail=True`` adds the live-workflow view: stage
@@ -1569,6 +1591,92 @@ def start_oauth(platform: str):
     }
 
 
+def _handle_x_callback(
+    *, code: str | None, state: str | None, error: str | None, db: Session
+) -> HTMLResponse:
+    """X OAuth callback (v0.8.0): PKCE code exchange via clipforge.x_platform.
+
+    X is not in the generic provider flow because it requires PKCE; the
+    verifier saved by POST /x/connect is consumed here. Returns the same
+    success/failure page shape as the generic callback.
+    """
+    from clipforge.x_platform import (  # local import: keeps startup light
+        XError,
+        exchange_code,
+        fetch_account,
+        load_pending_verifier,
+        record_from_token_response,
+    )
+
+    if error:
+        return _callback_page(
+            title="Connection refused",
+            message=f"X refused the connection ({error}).",
+            ok=False,
+        )
+    if not code or not state:
+        return _callback_page(
+            title="Connection failed",
+            message="X redirected back without a code — try Connect again.",
+            ok=False,
+        )
+    store = _settings_store()
+    try:
+        _OAUTH_STATES.consume(state, "x")
+        verifier = load_pending_verifier(_data_dir(), state)
+        if not verifier:
+            raise XError(
+                "The sign-in session expired before X redirected back.",
+                "Press Connect again on the Channels page.",
+            )
+        client_id = store.get_credential("x", "client_id")
+        client_secret = store.get_credential("x", "client_secret")
+        if not client_id or not client_secret:
+            raise XError(
+                "X app credentials are missing — save them in Settings first.",
+                "Save the Client ID and Client Secret, then press Connect again.",
+            )
+        token = exchange_code(
+            code=code,
+            code_verifier=verifier,
+            client_id=client_id,
+            client_secret=client_secret,
+            redirect_uri=redirect_uri("x"),
+        )
+    except XError as exc:
+        return _callback_page(title="Connection failed", message=exc.detail(), ok=False)
+    record = record_from_token_response(token)
+    try:
+        profile = fetch_account(record.access_token)
+        record.account_name = profile.get("account") or profile.get("name") or ""
+        record.account_ref = profile.get("user_id") or ""
+    except XError:
+        pass
+    TokenStore(_secrets()).save(record)
+    _settings_store().update_onboarding({"first_channel_connected": True})
+    account = (
+        db.query(SocialAccount)
+        .filter_by(provider="x")
+        .order_by(SocialAccount.created_at.desc())
+        .first()
+    )
+    if account is None:
+        account = SocialAccount(provider="x")
+        db.add(account)
+    account.label = record.account_name or account.label or "X (Twitter)"
+    account.account_ref = record.account_ref or account.account_ref
+    account.scopes = record.scopes
+    account.status = "active"
+    account.token_env_var = ""
+    db.commit()
+    name = record.account_name or "X (Twitter)"
+    return _callback_page(
+        title="X (Twitter) connected",
+        message=f"Connected as {name}.",
+        ok=True,
+    )
+
+
 @app.get("/auth/callback/{platform}")
 def oauth_callback(
     platform: str,
@@ -1578,6 +1686,8 @@ def oauth_callback(
     db: Session = Depends(get_db),
 ):
     """Platform redirect target: exchange the code, store the token, done."""
+    if platform == "x":
+        return _handle_x_callback(code=code, state=state, error=error, db=db)
     spec = _require_platform(platform)
     if error:
         return _callback_page(
@@ -2196,13 +2306,13 @@ def list_title_variants(
     db: Session = Depends(get_db),
 ):
     _get_or_404(db, ClipCandidate, candidate_id, "clip candidate")
-    if platform and platform not in {"youtube", "instagram", "facebook", "tiktok"}:
+    if platform and platform not in {"youtube", "instagram", "facebook", "tiktok", "x"}:
         raise HTTPException(422, f"unknown platform {platform!r}")
     if platform:
         return ab_variant_results(db, candidate_id, platform)
     return [
         row
-        for p in ("youtube", "instagram", "facebook", "tiktok")
+        for p in ("youtube", "instagram", "facebook", "tiktok", "x")
         for row in ab_variant_results(db, candidate_id, p)
     ]
 

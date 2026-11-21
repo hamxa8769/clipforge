@@ -39,6 +39,8 @@ SECRET_NAMES = {
     "facebook": {"client_id": "app:meta:client_id", "client_secret": "app:meta:client_secret"},
     "tiktok": {"client_id": "app:tiktok:client_id", "client_secret": "app:tiktok:client_secret"},
     "llm": {"api_key": "app:llm:api_key"},
+    # X (Twitter) (v0.8.0): same keyring store as the other platforms.
+    "x": {"client_id": "app:x:client_id", "client_secret": "app:x:client_secret"},
     # Gemini (v0.5.0): same keyring storage, separate secret name.
     "gemini": {"api_key": "app:gemini:api_key"},
 }
@@ -50,6 +52,7 @@ LEGACY_ENV_VARS = {
     "instagram": ["META_ACCESS_TOKEN"],
     "facebook": ["META_ACCESS_TOKEN"],
     "tiktok": ["TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET", "TIKTOK_ACCESS_TOKEN"],
+    "x": ["X_CLIENT_ID", "X_CLIENT_SECRET"],
     "llm": ["CLIPFORGE_LLM_API_KEY"],
     "gemini": ["GEMINI_API_KEY"],
 }
@@ -59,6 +62,7 @@ DEFAULT_PRIVACY = {
     "instagram": "public",
     "facebook": "public",
     "tiktok": "private",
+    "x": "public",
 }
 
 # First-run onboarding progress (GET/PUT /onboarding). Stored in the same
@@ -337,7 +341,7 @@ class SettingsStore:
             "ok": False,
             "code": "unknown_service",
             "message": f"Unknown service: {service}.",
-            "next_step": "Pick one of youtube, instagram, facebook, tiktok or llm.",
+            "next_step": "Pick one of youtube, instagram, facebook, tiktok, x or llm.",
         }
 
     def _test_platform(self, platform: str, *, client: httpx.Client | None = None) -> dict:

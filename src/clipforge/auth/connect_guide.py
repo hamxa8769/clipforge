@@ -228,6 +228,50 @@ _GUIDES: dict[str, dict] = {
             },
         ],
     },
+    "x": {
+        "console_name": "X Developer Portal",
+        "console_url": "https://developer.x.com/en/portal/dashboard",
+        "steps": _steps(
+            (
+                "Create an X developer app",
+                "Open the X Developer Portal, sign in, and create a project "
+                "and app. Note the Client ID — X also gives a Client secret.",
+            ),
+            (
+                "Enable OAuth 2.0 with PKCE",
+                "In the app settings, turn on OAuth 2.0, choose 'Web App' "
+                "as the type, and keep PKCE on — ClipForge uses PKCE.",
+            ),
+            (
+                "Save the credentials in ClipForge",
+                "Copy the Client ID and Client secret into Settings. "
+                "Keep them private — anyone with them can act as the app.",
+            ),
+            (
+                "Register the redirect URI",
+                "In the app settings, add the exact redirect URI shown "
+                "below as a callback URL. It must match character for "
+                "character, or X refuses the connection.",
+            ),
+            (
+                "Use a paid API plan for posting",
+                "The free X API tier is read-only. Posting needs a paid "
+                "Basic plan or higher, otherwise X answers 403.",
+            ),
+        ),
+        "credentials": [
+            {
+                "key": "client_id",
+                "label": "Client ID",
+                "where": "X Developer Portal → your app → Keys and tokens",
+            },
+            {
+                "key": "client_secret",
+                "label": "Client secret",
+                "where": "X Developer Portal → your app → Keys and tokens",
+            },
+        ],
+    },
 }
 
 

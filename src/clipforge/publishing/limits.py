@@ -67,6 +67,16 @@ PLATFORM_LIMITS: dict[str, dict] = {
         "note": "Unaudited apps: Direct Post forced SELF_ONLY (private), "
         "<=5 users/24h. Audit lifts limits.",
     },
+    "x": {
+        "max_duration_s": 140,  # X video posts (v2 media upload)
+        "min_duration_s": 0,
+        "max_hashtags": 5,
+        "max_size_mb": 512,
+        "daily_posts": 25,  # conservative; Basic-tier posting is
+        # rate-limited per day — VERIFY_LIVE in the developer portal.
+        "note": "Posting needs a paid API plan (Basic or higher); "
+        "the free tier is read-only (403 on post).",
+    },
 }
 
 # Daily publish caps used by the scheduler (conservative defaults).
@@ -75,6 +85,7 @@ DAILY_CAPS: dict[str, int] = {
     "instagram": PLATFORM_LIMITS["instagram"]["daily_posts"],
     "facebook": PLATFORM_LIMITS["facebook"]["daily_posts"],
     "tiktok": PLATFORM_LIMITS["tiktok"]["upload_drafts_per_24h"],
+    "x": PLATFORM_LIMITS["x"]["daily_posts"],
 }
 
 __all__ = ["PLATFORM_LIMITS", "DAILY_CAPS", "VERIFY_LIVE"]

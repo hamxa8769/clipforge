@@ -49,6 +49,7 @@ export const PLATFORM_COLORS: Record<string, string> = {
   instagram: "bg-pink-500",
   facebook: "bg-blue-500",
   tiktok: "bg-cyan-400",
+  x: "bg-neutral-100",
 };
 
 export function PlatformDot({ platform, className = "" }: { platform: string; className?: string }) {
@@ -60,6 +61,7 @@ export const PLATFORM_LABELS: Record<string, string> = {
   instagram: "Instagram",
   facebook: "Facebook",
   tiktok: "TikTok",
+  x: "X (Twitter)",
 };
 
 export function platformLabel(p: string): string {

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from clipforge.publishing.limits import DAILY_CAPS
 
-PLATFORMS = ("youtube", "instagram", "facebook", "tiktok")
+PLATFORMS = ("youtube", "instagram", "facebook", "tiktok", "x")
 
 
 @dataclass(frozen=True)
@@ -120,6 +120,21 @@ PROVIDERS: dict[str, ProviderSpec] = {
             "Inbox draft: the clip is uploaded as a private draft to your "
             "TikTok inbox — open TikTok and post it from there."
         ),
+    ),
+    "x": ProviderSpec(
+        platform="x",
+        display_name="X (Twitter)",
+        auth_url="https://x.com/i/oauth2/authorize",
+        token_url="https://api.x.com/2/oauth2/token",
+        scopes=["tweet.read", "tweet.write", "users.read", "offline.access"],
+        profile_url="https://api.x.com/2/users/me",
+        default_token_ttl_s=7200,
+        review_notice=(
+            "X posting needs a paid API plan (Basic or higher): the free "
+            "tier is read-only, so posting fails with HTTP 403 until the "
+            "app is on a paid plan."
+        ),
+        fallback=("Manual-post pack: download the clip + post text and publish it in the X app."),
     ),
 }
 

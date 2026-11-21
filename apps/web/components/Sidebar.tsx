@@ -14,6 +14,10 @@ const NAV: { href: string; label: string; hint: string; icon: React.ReactNode }[
   // v0.5.0 (worker 3): Pipeline + Agent pages.
   { href: "/pipeline", label: "Pipeline", hint: "Every step, live, per job", icon: <path d="M4 6h16M4 12h16M4 18h16" /> },
   { href: "/agent", label: "Agent", hint: "Auto-clipping, approval-first", icon: <path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.2-2.6 5.5V18a2 2 0 0 1-2 2h-4.8a2 2 0 0 1-2-2v-3.5C6.2 13.2 5 11.4 5 9a7 7 0 0 1 7-7zM9 22h6" /> },
+  // v0.8.0 (worker B): Clip Studio, Export Hub, Batch Mode.
+  { href: "/studio", label: "Studio", hint: "AI clips + timeline editor", icon: <path d="M4 5h16v14H4zM4 9h16M8 5v14" /> },
+  { href: "/export", label: "Export", hint: "Publish with platform rules", icon: <path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" /> },
+  { href: "/batch", label: "Batch", hint: "Clip up to 20 videos at once", icon: <path d="M4 7h16M4 12h16M4 17h10" /> },
   // v0.6.0 (worker B): Trending page — live niche search + agent loop.
   { href: "/trending", label: "Trending", hint: "What's hot in your niche", icon: <path d="M3 17l6-6 4 4 8-8M15 7h6v6" /> },
   { href: "/automation", label: "Automation", hint: "Runner, rules & history", icon: <path d="M4 12a8 8 0 1 1 2.3 5.6M4 12V7m0 5h5" /> },

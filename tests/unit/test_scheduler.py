@@ -31,7 +31,7 @@ from tests.conftest import load_or_skip
 # is VERIFY_LIVE. TikTok 5 = pending inbox drafts / 24 h pre-audit; the
 # audited Direct Post cap is set from the application. Instagram 100 and
 # Facebook 30 are rolling-24 h API caps.
-SPEC_DAILY_CAPS = {"youtube": 6, "instagram": 100, "facebook": 30, "tiktok": 5}
+SPEC_DAILY_CAPS = {"youtube": 6, "instagram": 100, "facebook": 30, "tiktok": 5, "x": 25}
 
 
 @pytest.fixture
@@ -70,7 +70,7 @@ def test_daily_caps_are_positive():
 
 
 def test_all_four_platforms_have_caps():
-    assert set(SPEC_DAILY_CAPS) == {"youtube", "instagram", "facebook", "tiktok"}
+    assert set(SPEC_DAILY_CAPS) == {"youtube", "instagram", "facebook", "tiktok", "x"}
 
 
 # --- Implementation tests against the landed module (DB-backed). -----------

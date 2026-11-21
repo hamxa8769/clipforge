@@ -79,6 +79,49 @@ body {
   border-radius: 4px;
 }
 
+/* v0.8.0 polish — glassmorphism + restrained neon accent, on top of the
+ * existing dark design system. Cards that opt in with class "glass" get a
+ * translucent surface with a soft light border and a backdrop blur; the
+ * amber brand accent gets a faint glow on hover only. Transitions are
+ * short and uniform so the app feels smooth without motion overload.
+ * Existing pages are untouched — nothing here changes layout or colour
+ * tokens, so no existing screen can break from this. */
+.glass {
+  background: rgba(24, 24, 27, 0.72) !important;
+  border-color: rgba(255, 255, 255, 0.09) !important;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+}
+
+a,
+button,
+input,
+select,
+textarea {
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+}
+
+a:hover,
+button:hover {
+  text-decoration: none;
+}
+
+/* Restrained neon: the primary amber action glows faintly on hover. */
+a[class*="bg-amber-400"]:hover,
+button[class*="bg-amber-400"]:hover {
+  box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.45), 0 0 18px rgba(251, 191, 36, 0.25);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
+
 button:disabled,
 a[aria-disabled="true"] {
   cursor: not-allowed;

@@ -18,8 +18,9 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import {
-  explainConnectionError, getSettings, saveSettings, testConnection, updateOnboarding,
-  type AppSettingsView,
+  explainConnectionError, getPerfProfile, getSettings, saveSettings, setPerfProfile,
+  testConnection, updateOnboarding,
+  type AppSettingsView, type PerfProfile, type PerfProfileName,
 } from "@/lib/api";
 import { UpdateSection } from "@/components/Updater";
 import { FfmpegInstallSection } from "@/components/FfmpegInstaller";
@@ -54,6 +55,33 @@ export default function SettingsPage() {
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; summary: string; nextStep: string }>>({});
   const [testing, setTesting] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
+
+  // Performance profile (v0.8.0): GET /perf/profile + POST /perf/profile.
+  const [perf, setPerf] = useState<PerfProfile | null>(null);
+  const [perfLoaded, setPerfLoaded] = useState(false);
+  const [perfSaving, setPerfSaving] = useState(false);
+  const [perfNotice, setPerfNotice] = useState<string | null>(null);
+
+  const loadPerf = useCallback(async () => {
+    try {
+      const p = await getPerfProfile();
+      setPerf(p);
+    } finally {
+      setPerfLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => { loadPerf().catch(() => setPerfLoaded(true)); }, [loadPerf]);
+
+  async function savePerf(profile: PerfProfileName) {
+    setPerfSaving(true);
+    setPerfNotice(null);
+    const res = await setPerfProfile(profile);
+    setPerfSaving(false);
+    if (!res.ok) { setPerfNotice(res.error ?? "Could not save the performance profile."); return; }
+    setPerfNotice(profile === "auto" ? "Back to Auto — the app picks the profile from this machine." : `Performance profile set to ${profile}.`);
+    await loadPerf();
+  }
 
   // Form state: empty means "keep the stored value"; a value means "set it".
   const [llmKey, setLlmKey] = useState("");
@@ -188,6 +216,56 @@ export default function SettingsPage() {
           <Card>
             <CardHeader title="Gemini — the AI engine" hint="Optional, but smarter than the built-in engine" />
             <GeminiSetup />
+          </Card>
+
+          {/* Performance (v0.8.0) — the app measures this machine and picks
+              a profile; the override here wins until set back to Auto. */}
+          <Card>
+            <h2 className="mb-1 text-lg font-semibold">Performance</h2>
+            <p className="mb-4 text-sm text-neutral-400">
+              ClipForge measures this machine (CPU, RAM, GPU) and picks a profile so clipping stays smooth.
+              You can override it here — Auto lets the app decide again.
+            </p>
+            {!perfLoaded ? (
+              <Skeleton className="h-24" />
+            ) : perf === null ? (
+              <p className="text-sm text-neutral-400">Performance profiles are not available in this build yet — the profile service has not landed on the server.</p>
+            ) : (
+              <div className="space-y-4">
+                <dl className="space-y-1 text-sm">
+                  <div className="flex justify-between gap-2"><dt className="text-neutral-400">Active profile</dt><dd className="font-semibold capitalize">{perf.profile}{perf.override ? " (your override)" : " (auto)"}</dd></div>
+                  {perf.reason && <div className="flex justify-between gap-2"><dt className="text-neutral-400">Why this profile</dt><dd className="max-w-md text-right">{perf.reason}</dd></div>}
+                  <div className="flex justify-between gap-2"><dt className="text-neutral-400">CPU</dt><dd>{perf.cpu_cores === null ? "Unknown" : `${perf.cpu_cores} cores`}</dd></div>
+                  <div className="flex justify-between gap-2"><dt className="text-neutral-400">RAM</dt><dd>{perf.ram_gb === null ? "Unknown" : `${perf.ram_gb} GB`}</dd></div>
+                  <div className="flex justify-between gap-2"><dt className="text-neutral-400">GPU</dt><dd>{perf.gpu ?? "None detected"}</dd></div>
+                </dl>
+                <fieldset>
+                  <legend className="text-sm font-medium text-neutral-100">Override profile</legend>
+                  <div className="mt-2 flex flex-wrap gap-2" role="radiogroup" aria-label="Performance profile">
+                    {(["auto", "low", "balanced", "high"] as const).map((p) => (
+                      <button
+                        key={p}
+                        type="button"
+                        role="radio"
+                        aria-checked={perf.profile === p}
+                        disabled={perfSaving || !live}
+                        onClick={() => savePerf(p)}
+                        className={`rounded-md border px-3 py-1.5 text-sm capitalize ${perf.profile === p ? "border-amber-400 bg-amber-400/10 text-neutral-100" : "border-neutral-700 bg-neutral-950 text-neutral-300 hover:border-neutral-500"} disabled:cursor-not-allowed disabled:opacity-50`}
+                      >
+                        {p === "auto" ? "Auto" : p === "low" ? "Low-end" : p === "balanced" ? "Balanced" : "High performance"}
+                      </button>
+                    ))}
+                  </div>
+                </fieldset>
+                {perfNotice && <p className="rounded-lg border border-sky-500/40 bg-sky-500/10 p-3 text-sm text-sky-100">{perfNotice}</p>}
+                <div className="space-y-2 text-sm text-neutral-400">
+                  <p><span className="font-medium text-neutral-200">Auto</span> — the app picks from this machine&apos;s CPU, RAM and GPU.</p>
+                  <p><span className="font-medium text-neutral-200">Low-end</span> — smallest transcription model, low-resolution previews, 1 job at a time, animations off. For older or low-RAM machines.</p>
+                  <p><span className="font-medium text-neutral-200">Balanced</span> — medium transcription model, standard previews, 2 jobs at a time. The default on most machines.</p>
+                  <p><span className="font-medium text-neutral-200">High performance</span> — largest transcription model, full-resolution previews, up to 4 jobs at a time, full animations. Needs a fast CPU/GPU and plenty of RAM.</p>
+                </div>
+              </div>
+            )}
           </Card>
 
           <Card>

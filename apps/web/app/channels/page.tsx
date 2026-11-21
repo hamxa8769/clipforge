@@ -13,9 +13,9 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import {
-  apiGet, disconnectChannel, getAnalytics, getChannels, latestSnapshotPerPlatform,
-  refreshChannel, startOAuth,
-  type AnalyticsSnapshot, type ChannelStatus,
+  apiGet, connectX, disconnectChannel, getAnalytics, getChannels, getXStatus,
+  latestSnapshotPerPlatform, refreshChannel, startOAuth,
+  type AnalyticsSnapshot, type ChannelStatus, type XStatus,
 } from "@/lib/api";
 import { demoAnalytics } from "@/lib/mock";
 import { openExternal } from "@/lib/tauri";
@@ -48,13 +48,17 @@ export default function ChannelsPage() {
   const [live, setLive] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [xStatus, setXStatus] = useState<XStatus | null>(null);
+  const [xLoaded, setXLoaded] = useState(false);
 
   const load = useCallback(async () => {
-    const [fetched, fetchedAnalytics, health] = await Promise.all([
-      getChannels(), getAnalytics(), apiGet<unknown>("/health"),
+    const [fetched, fetchedAnalytics, health, fetchedX] = await Promise.all([
+      getChannels(), getAnalytics(), apiGet<unknown>("/health"), getXStatus(),
     ]);
     const isLive = health !== null;
     setLive(isLive);
+    setXStatus(fetchedX);
+    setXLoaded(true);
     if (!isLive) { setChannels(DEMO_CHANNELS); setAnalytics(demoAnalytics); }
     else { setChannels(fetched ?? []); setAnalytics(fetchedAnalytics ?? []); }
   }, []);
@@ -102,6 +106,23 @@ export default function ChannelsPage() {
     if (!res.ok) { setNotice(res.error ?? "Disconnect failed."); return; }
     setNotice(`${platformLabel(platform)} disconnected.`);
     await load();
+  }
+
+  async function connectXAccount() {
+    setBusy("x");
+    setNotice(null);
+    const { url, error } = await connectX();
+    setBusy(null);
+    if (!url) {
+      setNotice(error ?? "X connect is not available in this build yet — the X service has not landed on the server.");
+      return;
+    }
+    const opened = await openExternal(url);
+    if (!opened) {
+      setNotice(`Could not open the X sign-in page in your browser — copy this link and paste it into Chrome, grant access there, then come back and refresh this page: ${url}`);
+      return;
+    }
+    setNotice("Opened X in your browser — grant access there, then come back and this page will show Connected (refresh the page after granting).");
   }
 
   const loading = channels === null;
@@ -215,6 +236,41 @@ export default function ChannelsPage() {
           })}
         </div>
       )}
+
+      {/* X (Twitter) — v0.8.0. Status from GET /x/status, connect via
+          POST /x/connect. X API access is paid/restricted: the card says
+          so plainly and never shows a fake connected state. */}
+      <Card>
+        <div className="flex items-center gap-3">
+          <Avatar name="X (Twitter)" platform="x" />
+          <div className="min-w-0 flex-1">
+            <h2 className="flex items-center gap-2 text-lg font-semibold text-neutral-50">
+              <PlatformDot platform="x" /> X (Twitter)
+            </h2>
+            <p className="truncate text-sm text-neutral-400">{xStatus?.account || "Not connected yet"}</p>
+          </div>
+          {!xLoaded ? <Skeleton className="h-6 w-24" />
+            : xStatus === null ? <Badge tone="neutral">Not available in this build</Badge>
+            : xStatus.connected ? <Badge tone="success">● Connected</Badge>
+            : <Badge tone="warning">○ Not connected</Badge>}
+        </div>
+        <p className="mt-3 text-sm text-neutral-400">
+          {xStatus?.note || "X posting goes through the X API, which is a paid and restricted tier — free X API access does not include posting. Connecting may require an approved developer account and a paid X API plan."}
+        </p>
+        <p className="mt-2 text-sm text-neutral-400">
+          Until X approves the app and a paid tier is active, clips for X stay as drafts / manual-post packs — ClipForge will not claim a post went out when it did not.
+        </p>
+        <div className="mt-4 flex flex-wrap gap-2">
+          {xStatus?.connected ? (
+            <SecondaryButton onClick={connectXAccount} disabled={busy === "x"}>Reconnect X</SecondaryButton>
+          ) : (
+            <PrimaryButton onClick={connectXAccount} disabled={busy === "x" || !live}>
+              {busy === "x" ? "Opening…" : "Connect X"}
+            </PrimaryButton>
+          )}
+          {!live && <span className="self-center text-xs text-neutral-500">Connect needs the live API — start the server first.</span>}
+        </div>
+      </Card>
 
       <Card>
         <h2 className="mb-2 text-lg font-semibold">How connecting works</h2>

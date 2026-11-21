@@ -44,7 +44,7 @@ def test_channels_all_not_connected_initially(client: TestClient) -> None:
     resp = client.get("/channels")
     assert resp.status_code == 200
     cards = {c["platform"]: c for c in resp.json()}
-    assert set(cards) == {"youtube", "instagram", "facebook", "tiktok"}
+    assert set(cards) == {"youtube", "instagram", "facebook", "tiktok", "x"}
     for platform, card in cards.items():
         assert card["status"] == "not_connected", platform
         assert card["daily_cap"] > 0

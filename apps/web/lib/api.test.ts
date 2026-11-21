@@ -48,6 +48,9 @@ import {
   deriveCanClip,
   attributionForClip,
   normalizeWorkerQueue,
+  normalizePerfProfile,
+  normalizeBatchStatus,
+  normalizeDetectionCandidate,
   pipelineStageStates,
   resolveApiUrl,
   RUNNING_STATUSES,
@@ -755,4 +758,49 @@ test("attributionForClip returns the credit for CC sources only", () => {
   const pd = attributionForClip({ ...cc, source_license: "public-domain" });
   assert.match(pd ?? "", /public domain/);
   assert.match(pd ?? "", /Open tutorial/);
+
+test("normalizePerfProfile reads the nested hardware object from GET /perf/profile", () => {
+  const p = normalizePerfProfile({
+    profile: "low", mode: "auto",
+    hardware: { cpu_cores: 4, ram_gb: 7.7, gpu: null, platform: "Linux" },
+    settings: { whisper_model: "tiny" },
+  });
+  assert.equal(p?.profile, "low");
+  assert.equal(p?.cpu_cores, 4);
+  assert.equal(p?.ram_gb, 7.7);
+  assert.equal(p?.gpu, null);
+  assert.equal(p?.override, false);
+  const over = normalizePerfProfile({
+    profile: "high", mode: "high",
+    hardware: { cpu_cores: 16, ram_gb: 32, gpu: "NVIDIA RTX", platform: "Linux" },
+    settings: {},
+  });
+  assert.equal(over?.override, true);
+  assert.equal(over?.gpu, "NVIDIA RTX");
+  assert.equal(normalizePerfProfile({}), null);
 });
+
+test("normalizeBatchStatus reads clip counts from item.result (real processor)", () => {
+  const b = normalizeBatchStatus({
+    id: "abc123", status: "done",
+    items: [
+      { source: "/tmp/a.mp4", state: "done", progress: 100, result: { job_id: "j1", clips: 3, status: "ready" } },
+      { source: "/tmp/b.mp4", state: "failed", progress: 0, error: "Source not found" },
+    ],
+  });
+  assert.equal(b?.batch_id, "abc123");
+  assert.equal(b?.items[0].clips, 3);
+  assert.equal(b?.items[1].clips, 0);
+  assert.equal(normalizeBatchStatus({}), null);
+});
+
+test("normalizeDetectionCandidate keeps all six signal scores", () => {
+  const c = normalizeDetectionCandidate({
+    start: 12, end: 40, score: 82, hook_score: 90, peak_score: 70,
+    payoff_score: 80, emotion_score: 60, visual_score: 50,
+    completeness_score: 95, title: "The hook", reason: "Strong hook",
+  });
+  assert.equal(c.score, 82);
+  assert.equal(c.hook_score, 90);
+  assert.equal(c.completeness_score, 95);
+  assert.equal(c.title, "The hook");
