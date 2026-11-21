@@ -36,9 +36,6 @@ pub struct DesktopSettings {
     /// Names of API keys the user has configured (values live in `.env`).
     #[serde(default)]
     pub api_key_names: Vec<String>,
-    /// Whether the "window hides to tray" hint has been shown once.
-    #[serde(default)]
-    pub tray_hint_shown: bool,
 }
 
 fn default_manual_port() -> u16 {
@@ -52,7 +49,6 @@ impl Default for DesktopSettings {
             port_mode: PortMode::Auto,
             manual_port: default_manual_port(),
             api_key_names: Vec::new(),
-            tray_hint_shown: false,
         }
     }
 }

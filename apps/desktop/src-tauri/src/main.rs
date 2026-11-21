@@ -16,6 +16,7 @@
 mod ffmpeg;
 mod settings;
 mod sidecar;
+mod updater;
 
 use settings::DesktopSettings;
 use sidecar::{pick_port, resolve_sidecar, start_sidecar, stop_sidecar, SidecarSource};
@@ -28,7 +29,7 @@ use tauri::{
     AppHandle, Manager, RunEvent, State, WebviewWindow, WindowEvent,
 };
 
-/// What the splash page (and the shell window) show.
+/// What the splash page shows.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 enum ServerPhase {
@@ -58,6 +59,8 @@ struct AppState {
     /// True while a launch thread is running — prevents double-spawn
     /// (two sidecars, one orphaned) if Retry is hit while starting.
     launching: Mutex<bool>,
+    /// In-app updater state (see `updater.rs`).
+    update: Mutex<updater::UpdaterState>,
     /// The tray icon must be kept alive: dropping it removes it.
     tray: Mutex<Option<tauri::tray::TrayIcon>>,
 }
@@ -246,26 +249,6 @@ fn open_data_folder_app(app: AppHandle, state: State<'_, AppState>) -> Result<()
 }
 
 #[tauri::command]
-fn open_shell_window(app: AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("shell") {
-        w.show().map_err(|e| e.to_string())?;
-        w.set_focus().map_err(|e| e.to_string())?;
-        return Ok(());
-    }
-    let _w = tauri::WebviewWindowBuilder::new(
-        &app,
-        "shell",
-        tauri::WebviewUrl::App("shell.html".into()),
-    )
-    .title("ClipForge — Server status & settings")
-    .inner_size(720.0, 620.0)
-    .min_inner_size(620.0, 480.0)
-    .build()
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[tauri::command]
 fn show_main_window(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let Some(w) = app.get_webview_window("main") else {
         return Err("main window not found".into());
@@ -286,13 +269,89 @@ fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
+// ---------------------------------------------------------------- updater
+// Commands for the in-app updater (see `updater.rs`). The web UI calls
+// these from the Settings page; the state machine is polled with
+// `get_update_status`.
+
+#[tauri::command]
+fn check_for_updates(state: State<'_, AppState>) -> updater::UpdateCheckResult {
+    updater::run_check(&state.update)
+}
+
+#[tauri::command]
+fn get_update_status(state: State<'_, AppState>) -> updater::UpdateStatus {
+    updater::snapshot(&state.update)
+}
+
+#[tauri::command]
+fn download_and_install_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<updater::UpdateInstallResult, String> {
+    // Only valid from Available; anything else is a no-op error.
+    let release = {
+        let guard = state.update.lock().map_err(|e| e.to_string())?;
+        if guard.status.state != updater::UpdatePhase::Available {
+            return Err(format!(
+                "No update is available to install (updater state: {:?}).",
+                guard.status.state
+            ));
+        }
+        guard.release.clone().ok_or("No update release recorded.")?
+    };
+    updater::set_phase(&state.update, updater::UpdatePhase::Downloading, None);
+    let dest_dir = std::env::temp_dir();
+    let downloaded = updater::download_asset(&release, &dest_dir, &|progress| {
+        updater::set_progress(&state.update, progress);
+    });
+    let path = match downloaded {
+        Ok(p) => p,
+        Err(e) => {
+            updater::fail(&state.update, &e);
+            return Err(e);
+        }
+    };
+    updater::set_phase(&state.update, updater::UpdatePhase::Ready, None);
+    updater::set_downloaded_path(&state.update, Some(path.to_string_lossy().into_owned()));
+
+    if cfg!(windows) {
+        // Windows: the NSIS setup installs over the app folder. Launch it
+        // and quit so the installer can replace the running files. The
+        // data dir (AppData) is never touched by the installer.
+        updater::launch_installer(&path).map_err(|e| {
+            let msg = format!("Could not launch the installer: {e}");
+            updater::fail(&state.update, &msg);
+            msg
+        })?;
+        stop_sidecar_if_running(&state);
+        app.exit(0);
+        // Unreachable, but keep the type checker happy.
+        Ok(updater::UpdateInstallResult {
+            downloaded_path: path.to_string_lossy().into_owned(),
+            manual_install: false,
+            message: "Installer launched — ClipForge is closing so the installer can replace the app files.".into(),
+        })
+    } else {
+        // Linux (and macOS): no silent install — the user installs the
+        // downloaded .deb / .AppImage themselves.
+        Ok(updater::UpdateInstallResult {
+            downloaded_path: path.to_string_lossy().into_owned(),
+            manual_install: true,
+            message: format!(
+                "Downloaded to {}. Install it manually (double-click the .deb, or run the .AppImage).",
+                path.display()
+            ),
+        })
+    }
+}
+
 fn build_tray(app: &AppHandle) -> tauri::Result<tauri::tray::TrayIcon> {
     let show = MenuItemBuilder::with_id("show", "Show ClipForge").build(app)?;
-    let shell = MenuItemBuilder::with_id("shell", "Server status & settings").build(app)?;
     let data = MenuItemBuilder::with_id("data", "Open data folder").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
     let menu = MenuBuilder::new(app)
-        .items(&[&show, &shell, &data, &quit])
+        .items(&[&show, &data, &quit])
         .build()?;
     let icon = {
         let png = image::load_from_memory(include_bytes!("../icons/icon.png"))
@@ -312,9 +371,6 @@ fn build_tray(app: &AppHandle) -> tauri::Result<tauri::tray::TrayIcon> {
                     let _ = w.show();
                     let _ = w.set_focus();
                 }
-            }
-            "shell" => {
-                let _ = open_shell_window(app.clone());
             }
             "data" => {
                 let state = app.state::<AppState>();
@@ -352,9 +408,11 @@ fn main() {
             save_settings,
             ffmpeg_download_url,
             open_data_folder_app,
-            open_shell_window,
             show_main_window,
-            quit_app
+            quit_app,
+            check_for_updates,
+            get_update_status,
+            download_and_install_update,
         ])
         .setup(|app| {
             let app_data_dir = app
@@ -382,6 +440,7 @@ fn main() {
                 app_data_dir,
                 sidecar: Mutex::new(None),
                 launching: Mutex::new(false),
+                update: Mutex::new(updater::UpdaterState::default()),
                 tray: Mutex::new(None),
             };
             app.manage(state);
@@ -414,19 +473,10 @@ fn main() {
             let app_handle = app.handle().clone();
             main.on_window_event(move |event| {
                 if let WindowEvent::CloseRequested { api, .. } = event {
-                    // Hide to tray instead of closing; Quit lives in the tray.
+                    // Hide to tray instead of closing; Quit lives in the
+                    // tray. There is exactly one window: server status
+                    // and settings live inside the main window now.
                     api.prevent_close();
-                    let state = app_handle.state::<AppState>();
-                    let show_hint = {
-                        let cfg = DesktopSettings::load(&state.app_data_dir);
-                        !cfg.tray_hint_shown
-                    };
-                    if show_hint {
-                        let mut cfg = DesktopSettings::load(&state.app_data_dir);
-                        cfg.tray_hint_shown = true;
-                        let _ = cfg.save(&state.app_data_dir);
-                        let _ = open_shell_window(app_handle.clone());
-                    }
                     if let Some(w) = app_handle.get_webview_window("main") {
                         let _ = w.hide();
                     }
@@ -434,6 +484,16 @@ fn main() {
             });
 
             launch_sidecar_thread(app.handle().clone());
+
+            // One quiet update check on launch: it only sets the updater
+            // state (Available / Idle / Failed) — it never downloads.
+            {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let state = handle.state::<AppState>();
+                    updater::run_check(&state.update);
+                });
+            }
             Ok(())
         });
 
