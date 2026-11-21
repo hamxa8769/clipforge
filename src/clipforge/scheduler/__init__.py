@@ -198,9 +198,7 @@ def _publish_due(
         if blocked:
             post.error = blocked
             session.commit()
-            results.append(
-                {"post_id": post.id, "status": "skipped_licence", "message": blocked}
-            )
+            results.append({"post_id": post.id, "status": "skipped_licence", "message": blocked})
             continue
         cap = daily_cap_for(session, post)
         done = published_today_count(session, post.account_id, post.platform, now)

@@ -65,7 +65,10 @@ CC_LICENSES: dict[str, tuple[str, str]] = {
         "Creative Commons Attribution-NoDerivatives 4.0 International",
         "https://creativecommons.org/licenses/by-nd/4.0/",
     ),
-    "cc0": ("CC0 1.0 Universal (Public Domain Dedication)", "https://creativecommons.org/publicdomain/zero/1.0/"),
+    "cc0": (
+        "CC0 1.0 Universal (Public Domain Dedication)",
+        "https://creativecommons.org/publicdomain/zero/1.0/",
+    ),
     "public-domain": ("Public Domain", ""),
     "own": ("Own content", ""),
 }
@@ -118,6 +121,9 @@ _ALIASES = {
     "youtube standard license": "standard",
     "youtube standard": "standard",
     "youtube": "standard",
+    # Raw YouTube Data API status.license value for CC BY videos.
+    "creativecommon": "cc-by-3.0",
+    "creative commons": "cc-by-3.0",
 }
 
 

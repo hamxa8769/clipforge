@@ -76,6 +76,8 @@ def _make_video(path: Path, duration: int = 4) -> Path:
         ("Public Domain", "public-domain"),
         ("YouTube Standard License", "standard"),
         ("standard youtube license", "standard"),
+        ("creativeCommon", "cc-by-3.0"),
+        ("Creative Commons", "cc-by-3.0"),
         (None, None),
         ("", None),
     ],
@@ -90,9 +92,7 @@ def test_unknown_licence_is_never_silently_relabelled_cc():
 
 
 def test_build_attribution_text_cc_by():
-    text = build_attribution_text(
-        "Sunset Timelapse", "Free Nature Films", CC_URL, "cc-by-3.0"
-    )
+    text = build_attribution_text("Sunset Timelapse", "Free Nature Films", CC_URL, "cc-by-3.0")
     assert text == CREDIT
 
 
