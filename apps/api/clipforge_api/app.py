@@ -78,6 +78,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from clipforge import __version__ as _VERSION  # noqa: F401  (package version)
+from clipforge import agent as agent_mod
 from clipforge import automation
 from clipforge.abtest import (
     ABTestError,
@@ -147,7 +148,14 @@ from clipforge.db import (
     session_factory,
 )
 from clipforge.ffmpeg_install import FfmpegInstaller, ensure_bundled_on_path
+from clipforge.llm import (
+    GEMINI_DEFAULT_MODEL,
+    GEMINI_MODELS,
+    resolve_engine,
+    test_gemini,
+)
 from clipforge.monetization import progress as monetization_progress
+from clipforge.niches import PRESET_NAMES
 from clipforge.publishing import meta as meta_adapter
 from clipforge.publishing import tiktok as tiktok_adapter
 from clipforge.publishing import youtube as youtube_adapter
@@ -311,6 +319,7 @@ class SettingsUpdate(BaseModel):
     llm_base_url: str | None = None
     llm_model: str | None = None
     llm_api_key: str | None = None  # None = keep, "" = clear, value = set
+    gemini_api_key: str | None = None  # v0.5.0: same semantics, Gemini key
     # {platform: {"client_id": ..., "client_secret": ...}} — same semantics.
     credentials: dict[str, dict[str, str | None]] | None = None
 
@@ -1391,6 +1400,8 @@ def update_settings(payload: SettingsUpdate):
     store.save(current)
     if payload.llm_api_key is not None:
         store.set_credential("llm", "api_key", payload.llm_api_key or None)
+    if payload.gemini_api_key is not None:
+        store.set_credential("gemini", "api_key", payload.gemini_api_key or None)
     if payload.credentials:
         for platform, creds in payload.credentials.items():
             _require_platform(platform)
@@ -2080,6 +2091,229 @@ def get_analytics(account_id: str, db: Session = Depends(get_db)):
             for s in snaps
         ],
     }
+
+
+# ============================================================ v0.5.0 ===
+# ClipForge Agent + Gemini provider (worker 2 of 3, v0.5.0).
+# One clearly-marked block: agent status/config/start/stop and the
+# Gemini LLM endpoints. All errors are plain language — never a
+# traceback, never a secret value in any response.
+#
+# Rights guardrail (applies to every string in this block): the agent
+# is for the user's OWN videos or videos they have rights / a licence
+# to use. It is not a tool to re-upload other creators' videos.
+# ============================================================ v0.5.0 ===
+
+
+class AgentConfigUpdate(BaseModel):
+    """Partial agent config update. Omitted = keep; see AgentConfig."""
+
+    enabled: bool | None = None
+    source_type: str | None = None
+    source_url: str | None = None
+    niche: str | None = None
+    auto_post: bool | None = None
+    rights_confirmed: bool | None = None
+    transcript_text: str | None = None
+    top_n: int | None = None
+    platforms: list[str] | None = None
+
+
+class GeminiKeyIn(BaseModel):
+    api_key: str = ""
+    model: str | None = None
+
+
+def _agent() -> agent_mod.Agent:
+    """The one shared agent for this data dir (start/stop share a thread)."""
+    return agent_mod.get_agent(_data_dir(), _Session, _settings_store())
+
+
+def _agent_config_out(config: agent_mod.AgentConfig) -> dict:
+    """GET/PUT /api/agent/config shape (contract fields + extras)."""
+    return {
+        "enabled": config.enabled,
+        "source_type": config.source_type,
+        "source_url": config.source_url,
+        "niche": config.niche,
+        "auto_post": config.auto_post,
+        "rights_confirmed": config.rights_confirmed,
+        "transcript_text": config.transcript_text,
+        "top_n": config.top_n,
+        "platforms": list(config.platforms),
+        "rights_notice": agent_mod.RIGHTS_NOTICE,
+        "niches": list(PRESET_NAMES),
+    }
+
+
+@app.get("/api/agent/status")
+def agent_status(db: Session = Depends(get_db)):
+    """Agent status + per-account roll-up (queued / approved / published)."""
+    agent = _agent()
+    status = agent.status()
+    status["accounts"] = agent_mod.accounts_summary(db, status)
+    return status
+
+
+@app.get("/api/agent/config")
+def get_agent_config():
+    """Current agent config + the rights notice + the niche presets."""
+    return _agent_config_out(_agent().store.load_config())
+
+
+@app.put("/api/agent/config")
+def update_agent_config(payload: AgentConfigUpdate):
+    """Save agent config (partial). Structural problems are 422 in
+    plain language. The rights flag is NOT required to *save* — it is
+    required to *run* (POST /api/agent/start enforces it)."""
+    agent = _agent()
+    config = agent.store.load_config()
+    patch = {k: v for k, v in payload.model_dump().items() if v is not None}
+    for key, value in patch.items():
+        setattr(config, key, value)
+    if "niche" in patch:
+        from clipforge.niches import normalize_niche  # noqa: PLC0415
+
+        config.niche = normalize_niche(config.niche)
+    try:
+        config.validate_structure()
+    except agent_mod.AgentError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    agent.store.save_config(config)
+    return _agent_config_out(config)
+
+
+@app.post("/api/agent/start")
+def start_agent():
+    """Start the agent (background thread). 409 when already running,
+    422 when it is off / has no source / rights are not confirmed."""
+    agent = _agent()
+    try:
+        state = agent.start()
+    except agent_mod.AgentError as exc:
+        message = str(exc)
+        status_code = 409 if "already running" in message else 422
+        raise HTTPException(status_code, message) from exc
+    return {"ok": True, "state": state}
+
+
+@app.post("/api/agent/stop")
+def stop_agent():
+    """Ask the agent to stop. Always 200 with the current state."""
+    return {"ok": True, "state": _agent().stop()}
+
+
+@app.get("/api/llm/providers")
+def list_llm_providers():
+    """LLM providers with configured status (masked, last4 only).
+
+    ``active`` marks the engine the agent would use right now:
+    Gemini when its key is saved, then OpenAI-compatible, else the
+    rule engine (always available, no key needed).
+    """
+    store = _settings_store()
+    engine, _provider = resolve_engine(store)
+    gemini_view = store.credential_view("gemini", "api_key")
+    openai_view = store.credential_view("llm", "api_key")
+    settings_now = store.load()
+    return [
+        {
+            "id": "gemini",
+            "name": "Gemini",
+            "model": settings_now.gemini_model or GEMINI_DEFAULT_MODEL,
+            "models": list(GEMINI_MODELS),
+            "configured": gemini_view["configured"],
+            "last4": gemini_view["last4"],
+            "masked": gemini_view["masked"],
+            "source": gemini_view["source"],
+            "active": engine == "gemini",
+        },
+        {
+            "id": "openai",
+            "name": "OpenAI-compatible",
+            "model": settings_now.llm_model,
+            "base_url": settings_now.llm_base_url,
+            "configured": openai_view["configured"],
+            "last4": openai_view["last4"],
+            "masked": openai_view["masked"],
+            "source": openai_view["source"],
+            "active": engine == "openai",
+        },
+        {
+            "id": "rules",
+            "name": "Rule-based (no key needed)",
+            "model": "",
+            "configured": True,
+            "last4": "",
+            "masked": "",
+            "source": "builtin",
+            "active": engine == "rules",
+        },
+    ]
+
+
+@app.post("/api/llm/gemini/test")
+def test_gemini_key(payload: GeminiKeyIn):
+    """Test a Gemini key against the real API (plain-language result).
+
+    ``api_key`` may be omitted to test the *saved* key. The key is
+    never echoed back, logged, or included in any message.
+    """
+    model = payload.model or GEMINI_DEFAULT_MODEL
+    if model not in GEMINI_MODELS:
+        raise HTTPException(
+            422, f"Unknown Gemini model {model!r} — pick one of {list(GEMINI_MODELS)}."
+        )
+    key = (payload.api_key or "").strip()
+    if not key:
+        key = _settings_store().get_credential("gemini", "api_key") or ""
+    if not key:
+        raise HTTPException(
+            422,
+            "No Gemini API key given and none saved — paste your key "
+            "(Google AI Studio > Get API key) and test again.",
+        )
+    result = test_gemini(key, model)
+    return {"ok": result["ok"], "model": result["model"], "message": result["message"]}
+
+
+@app.post("/api/llm/gemini/save")
+def save_gemini_key(payload: GeminiKeyIn):
+    """Save (or clear, with "") a Gemini key in the OS keyring.
+
+    The response carries only the masked view — the key itself is
+    never returned. An optional ``model`` is saved alongside it.
+    """
+    store = _settings_store()
+    key = (payload.api_key or "").strip()
+    if payload.model:
+        if payload.model not in GEMINI_MODELS:
+            raise HTTPException(
+                422,
+                f"Unknown Gemini model {payload.model!r} — pick one of {list(GEMINI_MODELS)}.",
+            )
+        current = store.load()
+        current.gemini_model = payload.model
+        store.save(current)
+    if key:
+        store.set_credential("gemini", "api_key", key)
+    else:
+        store.set_credential("gemini", "api_key", None)
+    view = store.credential_view("gemini", "api_key")
+    return {
+        "ok": True,
+        "configured": view["configured"],
+        "last4": view["last4"],
+        "masked": view["masked"],
+        "message": (
+            "Gemini API key saved."
+            if view["configured"]
+            else "Gemini API key cleared — the agent will use the rule engine."
+        ),
+    }
+
+
+# ============================================================ / v0.5.0 ===
 
 
 # A previous one-click install already put FFmpeg in

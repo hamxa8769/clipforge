@@ -39,6 +39,8 @@ SECRET_NAMES = {
     "facebook": {"client_id": "app:meta:client_id", "client_secret": "app:meta:client_secret"},
     "tiktok": {"client_id": "app:tiktok:client_id", "client_secret": "app:tiktok:client_secret"},
     "llm": {"api_key": "app:llm:api_key"},
+    # Gemini (v0.5.0): same keyring storage, separate secret name.
+    "gemini": {"api_key": "app:gemini:api_key"},
 }
 
 # Env vars the pre-OAuth accounts used — still honoured as a fallback so
@@ -49,6 +51,7 @@ LEGACY_ENV_VARS = {
     "facebook": ["META_ACCESS_TOKEN"],
     "tiktok": ["TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET", "TIKTOK_ACCESS_TOKEN"],
     "llm": ["CLIPFORGE_LLM_API_KEY"],
+    "gemini": ["GEMINI_API_KEY"],
 }
 
 DEFAULT_PRIVACY = {
@@ -131,6 +134,8 @@ class AppSettings:
     llm_provider: str = "openai-compatible"
     llm_base_url: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4o-mini"
+    # Gemini model for the Agent (v0.5.0); "" = gemini-2.0-flash default.
+    gemini_model: str = ""
     # Path of the FFmpeg binary installed by the one-click installer
     # ("" = none installed; detection then falls back to the bundled
     # location and PATH). Saved by the installer, never typed by hand.
@@ -276,6 +281,12 @@ class SettingsStore:
                 "base_url": settings.llm_base_url,
                 "model": settings.llm_model,
                 "api_key": self.credential_view("llm", "api_key"),
+                # Gemini (v0.5.0): first-class provider alongside the
+                # OpenAI-compatible one. Masked, like every other secret.
+                "gemini": {
+                    "model": settings.gemini_model or "gemini-2.0-flash",
+                    "api_key": self.credential_view("gemini", "api_key"),
+                },
             },
             "credentials": {
                 platform: {

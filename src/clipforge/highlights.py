@@ -40,6 +40,7 @@ import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from clipforge.niches import niche_keyword_density
 from clipforge.transcribe import Transcript, Word
 
 # The LLM highlight prompt lives in a file (prompts/highlight_system.md)
@@ -306,19 +307,25 @@ def _signal_scores(words: list[Word]) -> dict[str, float]:
 
 
 def score_span(
-    words: list[Word], span_start: int, span_end: int
+    words: list[Word], span_start: int, span_end: int, niche: str = ""
 ) -> tuple[float, int, dict[str, float]]:
     """Score words[span_start:span_end] -> (score 0–100, hook 1–10, signals).
 
     Pure function. Weights follow the framework: the opening hook and
     emotional/opinion peaks dominate; practical value and quotability
     lift a solid span; length near the 30 s target is preferred.
+    ``niche`` (v0.5.0) adds a niche signal: spans dense with the
+    niche's keywords score higher, and a niche keyword in the first
+    3 s lifts the hook — the clip matches the channel it is cut for.
     """
     span = words[span_start:span_end]
     if not span:
         return 0.0, 1, {}
     signals = _signal_scores(span)
     duration = span[-1].end - span[0].start
+    # Niche signal (v0.5.0): density of niche keywords in the span.
+    span_text = " ".join(w.text for w in span)
+    signals["niche"] = round(niche_keyword_density(span_text, niche), 3) if niche else 0.0
     # Hook: first ~3 s of the span.
     hook_words = [w for w in span if w.start - span[0].start <= 3.0]
     hook_signals = _signal_scores(hook_words) if hook_words else {}
@@ -328,6 +335,9 @@ def score_span(
         hook_signals.get("revelation", 0.0),
         0.35 if QUESTION_RE.search(" ".join(w.text for w in hook_words)) else 0.0,
     )
+    if niche and hook_words:
+        hook_niche = niche_keyword_density(" ".join(w.text for w in hook_words), niche)
+        hook_strength = max(hook_strength, hook_niche)
     hook = max(1, min(10, int(round(1 + hook_strength * 9))))
 
     weights = {
@@ -341,6 +351,7 @@ def score_span(
         "practical_value": 0.12,
     }
     raw = sum(signals.get(k, 0.0) * w for k, w in weights.items())
+    raw += signals["niche"] * 0.15  # niche match lifts the moment
     # Length shaping: full credit near 30 s, tapering to the 15–60 s bounds.
     if duration < MIN_CLIP_S:
         raw *= 0.55 + 0.45 * (duration / MIN_CLIP_S)
@@ -352,8 +363,10 @@ def score_span(
     return score, hook, signals
 
 
-def _words_to_candidate(words: list[Word], start_idx: int, end_idx: int, source: str) -> Candidate:
-    score, hook, signals = score_span(words, start_idx, end_idx)
+def _words_to_candidate(
+    words: list[Word], start_idx: int, end_idx: int, source: str, niche: str = ""
+) -> Candidate:
+    score, hook, signals = score_span(words, start_idx, end_idx, niche=niche)
     span_text = " ".join(w.text for w in words[start_idx:end_idx])
     hook_line = span_text[:120].strip()
     top_signal = max(signals, key=signals.get) if signals else "practical_value"
@@ -381,12 +394,14 @@ def find_heuristic_candidates(
     top_n: int = MAX_CANDIDATES,
     target_s: float = TARGET_CLIP_S,
     step_words: int = 20,
+    niche: str = "",
 ) -> list[Candidate]:
     """Sliding-window heuristic candidates over the whole transcript.
 
     Pure function (no I/O). Windows start every ``step_words`` words and
     run to ~``target_s`` seconds, snapping the end to a sentence boundary
-    when one is nearby; results are deduped and ranked.
+    when one is nearby; results are deduped and ranked. ``niche``
+    weights the scoring toward the channel's niche (v0.5.0).
     """
     words = transcript.words
     if len(words) < 10:
@@ -404,7 +419,7 @@ def find_heuristic_candidates(
                 break
         if words[end_idx - 1].end - words[start_idx].start < MIN_CLIP_S:
             continue
-        candidates.append(_words_to_candidate(words, start_idx, end_idx, "heuristic"))
+        candidates.append(_words_to_candidate(words, start_idx, end_idx, "heuristic", niche=niche))
     return dedupe_and_rank(candidates, top_n=top_n)
 
 
@@ -434,7 +449,7 @@ LLM_SYSTEM_PROMPT = load_highlight_prompt()
 
 
 def _llm_candidates_for_chunk(
-    words: list[Word], chunk: Chunk, api_key: str, base_url: str, model: str
+    words: list[Word], chunk: Chunk, api_key: str, base_url: str, model: str, niche: str = ""
 ) -> list[Candidate]:
     numbered = "\n".join(
         f"{i}: {words[i].text} [{words[i].start:.2f}-{words[i].end:.2f}]"
@@ -479,7 +494,7 @@ def _llm_candidates_for_chunk(
         duration = words[e_idx - 1].end - words[s_idx].start
         if not (MIN_CLIP_S - 2 <= duration <= MAX_CLIP_S + 10):
             continue
-        _, _, signals = score_span(words, s_idx, e_idx)
+        _, _, signals = score_span(words, s_idx, e_idx, niche=niche)
         out.append(
             Candidate(
                 start_word_index=s_idx,
@@ -501,28 +516,32 @@ def find_candidates(
     transcript: Transcript,
     top_n: int = MAX_CANDIDATES,
     use_llm: bool | None = None,
+    niche: str = "",
 ) -> list[Candidate]:
     """Top-N candidates: LLM when configured, else heuristic fallback.
 
     ``use_llm=None`` (default) means: use the LLM only if
     ``OPENAI_API_KEY`` is set; any LLM failure falls back to the
-    heuristic rather than failing the job.
+    heuristic rather than failing the job. ``niche`` weights scoring
+    toward the channel's niche (v0.5.0).
     """
     api_key = os.environ.get("OPENAI_API_KEY", "")
     want_llm = api_key if use_llm is None else bool(use_llm and api_key)
     if not want_llm:
-        return find_heuristic_candidates(transcript, top_n=top_n)
+        return find_heuristic_candidates(transcript, top_n=top_n, niche=niche)
     base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
     model = os.environ.get("CLIPFORGE_LLM_MODEL", "gpt-4o-mini")
     all_candidates: list[Candidate] = []
     try:
         for chunk in chunk_transcript(transcript):
             all_candidates.extend(
-                _llm_candidates_for_chunk(transcript.words, chunk, api_key, base_url, model)
+                _llm_candidates_for_chunk(
+                    transcript.words, chunk, api_key, base_url, model, niche=niche
+                )
             )
     except Exception:
         # LLM is an enhancement, never a single point of failure.
-        return find_heuristic_candidates(transcript, top_n=top_n)
+        return find_heuristic_candidates(transcript, top_n=top_n, niche=niche)
     if not all_candidates:
-        return find_heuristic_candidates(transcript, top_n=top_n)
+        return find_heuristic_candidates(transcript, top_n=top_n, niche=niche)
     return dedupe_and_rank(all_candidates, top_n=top_n)
