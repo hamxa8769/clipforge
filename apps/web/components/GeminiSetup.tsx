@@ -19,7 +19,7 @@ import {
   saveGeminiKey, saveSettings, testConnection, testGeminiKey,
   type LlmProvider,
 } from "@/lib/api";
-import { PrimaryButton, SecondaryButton } from "./ui";
+import { ExternalLink, PrimaryButton, SecondaryButton } from "./ui";
 
 export const GEMINI_KEY_URL = "https://aistudio.google.com/app/apikey";
 
@@ -148,9 +148,9 @@ export default function GeminiSetup() {
       <ol className="list-decimal space-y-1 pl-5 text-sm text-neutral-300">
         <li>
           Open{" "}
-          <a href={GEMINI_KEY_URL} target="_blank" rel="noreferrer" className="text-sky-400 underline">
+          <ExternalLink href={GEMINI_KEY_URL} className="text-sky-400 underline">
             Google AI Studio — Get API key
-          </a>{" "}
+          </ExternalLink>{" "}
           and sign in with your Google account.
         </li>
         <li>Press “Create API key”, copy it, and paste it below.</li>
