@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import shutil
 import subprocess
 import threading
 from pathlib import Path
@@ -50,6 +51,36 @@ LIVE_ID_CC = "L1v3Str34mA"
 LIVE_ID_STD = "L1v3Str34mB"
 LIVE_URL_CC = f"https://www.youtube.com/watch?v={LIVE_ID_CC}"
 FIXTURE_MP4 = Path("apps/api/data/uploads/7594885dc7dc_up.mp4")
+
+
+def _ensure_fixture_mp4() -> None:
+    """Generate the recorded-video fixture if it is not there.
+
+    The fixture lives in a gitignored uploads dir, so a fresh checkout
+    (and CI) does not have it — v0.7.0 shipped with CI red on exactly
+    this (``recorded-video fixture missing``). Generate a 40 s testsrc
+    clip with FFmpeg (the same source the smoke test uses); the worker
+    tests only need a real, renderable H.264 file. Skip plainly when
+    FFmpeg is absent instead of failing the suite.
+    """
+    if FIXTURE_MP4.exists():
+        return
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not available — cannot generate the live fixture")
+    FIXTURE_MP4.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30:duration=40",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            str(FIXTURE_MP4),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert proc.returncode == 0, f"ffmpeg could not generate the fixture: {proc.stderr}"
+    assert FIXTURE_MP4.exists(), "recorded-video fixture missing after generation"
 
 
 # ------------------------------------------------------------------ clip decision
@@ -529,6 +560,7 @@ def test_capture_unreadable_file_is_plain_error(tmp_path):
 @pytest.fixture()
 def _worker_env(tmp_path, monkeypatch):
     """Temp DB + temp data dir; a stub yt-dlp on PATH for the tool check."""
+    _ensure_fixture_mp4()
     init_db()
     bindir = tmp_path / "bin"
     bindir.mkdir()

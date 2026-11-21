@@ -8,10 +8,13 @@ captions, writes a different title / description / hashtag set for each
 platform, and publishes **only after a human approves** — through the
 platforms' official APIs, and nothing else.
 
-> **Status: v0.7.0 — production-level single-window app.** The clipping
+> **Status: v0.8.0 — production-level single-window app.** The clipping
 > pipeline, review UI, and publishing adapters are under active
 > development. Nothing in this repo posts to any platform automatically,
-> and `DRY_RUN=true` is the default. v0.7.0 adds Creative Commons
+> and `DRY_RUN=true` is the default. v0.8.0 adds ClipForge Pro: Clip
+> Studio with deeper AI detection, Export Hub, Batch mode, X (Twitter),
+> a monetization layer, and low-end / no-GPU performance profiles.
+> v0.7.0 adds Creative Commons
 > discovery (Licensed only toggle), licence-checked CC clipping with
 > auto-attribution and generated thumbnails, and live-stream clipping.
 > v0.6.0 adds live niche trending
@@ -233,6 +236,54 @@ Things to know:
 
 Building the exe yourself: `python scripts/build_exe.py --with-web`
 (see `clipforge-server.spec`).
+
+## What's new in v0.8.0 — ClipForge Pro
+
+- **Clip Studio** — AI clip suggestions as cards with a viral score
+  (0–100) and six signal bars (hook, peak, payoff, emotion, visual,
+  completeness), inline preview, a draggable timeline with trim and
+  ripple cuts (with undo), and a labelled Pro Mode (caption styling,
+  punch-in zooms, aspect 9:16 / 1:1 / 16:9). Simple by default, pro
+  controls out of the way.
+- **Deeper AI clip detection** — Whisper-style word-level transcripts
+  are segmented into sentences/topics, cut into sentence-anchored
+  15–60 s windows, and scored on six signals with a documented
+  weighted formula (see `docs/detection.md`):
+  `viral = 0.25*hook + 0.25*peak + 0.15*payoff + 0.10*emotion +
+  0.10*visual + 0.15*completeness`. Near-duplicates are removed
+  (time IoU > 0.5) and topic diversity is enforced, so the top 8–12
+  clips are not the same moment twice. Hook titles come from Gemini
+  when connected, rule-based otherwise.
+- **Export Hub** — one-click publish with platform rules enforced by
+  the app: YouTube Shorts ≤ 60 s, TikTok ≤ 60 s, Instagram Reels
+  ≤ 90 s, X video ≤ 140 s; auto aspect ratios, captions, hashtags,
+  and a thumbnail preview side-by-side with the clip. Cross-post
+  scheduling uses the Growth page's own best-time data.
+- **Batch mode** — drop up to 20 videos, queue them, and wake up to
+  clips ready: per-video progress, pause/resume, and the real
+  pipeline runs each item (not a simulation). YouTube URLs need an
+  own-content declaration — the guardrail still applies.
+- **X (Twitter)** — fifth platform in Channels: OAuth 2.0 + PKCE,
+  video upload and posting, daily cap 25. Honest in the UI: posting
+  needs an X API Basic plan (paid) or higher — the free tier is
+  read-only, so until a paid tier is active X clips stay as drafts /
+  manual-post packs.
+- **Monetization layer** — affiliate-link inserter for descriptions,
+  UTM tracking per clip, A/B titles + thumbnails with view tracking,
+  and a revenue dashboard (RPM/views/earnings where the platform API
+  exposes them; honest empty states where it does not). A copyright
+  scan runs before publish — metadata-only flags with a plain-language
+  warning, never a guarantee.
+- **Low-end / no-GPU performance mode** — the app measures the
+  machine (CPU cores, RAM, GPU) on first run and picks Low / Balanced
+  / High: Low uses Whisper tiny, 480p previews, CPU-only FFmpeg, 1
+  job at a time and reduced animations. The active profile and the
+  hardware behind it are shown in Settings, and the user can override
+  it. Long jobs queue and progress — the UI never blocks.
+- If you have v0.7.0 installed, update from inside the app
+  (Settings → Updates, or the "Update available" banner) — no need to
+  download anything by hand. Installing v0.8.0 over v0.7.0 keeps your
+  clips, settings, and keys.
 
 ## What's new in v0.7.0
 

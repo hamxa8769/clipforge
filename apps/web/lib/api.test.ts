@@ -758,6 +758,7 @@ test("attributionForClip returns the credit for CC sources only", () => {
   const pd = attributionForClip({ ...cc, source_license: "public-domain" });
   assert.match(pd ?? "", /public domain/);
   assert.match(pd ?? "", /Open tutorial/);
+});
 
 test("normalizePerfProfile reads the nested hardware object from GET /perf/profile", () => {
   const p = normalizePerfProfile({
@@ -804,3 +805,4 @@ test("normalizeDetectionCandidate keeps all six signal scores", () => {
   assert.equal(c.hook_score, 90);
   assert.equal(c.completeness_score, 95);
   assert.equal(c.title, "The hook");
+});
