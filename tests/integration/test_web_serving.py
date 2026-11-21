@@ -133,9 +133,7 @@ def test_browser_navigation_to_live_job_id_redirects_to_review(tmp_path):
     unaffected and still get the job JSON."""
     client = _launcher_client(tmp_path)
     live_id = "262819a0612c4368"
-    res = client.get(
-        f"/jobs/{live_id}", headers={"Accept": BROWSER_ACCEPT}, follow_redirects=False
-    )
+    res = client.get(f"/jobs/{live_id}", headers={"Accept": BROWSER_ACCEPT}, follow_redirects=False)
     assert res.status_code == 303, res.text
     assert res.headers["location"] == f"/jobs/view/?id={live_id}"
     # Following the redirect lands on the exported review page.
