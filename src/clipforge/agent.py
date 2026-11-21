@@ -63,6 +63,7 @@ from clipforge.publishing import youtube as youtube_adapter
 from clipforge.rule_engine import extract_keywords
 from clipforge.seo import PLATFORMS
 from clipforge.transcribe import fallback_transcript_from_text
+from clipforge.trending import is_trending_source
 
 RIGHTS_NOTICE = (
     "The ClipForge Agent only works with videos you own or have the "
@@ -103,6 +104,15 @@ class AgentConfig:
     platforms: list[str] = field(
         default_factory=lambda: ["youtube", "tiktok", "instagram", "facebook"]
     )
+    # Trending loop (v0.6.0): the trending video is the TOPIC only — the
+    # source is always the user's own video. ``trending_topic`` (usually
+    # the trending title) seeds the SEO keywords; ``scheduled_for`` is
+    # an ISO timestamp the queued posts are scheduled for (None = the
+    # user schedules them from the approval queue).
+    trending_video_id: str = ""
+    trending_title: str = ""
+    trending_topic: str = ""
+    scheduled_for: str | None = None
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -149,6 +159,14 @@ class AgentConfig:
                 "Please confirm the source is yours or licensed first: "
                 "tick the rights confirmation in the agent settings. " + RIGHTS_NOTICE
             )
+        # Trending guardrail (v0.6.0): a trending video URL is never a
+        # clip source — only the user's own video on that topic is.
+        if self.trending_video_id and is_trending_source(self.source_url, self.trending_video_id):
+            raise AgentError(
+                "That source is the trending video itself — the agent "
+                "cannot clip another creator's video. Use YOUR OWN video "
+                "on this topic as the source instead."
+            )
 
 
 @dataclass
@@ -165,6 +183,10 @@ class AgentState:
     demo: bool = False
     last_error: str | None = None
     last_run_at: str | None = None
+    # Trending loop (v0.6.0): which trending video the current/last run
+    # was inspired by (topic only — never the clip source).
+    trending_video_id: str = ""
+    trending_title: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -216,6 +238,26 @@ class AgentStore:
         payload.setdefault("config", AgentConfig().to_dict())
         self._write(payload)
         return state
+
+
+def _trending_meta(cfg: AgentConfig) -> dict:
+    """Job meta for a trending run: the inspiration (topic only) + the
+    own source it was matched to. The posted clips' platform + provider
+    video id live on the Post records (publish_result_json) — the job
+    meta is what ties them back to the trending topic for monitoring."""
+    if not cfg.trending_video_id and not cfg.trending_title:
+        return {}
+    return {
+        "source": "trending",
+        "trending_video_id": cfg.trending_video_id,
+        "trending_title": cfg.trending_title,
+        "trending_topic": cfg.trending_topic or cfg.trending_title,
+        "trending_url": (
+            f"https://www.youtube.com/watch?v={cfg.trending_video_id}"
+            if cfg.trending_video_id
+            else ""
+        ),
+    }
 
 
 def _latest_channel_video_url(channel_url: str) -> str:
@@ -308,6 +350,8 @@ class Agent:
             "auto_post": config.auto_post,
             "rights_confirmed": config.rights_confirmed,
             "rights_notice": RIGHTS_NOTICE,
+            "trending_video_id": state.trending_video_id,
+            "trending_title": state.trending_title,
         }
 
     # ------------------------------------------------------------ start/stop
@@ -334,6 +378,41 @@ class Agent:
             )
             thread = threading.Thread(
                 target=self._run_thread, args=(cfg,), daemon=True, name="clipforge-agent"
+            )
+            self._thread = thread
+            thread.start()
+            return self.status()
+
+    def start_trending(self, config: AgentConfig) -> dict:
+        """Start a one-off trending run in a background thread.
+
+        Like :meth:`start`, but the config is NOT saved over the user's
+        stored agent config — a trending run is a single loop, not a
+        new standing setup. The trending video id / title are recorded
+        in the run state so the UI can show what the run was inspired
+        by. Raises AgentError plainly (incl. the trending guardrail).
+        """
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise AgentError("The agent is already running — stop it first.")
+            if not config.enabled:
+                raise AgentError("The agent is off — turn it on in the agent settings first.")
+            config.validate()  # rights flag, source URL, trending guardrail
+            self._stop.clear()
+            self._set_state(
+                status="running",
+                current_job=None,
+                progress_pct=0.0,
+                queued=0,
+                approved=0,
+                published=0,
+                last_error=None,
+                last_run_at=_utcnow_iso(),
+                trending_video_id=config.trending_video_id,
+                trending_title=config.trending_title,
+            )
+            thread = threading.Thread(
+                target=self._run_thread, args=(config,), daemon=True, name="clipforge-agent"
             )
             self._thread = thread
             thread.start()
@@ -379,6 +458,8 @@ class Agent:
             demo=bool(cfg.transcript_text),
             last_error=None,
             last_run_at=_utcnow_iso(),
+            trending_video_id=cfg.trending_video_id,
+            trending_title=cfg.trending_title,
         )
         session: Session = self._session_factory()
         try:
@@ -426,6 +507,7 @@ class Agent:
                     "niche": niche,
                     "engine": engine,
                     "top_n": cfg.top_n,
+                    **_trending_meta(cfg),
                 },
             )
             session.add(job)
@@ -471,6 +553,7 @@ class Agent:
                 "niche": normalize_niche(cfg.niche),
                 "engine": engine,
                 "top_n": cfg.top_n,
+                **_trending_meta(cfg),
             },
         )
         session.add(job)
@@ -538,11 +621,18 @@ class Agent:
         """
         niche = normalize_niche(cfg.niche)
         dry_run = self._settings().effective_dry_run(_env_settings.dry_run)
+        # Trending runs: SEO is tuned to the trending topic, not just the
+        # clip's own words — the trending title seeds the keywords so
+        # titles / descriptions / hashtags ride the topic that is working.
+        topic_text = (cfg.trending_topic or cfg.trending_title or "").strip()
+        scheduled_for = _parse_scheduled_for(cfg.scheduled_for)
         queued = approved = published = 0
         for cand in candidates[: cfg.top_n]:
             if self._stop.is_set():
                 raise AgentError("Agent stopped while queueing posts.")
-            keywords = extract_keywords(f"{cand.hook_line} {cand.transcript_excerpt or ''}", niche)
+            keywords = extract_keywords(
+                f"{topic_text} {cand.hook_line} {cand.transcript_excerpt or ''}", niche
+            )
             keyword = keywords[0] if keywords else niche_label(niche)
             for platform in cfg.platforms:
                 variant = generate_copy_with_engine(
@@ -570,6 +660,7 @@ class Agent:
                     seo_json=variant,
                     video_path=cand.file_path,
                     video_url=job.source_url,
+                    scheduled_for=scheduled_for,
                 )
                 session.add(post)
                 session.flush()
@@ -644,6 +735,21 @@ class Agent:
             post.error = result.error
         session.commit()
         return post.status in {PostStatus.DRY_RUN.value, PostStatus.PUBLISHED.value}
+
+
+def _parse_scheduled_for(value: str | None) -> datetime | None:
+    """ISO timestamp -> aware datetime for Post.scheduled_for.
+
+    Raises AgentError in plain language on a bad value (the router
+    validates first, so this is a backstop, not the user-facing check).
+    """
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise AgentError(f"scheduled_for is not a valid date/time: {value!r}.") from exc
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 # ------------------------------------------------------------ shared runner

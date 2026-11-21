@@ -1271,3 +1271,246 @@ export async function getSetupState(): Promise<SetupState | null> {
 export async function saveSetupState(patch: SetupStatePatch): Promise<ApiResult> {
   return apiPostJson("/api/setup/state", patch);
 }
+
+// ---------------------------------------------------------------------------
+// Live niche trending search + trending-to-agent loop (v0.6.0, Worker B).
+// Contract: GET /api/trending/niches | /credentials | /search,
+// POST /api/trending/api-key | /match | /run, GET /api/trending/status
+// and /api/trending/jobs/{id} (apps/api/clipforge_api/trending.py).
+//
+// Rights guardrail: trending shows what topics are working — clips are
+// made from YOUR videos. A trending video URL is never a clip source;
+// the backend refuses it with a plain 422, and the page states it.
+// ---------------------------------------------------------------------------
+
+export interface TrendingVideo {
+  video_id: string;
+  title: string;
+  channel_title: string;
+  channel_id: string;
+  published_at: string;
+  view_count: number;
+  like_count: number;
+  comment_count: number;
+  trend_score: number;
+  url: string;
+}
+
+export function normalizeTrendingVideo(raw: unknown): TrendingVideo | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (typeof r.video_id !== "string" || !r.video_id) return null;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  return {
+    video_id: r.video_id,
+    title: typeof r.title === "string" ? r.title : "",
+    channel_title: typeof r.channel_title === "string" ? r.channel_title : "",
+    channel_id: typeof r.channel_id === "string" ? r.channel_id : "",
+    published_at: typeof r.published_at === "string" ? r.published_at : "",
+    view_count: num(r.view_count),
+    like_count: num(r.like_count),
+    comment_count: num(r.comment_count),
+    trend_score: num(r.trend_score),
+    url: typeof r.url === "string" && r.url ? r.url : `https://www.youtube.com/watch?v=${r.video_id}`,
+  };
+}
+
+export function normalizeTrendingVideos(raw: unknown): TrendingVideo[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map(normalizeTrendingVideo).filter((v): v is TrendingVideo => v !== null);
+}
+
+export interface TrendingCredentials {
+  oauth_connected: boolean;
+  oauth_expired: boolean;
+  oauth_account: string;
+  api_key_configured: boolean;
+  api_key_last4: string;
+  api_key_source: string;
+  usable: boolean;
+  message: string;
+}
+
+export function normalizeTrendingCredentials(raw: unknown): TrendingCredentials | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const oauth = (r.oauth ?? {}) as Record<string, unknown>;
+  const key = (r.api_key ?? {}) as Record<string, unknown>;
+  if (typeof r.usable !== "boolean") return null;
+  return {
+    oauth_connected: oauth.connected === true,
+    oauth_expired: oauth.expired === true,
+    oauth_account: typeof oauth.account_name === "string" ? oauth.account_name : "",
+    api_key_configured: key.configured === true,
+    api_key_last4: typeof key.last4 === "string" ? key.last4 : "",
+    api_key_source: typeof key.source === "string" ? key.source : "none",
+    usable: r.usable,
+    message: typeof r.message === "string" ? r.message : "",
+  };
+}
+
+/** GET /api/trending/credentials — null when the endpoint has not landed yet. */
+export async function getTrendingCredentials(): Promise<TrendingCredentials | null> {
+  const raw = await apiGet<unknown>("/api/trending/credentials");
+  return raw === null ? null : normalizeTrendingCredentials(raw);
+}
+
+/** POST /api/trending/api-key — the key is stored server-side only, never echoed. */
+export async function saveYoutubeApiKey(apiKey: string): Promise<ApiResult> {
+  return apiPostJson("/api/trending/api-key", { api_key: apiKey });
+}
+
+export interface TrendingSearchResult {
+  results: TrendingVideo[];
+  source: string;
+  account: string;
+  notice: string;
+}
+
+/** GET with the error detail preserved (apiGet drops it): the Trending
+ * page needs the 422 "connect your channel" message for its empty state. */
+export async function apiGetResult(path: string): Promise<ApiResult> {
+  try {
+    const res = await fetch(`${API_URL}${path}`, { cache: "no-store", signal: AbortSignal.timeout(10000) });
+    let data: unknown = null;
+    try { data = await res.json(); } catch { /* non-JSON error body */ }
+    const detail = (data as { detail?: unknown } | null)?.detail;
+    return { ok: res.ok, status: res.status, data, error: res.ok ? undefined : (typeof detail === "string" ? detail : `Request failed (${res.status})`) };
+  } catch {
+    return { ok: false, status: 0, data: null, error: "API unreachable" };
+  }
+}
+
+/** GET /api/trending/search — live YouTube results, or the plain-language
+ * 422 (no connection / no key) as `error` so the page can show it. */
+export async function searchTrending(niche: string, maxResults = 10): Promise<{ result: TrendingSearchResult | null; error: string | null }> {
+  const res = await apiGetResult(`/api/trending/search?niche=${encodeURIComponent(niche)}&max_results=${maxResults}`);
+  if (!res.ok) return { result: null, error: res.error ?? "Trending search failed." };
+  const r = (res.data ?? {}) as Record<string, unknown>;
+  return {
+    result: {
+      results: normalizeTrendingVideos(r.results),
+      source: typeof r.source === "string" ? r.source : "",
+      account: typeof r.account === "string" ? r.account : "",
+      notice: typeof r.notice === "string" ? r.notice : "",
+    },
+    error: null,
+  };
+}
+
+export interface TrendingMatch {
+  own_video_url: string;
+  own_title: string;
+  match_score: number;
+}
+
+/** POST /api/trending/match — the user's OWN channel video that best
+ * matches a trending topic (title overlap). */
+export async function matchTrendingTopic(channelUrl: string, trendingVideoId: string, trendingTitle: string): Promise<{ match: TrendingMatch | null; error: string | null }> {
+  const res = await apiPostJson("/api/trending/match", { channel_url: channelUrl, trending_video_id: trendingVideoId, trending_title: trendingTitle });
+  if (!res.ok) return { match: null, error: res.error ?? "Could not match the channel." };
+  const r = (res.data ?? {}) as Record<string, unknown>;
+  if (typeof r.own_video_url !== "string" || !r.own_video_url) return { match: null, error: "The channel returned no matching video." };
+  return {
+    match: {
+      own_video_url: r.own_video_url,
+      own_title: typeof r.own_title === "string" ? r.own_title : "",
+      match_score: typeof r.match_score === "number" ? r.match_score : 0,
+    },
+    error: null,
+  };
+}
+
+export interface TrendingRunInput {
+  niche: string;
+  trending_video_id: string;
+  trending_title: string;
+  own_source_url: string;
+  own_source_type: "video" | "channel";
+  rights_confirmed: boolean;
+  top_n?: number;
+  platforms?: string[];
+  auto_post?: boolean;
+  scheduled_for?: string | null;
+}
+
+/** POST /api/trending/run — starts the loop (202). The run is async:
+ * poll getTrendingStatus() / the pipeline for the job. */
+export async function startTrendingRun(input: TrendingRunInput): Promise<ApiResult> {
+  return apiPostJson("/api/trending/run", input);
+}
+
+/** GET /api/trending/status — agent run status incl. the trending video
+ * of the current / last run (topic only). Null when the endpoint is absent. */
+export async function getTrendingStatus(): Promise<(AgentStatus & { trending_video_id: string; trending_title: string; state: string; progress_pct: number; queued: number; last_error: string | null }) | null> {
+  const raw = await apiGet<unknown>("/api/trending/status");
+  if (raw === null) return null;
+  const status = normalizeAgentStatus(raw);
+  if (!status) return null;
+  const r = raw as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  return {
+    ...status,
+    trending_video_id: typeof r.trending_video_id === "string" ? r.trending_video_id : "",
+    trending_title: typeof r.trending_title === "string" ? r.trending_title : "",
+    state: typeof r.state === "string" ? r.state : "",
+    progress_pct: num(r.progress_pct),
+    queued: num(r.queued),
+    last_error: typeof r.last_error === "string" ? r.last_error : null,
+  };
+}
+
+export interface TrendingJobPost {
+  id: string;
+  platform: string;
+  status: string;
+  title: string;
+  scheduled_for: string | null;
+  provider_post_id: string | null;
+  video_id: string | null;
+}
+
+export interface TrendingJob {
+  id: string;
+  title: string;
+  source: string;
+  status: string;
+  trending_video_id: string;
+  trending_title: string;
+  trending_url: string;
+  demo: boolean;
+  posts: TrendingJobPost[];
+}
+
+export function normalizeTrendingJob(raw: unknown): TrendingJob | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (typeof r.id !== "string" || !r.id) return null;
+  const posts = Array.isArray(r.posts) ? r.posts : [];
+  return {
+    id: r.id,
+    title: typeof r.title === "string" ? r.title : "",
+    source: typeof r.source === "string" ? r.source : "",
+    status: typeof r.status === "string" ? r.status : "",
+    trending_video_id: typeof r.trending_video_id === "string" ? r.trending_video_id : "",
+    trending_title: typeof r.trending_title === "string" ? r.trending_title : "",
+    trending_url: typeof r.trending_url === "string" ? r.trending_url : "",
+    demo: r.demo === true,
+    posts: posts.map((p) => {
+      const q = (p ?? {}) as Record<string, unknown>;
+      return {
+        id: typeof q.id === "string" ? q.id : "",
+        platform: typeof q.platform === "string" ? q.platform : "",
+        status: typeof q.status === "string" ? q.status : "",
+        title: typeof q.title === "string" ? q.title : "",
+        scheduled_for: typeof q.scheduled_for === "string" ? q.scheduled_for : null,
+        provider_post_id: typeof q.provider_post_id === "string" ? q.provider_post_id : null,
+        video_id: typeof q.video_id === "string" ? q.video_id : null,
+      };
+    }),
+  };
+}
+
+/** GET /api/trending/jobs/{id} — the job record with each post's platform
+ * + provider video id, for monitoring the posted clip. */
+export async function getTrendingJob(jobId: string): Promise<TrendingJob | null> {
+  const raw = await apiGet<unknown>(`/api/trending/jobs/${encodeURIComponent(jobId)}`);
+  return raw === null ? null : normalizeTrendingJob(raw);
+}

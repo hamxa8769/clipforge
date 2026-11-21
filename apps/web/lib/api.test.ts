@@ -34,6 +34,10 @@ import {
   normalizeLlmProviders,
   activeEngineName,
   normalizeSetupState,
+  normalizeTrendingCredentials,
+  normalizeTrendingJob,
+  normalizeTrendingVideo,
+  normalizeTrendingVideos,
   normalizeWorkerQueue,
   pipelineStageStates,
   resolveApiUrl,
@@ -497,4 +501,45 @@ test("normalizeWorkerQueue maps GET /worker/queue (v0.5.0 dashboard feed)", () =
   assert.equal(normalizeWorkerQueue(null), null);
   assert.equal(normalizeWorkerQueue({}), null);
   assert.equal(normalizeWorkerQueue({ queued: [] })?.running.length, 0);
+});
+
+test("normalizeTrendingVideo keeps live fields and derives the watch URL", () => {
+  const v = normalizeTrendingVideo({
+    video_id: "dQw4w9WgXcQ", title: "Gaming clutch", channel_title: "Chan A",
+    channel_id: "UCAAAA", published_at: "2026-11-21T10:00:00Z",
+    view_count: 120000, like_count: 9000, comment_count: 800, trend_score: 87.4,
+    url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  });
+  assert.equal(v?.title, "Gaming clutch");
+  assert.equal(v?.view_count, 120000);
+  assert.equal(v?.trend_score, 87.4);
+  assert.equal(v?.url, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  assert.equal(normalizeTrendingVideo({ title: "no id" }), null);
+  assert.equal(normalizeTrendingVideo(null), null);
+  assert.equal(normalizeTrendingVideos([{ video_id: "a" }, { title: "no id" }]).length, 1);
+});
+
+test("normalizeTrendingCredentials requires the usable flag", () => {
+  const c = normalizeTrendingCredentials({
+    oauth: { connected: true, expired: false, account_name: "My Channel" },
+    api_key: { configured: false, last4: "", source: "none" },
+    usable: true, message: "ok",
+  });
+  assert.equal(c?.oauth_connected, true);
+  assert.equal(c?.oauth_account, "My Channel");
+  assert.equal(c?.api_key_configured, false);
+  assert.equal(normalizeTrendingCredentials({ oauth: {}, api_key: {} }), null);
+});
+
+test("normalizeTrendingJob keeps the trending topic and per-post video ids", () => {
+  const job = normalizeTrendingJob({
+    id: "job-1", title: "Agent run", source: "https://www.youtube.com/watch?v=AAAAAAAAAAA",
+    status: "review", trending_video_id: "dQw4w9WgXcQ", trending_title: "Best clutch",
+    trending_url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", demo: true,
+    posts: [{ id: "p1", platform: "youtube", status: "published", title: "Clip", scheduled_for: null, provider_post_id: "ZZZZZZZZZZZ", video_id: "ZZZZZZZZZZZ" }],
+  });
+  assert.equal(job?.trending_video_id, "dQw4w9WgXcQ");
+  assert.equal(job?.posts[0].platform, "youtube");
+  assert.equal(job?.posts[0].provider_post_id, "ZZZZZZZZZZZ");
+  assert.equal(normalizeTrendingJob({}), null);
 });
