@@ -637,9 +637,11 @@ export default function TrendingPage() {
                         </div>
                         <ClipVerdict video={v} />
                       </div>
-                      <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${scoreTone(v.trend_score)}`}>
-                        Trend {v.trend_score}
-                      </span>
+                      {tab !== "live" && (
+                        <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${scoreTone(v.trend_score)}`}>
+                          Trend {v.trend_score}
+                        </span>
+                      )}
                     </div>
                     <div className="mt-3 flex flex-wrap items-center gap-2">
                       <SecondaryButton href={v.url}>Watch on YouTube</SecondaryButton>
