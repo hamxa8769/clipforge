@@ -8,11 +8,13 @@ captions, writes a different title / description / hashtag set for each
 platform, and publishes **only after a human approves** — through the
 platforms' official APIs, and nothing else.
 
-> **Status: v0.4.2 — production-level single-window app.** The clipping
+> **Status: v0.5.0 — production-level single-window app.** The clipping
 > pipeline, review UI, and publishing adapters are under active
 > development. Nothing in this repo posts to any platform automatically,
-> and `DRY_RUN=true` is the default. v0.4.2 fixes the two things users
-> actually hit in v0.4.1: links inside the desktop app did nothing at
+> and `DRY_RUN=true` is the default. v0.5.0 adds a live dashboard, a
+> per-job pipeline view, the ClipForge Agent (approval-first auto-clipping
+> with an optional Gemini AI engine), and a five-step guided setup. v0.4.2
+> fixes the two things users actually hit in v0.4.1: links inside the desktop app did nothing at
 > all (no Tauri capability granted the opener, so every external link
 > was silently denied), and the FFmpeg installer could report success
 > on a bad or truncated download. v0.4.1 fixes the two things users
@@ -226,6 +228,38 @@ Things to know:
 
 Building the exe yourself: `python scripts/build_exe.py --with-web`
 (see `clipforge-server.spec`).
+
+## What's new in v0.5.0
+
+- **Live dashboard** — the app now opens on a real desktop shell (fixed
+  sidebar, status bar) with live server / FFmpeg / dry-run / automation
+  health, connected accounts with followers and automation counts, and
+  honest "not connected yet" states. Nothing is demo data unless it is
+  labelled demo.
+- **Pipeline view** — every job's full process, live: Source → Transcribe
+  → Score → Clip review → SEO → Approve → Schedule → Publish, with real
+  per-stage status, progress, and stage logs from the server.
+- **ClipForge Agent** — the agent watches one video URL or a whole
+  YouTube channel, makes clips, and queues them for approval. Approval-first
+  is the default: nothing posts without your approval unless you turn
+  auto-post on. With no AI key it uses the built-in rule-based engine; with
+  a Gemini key it picks smarter moments and writes titles.
+- **Gemini AI engine (optional)** — paste a Google AI Studio key in
+  Settings (or the setup wizard), Save, then Test connection. The key is
+  stored encrypted on the server and never shown again. The Test button
+  now answers in plain language even on a broken machine proxy config
+  instead of a 500 error.
+- **Guided setup wizard** — five steps on first run (FFmpeg → Gemini key
+  → Connect a channel → Niche & source → Turn on the agent), resumable,
+  skippable, and available again from Settings. Also as a full page at
+  `/setup`.
+- **No more raw JSON for live jobs** — the Pipeline "Open job" link now
+  goes to the review page, and a direct load / refresh of `/jobs/<live-id>`
+  redirects to it instead of showing the API's raw JSON.
+- If you have v0.4.2 installed, update from inside the app
+  (Settings → Updates, or the "Update available" banner) — no need to
+  download anything by hand. Installing v0.5.0 over v0.4.2 keeps your
+  clips, settings, and keys.
 
 ## What's new in v0.4.2
 
