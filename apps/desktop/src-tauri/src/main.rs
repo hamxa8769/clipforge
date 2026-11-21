@@ -4,12 +4,19 @@
 //! * spawns the `clipforge-server` sidecar (Python/FastAPI) hidden,
 //! * waits for `GET /health`, then navigates the main window to the
 //!   server, which serves the static web UI itself,
-//! * hides to the system tray on window close; Quit from the tray stops
-//!   the sidecar and exits — the sidecar is never orphaned.
+//! * on startup, stops any stale server left by a previous run
+//!   (pid file + `/health` probe — see `sidecar.rs`),
+//! * closing the main window STOPS the sidecar and quits the app
+//!   completely. Nothing keeps running in the background: there is
+//!   no hide-to-tray-on-close. The tray icon only exists while the
+//!   app is running; Quit from the tray also stops the sidecar and
+//!   exits.
 //!
 //! On Windows the binary is built with `windows_subsystem = "windows"`
 //! (no console window) and the sidecar is spawned with
-//! `CREATE_NO_WINDOW` (see `sidecar.rs`).
+//! `CREATE_NO_WINDOW` (see `sidecar.rs`). The sidecar is also put in
+//! a Job Object with kill-on-job-close, so even a shell crash cannot
+//! leave `clipforge-server.exe` behind to block the next install.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -108,6 +115,17 @@ fn launch_sidecar_thread(app: AppHandle) {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let source = resolve_sidecar(&resource_dir, &exe_dir, &cwd);
 
+        // A previous run may have died without stopping its server
+        // (crash, forced kill, old version without the shutdown fix):
+        // stop that stale server first, or it would keep the port and
+        // the exe file locked. Probes the preferred port and the
+        // configured manual port, if different.
+        let mut probe_ports = vec![sidecar::PREFERRED_PORT];
+        if port != sidecar::PREFERRED_PORT {
+            probe_ports.push(port);
+        }
+        sidecar::cleanup_stale_sidecar(&data_dir, &probe_ports, &state.log_path);
+
         // Static web export for the server to serve at /: the bundled one
         // under the resources dir, or (dev Python fallback) the export in
         // the repo. Without it the server runs API-only (status page).
@@ -132,7 +150,10 @@ fn launch_sidecar_thread(app: AppHandle) {
                 }
             }
             SidecarSource::DevPython { repo_root } => {
-                format!("dev python: python -m clipforge_api ({})", repo_root.display())
+                format!(
+                    "dev python: python -m clipforge_api ({})",
+                    repo_root.display()
+                )
             }
         };
         if let Ok(mut s) = state.status.lock() {
@@ -140,7 +161,13 @@ fn launch_sidecar_thread(app: AppHandle) {
             s.data_dir = data_dir.to_string_lossy().into_owned();
         }
 
-        match start_sidecar(&source, port, &data_dir, &state.log_path, web_out.as_deref()) {
+        match start_sidecar(
+            &source,
+            port,
+            &data_dir,
+            &state.log_path,
+            web_out.as_deref(),
+        ) {
             Ok(running) => {
                 let url = format!("http://127.0.0.1:{port}");
                 let healthy = sidecar::wait_for_health(
@@ -182,12 +209,19 @@ fn launch_sidecar_thread(app: AppHandle) {
     });
 }
 
-fn stop_sidecar_if_running(state: &AppState) {
+/// Stop the sidecar if one is running. Returns what was stopped
+/// (pid + exe path) so callers that need proof the process is really
+/// gone — the updater, before launching the installer — can wait on
+/// it. `None` when no sidecar was running.
+fn stop_sidecar_if_running(state: &AppState) -> Option<sidecar::StoppedSidecar> {
     if let Ok(mut guard) = state.sidecar.lock() {
         if let Some(mut running) = guard.take() {
+            let info = running.stopped_info();
             stop_sidecar(&mut running);
+            return Some(info);
         }
     }
+    None
 }
 
 // ---------------------------------------------------------------- commands
@@ -285,10 +319,7 @@ fn is_allowed_external_url(url: &str) -> bool {
 fn open_data_folder_app(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     app.opener()
-        .open_path(
-            state.data_dir.to_string_lossy().into_owned(),
-            None::<&str>,
-        )
+        .open_path(state.data_dir.to_string_lossy().into_owned(), None::<&str>)
         .map_err(|e| format!("Could not open the data folder: {e}"))
 }
 
@@ -360,15 +391,63 @@ fn download_and_install_update(
     updater::set_downloaded_path(&state.update, Some(path.to_string_lossy().into_owned()));
 
     if cfg!(windows) {
-        // Windows: the NSIS setup installs over the app folder. Launch it
-        // and quit so the installer can replace the running files. The
-        // data dir (AppData) is never touched by the installer.
+        // Windows: the NSIS setup installs over the app folder, so the
+        // server MUST be stopped before the installer is launched —
+        // launching first was the v0.8.0 failure (NSIS "Error opening
+        // file for writing: ...\\clipforge-server.exe" because the
+        // sidecar was still running). Stop the sidecar, wait until
+        // the process is actually gone AND the exe file is no longer
+        // locked, and only then launch the installer and exit. If the
+        // sidecar cannot be stopped, fail the update instead of
+        // launching an installer that will hit a file lock.
+        let stopped = stop_sidecar_if_running(&state);
+        if let Some(info) = stopped {
+            if !sidecar::wait_for_process_gone(info.pid, Duration::from_secs(10)) {
+                let msg = format!(
+                    "Could not stop the ClipForge server (pid {}) before updating — \
+                     the installer would fail to replace clipforge-server.exe. \
+                     Close ClipForge and try the update again.",
+                    info.pid
+                );
+                updater::fail(&state.update, &msg);
+                return Err(msg);
+            }
+            if let Some(exe) = &info.exe_path {
+                if !sidecar::wait_until_file_unlocked(exe, Duration::from_secs(10)) {
+                    let msg = format!(
+                        "The ClipForge server file ({}) is still locked after stopping the server — \
+                         the installer would fail to replace it. \
+                         Close ClipForge and try the update again.",
+                        exe.display()
+                    );
+                    updater::fail(&state.update, &msg);
+                    return Err(msg);
+                }
+            }
+        }
+        // Belt and braces: confirm by image name (tasklist) that no
+        // ClipForge server survives — e.g. a stale server from an
+        // older run that this shell never spawned. Only the server is
+        // checked here: the app itself is still running at this point
+        // (it exits right after launching the installer), so waiting
+        // for the app exe would never succeed. This is the same guard
+        // the NSIS hook applies; if it fails here, do not launch.
+        if !updater::wait_for_process_gone(updater::SIDECAR_IMAGE_NAME, Duration::from_secs(10)) {
+            let msg = format!(
+                "A ClipForge server ({}) is still running and would block the installer — \
+                 close ClipForge (tray icon → Quit) or end {} in Task Manager, \
+                 then try the update again.",
+                updater::SIDECAR_IMAGE_NAME,
+                updater::SIDECAR_IMAGE_NAME
+            );
+            updater::fail(&state.update, &msg);
+            return Err(msg);
+        }
         updater::launch_installer(&path).map_err(|e| {
             let msg = format!("Could not launch the installer: {e}");
             updater::fail(&state.update, &msg);
             msg
         })?;
-        stop_sidecar_if_running(&state);
         app.exit(0);
         // Unreachable, but keep the type checker happy.
         Ok(updater::UpdateInstallResult {
@@ -460,10 +539,7 @@ fn main() {
             download_and_install_update,
         ])
         .setup(|app| {
-            let app_data_dir = app
-                .path()
-                .app_data_dir()
-                .expect("app data dir");
+            let app_data_dir = app.path().app_data_dir().expect("app data dir");
             std::fs::create_dir_all(&app_data_dir).expect("create app data dir");
             let cfg = DesktopSettings::load(&app_data_dir);
             let data_dir = cfg.effective_data_dir(&app_data_dir);
@@ -517,14 +593,15 @@ fn main() {
                 .expect("main window from tauri.conf.json");
             let app_handle = app.handle().clone();
             main.on_window_event(move |event| {
-                if let WindowEvent::CloseRequested { api, .. } = event {
-                    // Hide to tray instead of closing; Quit lives in the
-                    // tray. There is exactly one window: server status
-                    // and settings live inside the main window now.
-                    api.prevent_close();
-                    if let Some(w) = app_handle.get_webview_window("main") {
-                        let _ = w.hide();
-                    }
+                if let WindowEvent::CloseRequested { .. } = event {
+                    // Close means quit: stop the sidecar and exit the
+                    // app completely. Nothing keeps running in the
+                    // background — no hide-to-tray-on-close. (The tray
+                    // icon only exists while the app is running; Quit
+                    // from the tray does the same thing.)
+                    let state = app_handle.state::<AppState>();
+                    stop_sidecar_if_running(&state);
+                    app_handle.exit(0);
                 }
             });
 

@@ -7,6 +7,7 @@ for approval. Live publishing is never attempted — dry-run only.
 
 from __future__ import annotations
 
+import shutil
 import threading
 import time
 
@@ -274,6 +275,87 @@ def test_stop_on_idle_reports_stopped(tmp_path):
     agent = _agent(tmp_path)
     assert agent.stop()["state"] == "stopped"
     assert agent.status()["running"] is False
+
+
+# ------------------------------------------------------- v0.8.1 toggle fix
+def test_stop_persists_enabled_false(tmp_path):
+    """OFF is stored server-side, not just in the UI. Before the fix
+    stop() left config.enabled=True, so the toggle (and any restart)
+    still showed the agent as on after it was turned off."""
+    agent = _agent(tmp_path)
+    agent.store.save_config(_config(enabled=True))
+    assert agent.stop()["enabled"] is False
+    assert agent.store.load_config().enabled is False
+    # A fresh Agent on the same data dir (a restart) still sees OFF.
+    assert _agent(tmp_path).store.load_config().enabled is False
+
+
+def test_start_real_video_without_yt_dlp_fails_fast(tmp_path, monkeypatch):
+    """A real-video run with no yt-dlp fails BEFORE any thread starts
+    (plain AgentError at click time) instead of briefly reporting
+    "running" and then silently landing in "error" with ON still shown."""
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    agent = _agent(tmp_path)
+    with pytest.raises(AgentError, match="yt-dlp"):
+        agent.start(_config(transcript_text=None))
+    assert agent._thread is None
+    state = agent.status()
+    assert state["running"] is False
+    assert state["state"] == "idle"
+
+
+def test_stop_mid_run_ends_stopped_not_done(tmp_path, monkeypatch):
+    """OFF mid-run ends the run "stopped" — the in-flight run must not
+    overwrite it with "done" (or a misleading "error") afterwards, and
+    the stored config must read OFF."""
+    agent = _agent(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _blocking_run(config):
+        entered.set()
+        release.wait(timeout=10)
+        return agent.status()
+
+    monkeypatch.setattr(agent, "run_once", _blocking_run)
+    agent.start(_config())
+    assert entered.wait(timeout=5)
+    stopped = agent.stop()
+    assert stopped["enabled"] is False
+    assert stopped["state"] == "stopped"
+    release.set()
+    agent._thread.join(timeout=5)
+    state = agent.status()
+    assert state["state"] == "stopped"
+    assert state["last_error"] is None
+    assert state["enabled"] is False
+    assert agent.store.load_config().enabled is False
+
+
+def test_run_thread_maps_stop_to_stopped_state(tmp_path, monkeypatch):
+    """A run that raises because it was stopped ends "stopped" with no
+    last_error — not "error" with "Agent stopped while queueing posts."."""
+    agent = _agent(tmp_path)
+
+    def _stopped_run(config):
+        raise AgentError("Agent stopped while queueing posts.")
+
+    monkeypatch.setattr(agent, "run_once", _stopped_run)
+    agent._stop.set()
+    agent._run_thread(_config())
+    state = agent.status()
+    assert state["state"] == "stopped"
+    assert state["last_error"] is None
+
+
+def test_run_once_after_stop_reports_stopped(tmp_path):
+    """A stop requested before the thread got going is never overwritten
+    with a fresh "running" by the late thread."""
+    agent = _agent(tmp_path)
+    agent._stop.set()
+    state = agent.run_once(_config())
+    assert state["state"] == "stopped"
+    assert state["running"] is False
 
 
 def test_start_runs_to_done_in_background(tmp_path):

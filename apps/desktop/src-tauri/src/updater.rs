@@ -457,8 +457,27 @@ pub fn download_asset(
 }
 
 /// Launch the downloaded installer (Windows only — the NSIS setup
-/// installs over the app folder). The caller quits the app right after,
-/// so the installer can replace the running files.
+/// installs over the app folder).
+///
+/// REQUIRED CALL ORDER (see the v0.8.0 stuck-install bug): the caller
+/// MUST stop the sidecar server and quit the app *before* calling this,
+/// and exit immediately after:
+///   1. stop the sidecar (`stop_sidecar_if_running` in `main.rs`),
+///   2. `wait_for_process_gone("clipforge-server.exe", ...)` — do not
+///      launch while the server still exists. (Only the server: the
+///      app itself is still running at this point and exits right
+///      after launching the installer; the app exe is the NSIS hook's
+///      job, not the updater's.)
+///   3. call this, then `app.exit(0)` at once.
+///
+/// Launching first and quitting afterwards is a bug: the installer
+/// starts while `clipforge-server.exe` still holds its own exe file
+/// open, and the install fails with NSIS "Error opening file for
+/// writing". The NSIS installer hook
+/// (`apps/desktop/src-tauri/installer-hooks.nsh`, `NSIS_HOOK_PREINSTALL`)
+/// kills leftover ClipForge processes as defence in depth, but the
+/// caller must not rely on it — a clean shutdown here is what makes the
+/// update smooth.
 pub fn launch_installer(path: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
@@ -472,6 +491,58 @@ pub fn launch_installer(path: &Path) -> std::io::Result<()> {
             std::io::ErrorKind::Unsupported,
             "installers are launched only on Windows; install the downloaded file manually",
         ))
+    }
+}
+
+/// Image name of the sidecar server — the one process the updater must
+/// confirm is gone before launching the installer (see
+/// `launch_installer` docs). The app exe itself is NOT in this check:
+/// the app is still running while the updater runs.
+pub const SIDECAR_IMAGE_NAME: &str = "clipforge-server.exe";
+
+/// The image names the updater must confirm are gone before launching
+/// the Windows installer: the sidecar server first (it locks
+/// `clipforge-server.exe`), then the app itself. `ClipForge.exe` is the
+/// product-name spelling, included in case the main binary is ever
+/// renamed to it; the binary as built is `clipforge-desktop.exe`.
+/// (Consumed by the NSIS hook `installer-hooks.nsh` and by the Python
+/// regression tests — not by Rust code — hence the allow.)
+#[allow(dead_code)]
+pub const INSTALLER_GUARD_PROCESSES: &[&str] =
+    &[SIDECAR_IMAGE_NAME, "clipforge-desktop.exe", "ClipForge.exe"];
+
+/// Wait until no process with the given image name (e.g.
+/// `"clipforge-server.exe"`) is running, polling `tasklist` on Windows.
+/// Returns `true` once the process is gone, `false` when `timeout`
+/// elapses first (or `tasklist` cannot run — fail closed, do not launch
+/// the installer blind). On non-Windows there are no Windows processes
+/// to wait for, so this always returns `true`.
+pub fn wait_for_process_gone(image_name: &str, timeout: Duration) -> bool {
+    #[cfg(windows)]
+    {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let gone = std::process::Command::new("tasklist")
+                .args(["/FI", &format!("IMAGENAME eq {image_name}"), "/NH"])
+                .output()
+                .map(|out| {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    !text.to_lowercase().contains(&image_name.to_lowercase())
+                })
+                .unwrap_or(false);
+            if gone {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (image_name, timeout);
+        true
     }
 }
 
@@ -668,6 +739,26 @@ mod tests {
         let snap = snapshot(&state);
         assert_eq!(snap.progress, 0.5);
         assert_eq!(snap.progress_pct, 50.0);
+    }
+
+    #[test]
+    fn installer_guard_lists_server_and_app_exes() {
+        // The sidecar first (it is the file that locked the v0.8.0
+        // install), then the app exe under both spellings.
+        assert!(INSTALLER_GUARD_PROCESSES.contains(&"clipforge-server.exe"));
+        assert!(INSTALLER_GUARD_PROCESSES.contains(&"clipforge-desktop.exe"));
+        assert!(INSTALLER_GUARD_PROCESSES.contains(&"ClipForge.exe"));
+    }
+
+    #[test]
+    fn wait_for_process_gone_returns_true_for_absent_process() {
+        // A name that can never be running: true on Windows (tasklist
+        // finds nothing) and on other platforms (no Windows processes
+        // to wait for, so the stub returns true).
+        assert!(wait_for_process_gone(
+            "clipforge-definitely-not-running-xyz.exe",
+            Duration::from_secs(5)
+        ));
     }
 
     #[test]

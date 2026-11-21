@@ -23,6 +23,7 @@ import {
   Card, CardHeader, EmptyState, ErrorBanner, PrimaryButton, ProgressBar,
   SecondaryButton, Skeleton, StatusPill,
 } from "@/components/ui";
+import { YtDlpInstallSection } from "@/components/YtDlpInstaller";
 
 // Backend stage name (JobStageEvent.stage) -> display stage index.
 // "render" produces the clips the Review stage shows, so it maps there.
@@ -56,6 +57,7 @@ function explainStageError(stage: string, errorCode: string | null): string | nu
   // (shown above) already says what happened, and repeating it in red
   // would just duplicate the same sentence.
   if (errorCode === "ffmpeg_missing") return "FFmpeg is not installed — install it from Settings, then retry.";
+  if (errorCode === "yt_dlp_missing") return "yt-dlp is not installed — install it below, then retry the job.";
   if (errorCode === "transcription_backend_missing") return "No transcription tool is available (Whisper / API key missing) — check Settings, then retry.";
   if (errorCode === "llm_missing") return "No AI key is saved — titles fall back to templates, but this step needs one. Save a key in Settings, then retry.";
   return null;
@@ -310,6 +312,17 @@ function PipelinePageInner() {
                 {retryMsg && <p className="mt-2 text-sm text-neutral-300">{retryMsg}</p>}
               </div>
             )}
+            {job.status === "blocked" && (
+              <div className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 p-4">
+                <p className="text-sm font-medium text-red-200">This job is blocked{job.failed_stage ? ` at the ${job.failed_stage} step` : ""} — a tool it needs is missing.</p>
+                {job.error && <p className="mt-1 text-sm text-red-200/80">{job.error}</p>}
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <PrimaryButton onClick={onRetry} disabled={retrying}>{retrying ? "Retrying…" : "Retry job"}</PrimaryButton>
+                  <span className="text-xs text-neutral-400">Fix the missing tool on the blocked stage below, then retry — the job runs again from the start.</span>
+                </div>
+                {retryMsg && <p className="mt-2 text-sm text-neutral-300">{retryMsg}</p>}
+              </div>
+            )}
           </Card>
 
           <ol className="space-y-4">
@@ -333,6 +346,16 @@ function PipelinePageInner() {
                         {stage.message && <p className="mt-0.5 text-sm text-neutral-400">{stage.message}</p>}
                         {(stage.state === "failed" || stage.state === "blocked") && explainStageError(stage.name, stage.errorCode) && (
                           <p className="mt-1 text-sm text-red-300">{explainStageError(stage.name, stage.errorCode)}</p>
+                        )}
+                        {(stage.state === "failed" || stage.state === "blocked") && stage.errorCode === "yt_dlp_missing" && (
+                          <div className="mt-3 rounded-lg border border-neutral-800 bg-neutral-950 p-3">
+                            <YtDlpInstallSection onInstalled={() => { loadDetail(job.id).catch(() => {}); }} />
+                            <div className="mt-3 flex flex-wrap items-center gap-2">
+                              <PrimaryButton onClick={onRetry} disabled={retrying}>{retrying ? "Retrying…" : "Retry job"}</PrimaryButton>
+                              <span className="text-xs text-neutral-400">Install yt-dlp above, then retry — the job runs again from the start.</span>
+                            </div>
+                            {retryMsg && <p className="mt-2 text-sm text-neutral-300">{retryMsg}</p>}
+                          </div>
                         )}
                       </div>
                       <span className="w-24 text-right text-sm text-neutral-300">{Math.round(stage.progress)}%</span>

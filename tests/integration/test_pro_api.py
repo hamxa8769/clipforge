@@ -94,6 +94,61 @@ def test_batch_youtube_needs_declaration(client: TestClient) -> None:
     assert resp.status_code == 422
 
 
+def test_batch_local_file_blocked_reports_failed_not_done(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """v0.8.1: a real local source whose pipeline is blocked (no
+    transcription backend in this environment) reports "failed" with
+    the plain reason — never a fake "done" with zero clips. A GET
+    before the first POST must not poison the queue with the simulated
+    processor either (see the unit test for the shared-queue case)."""
+    import shutil
+    import subprocess
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg needed to build a local source file")
+    assert client.get("/batch/no-such-batch").status_code == 404
+    src = tmp_path / "source.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=5:size=640x360:rate=15",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(src),
+        ],
+        check=True,
+    )
+    resp = client.post("/batch", json={"sources": [str(src)], "own_content_declaration": True})
+    assert resp.status_code == 202, resp.text
+    batch_id = resp.json()["batch_id"]
+    item = None
+    for _ in range(100):
+        got = client.get(f"/batch/{batch_id}")
+        assert got.status_code == 200
+        item = got.json()["items"][0]
+        if item["state"] in ("done", "failed"):
+            break
+        time.sleep(0.1)
+    assert item is not None
+    # Either the pipeline genuinely finished (clips made) or it is
+    # blocked/failed with the reason — never a fake done with no job.
+    if item["state"] == "done":
+        assert item["result"].get("clips", 0) > 0
+        assert item["result"].get("job_id")
+    else:
+        assert item["state"] == "failed"
+        assert item["error"]
+
+
 def test_x_status_and_connect_honest(client: TestClient) -> None:
     resp = client.get("/x/status")
     assert resp.status_code == 200

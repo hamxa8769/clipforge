@@ -94,9 +94,22 @@ def _real_processor(item: dict, set_progress, is_paused) -> dict:
             "job_id": job.id,
             "clips": clips,
             "status": summary.get("status") or job.status,
+            # The queue marks blocked/failed results "failed" (see
+            # batch_queue._run_item): carry the plain-language reason.
+            "error": job.error or "",
         }
     finally:
         session.close()
+
+
+def _queue():
+    """The shared batch queue, always with the real pipeline processor.
+
+    Every handler goes through here (not bare ``get_queue(...)``):
+    a read-only call must never be the one that creates the queue with
+    the simulated default processor — see ``get_queue``.
+    """
+    return get_queue(_data_dir(), processor=_real_processor)
 
 
 @router.post("", status_code=202)
@@ -119,19 +132,19 @@ def create_batch(payload: BatchIn):
             "only processes content you own or hold the rights to.",
         )
     try:
-        batch_id = get_queue(_data_dir(), processor=_real_processor).create_batch(
+        batch_id = _queue().create_batch(
             payload.sources, own_content=payload.own_content_declaration
         )
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    batch = get_queue(_data_dir()).get_batch(batch_id)
+    batch = _queue().get_batch(batch_id)
     return {"ok": True, "batch_id": batch_id, "batch": batch}
 
 
 @router.get("/{batch_id}")
 def get_batch(batch_id: str):
     """One batch: per-item states and progress 0-100."""
-    batch = get_queue(_data_dir()).get_batch(batch_id)
+    batch = _queue().get_batch(batch_id)
     if batch is None:
         raise HTTPException(404, f"batch {batch_id} not found")
     return batch
@@ -141,7 +154,7 @@ def get_batch(batch_id: str):
 def pause_batch(batch_id: str):
     """Pause a batch: no new items start; in-flight items pause
     between stages."""
-    batch = get_queue(_data_dir()).pause_batch(batch_id)
+    batch = _queue().pause_batch(batch_id)
     if batch is None:
         raise HTTPException(404, f"batch {batch_id} not found")
     return {"ok": True, "batch": batch}
@@ -150,7 +163,7 @@ def pause_batch(batch_id: str):
 @router.post("/{batch_id}/resume")
 def resume_batch(batch_id: str):
     """Resume a paused batch: paused items go back to queued."""
-    batch = get_queue(_data_dir()).resume_batch(batch_id)
+    batch = _queue().resume_batch(batch_id)
     if batch is None:
         raise HTTPException(404, f"batch {batch_id} not found")
     return {"ok": True, "batch": batch}

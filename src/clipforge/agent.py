@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import subprocess
 import threading
 from dataclasses import asdict, dataclass, field
@@ -64,6 +63,7 @@ from clipforge.rule_engine import extract_keywords
 from clipforge.seo import PLATFORMS
 from clipforge.transcribe import fallback_transcript_from_text
 from clipforge.trending import is_trending_source
+from clipforge.ytdlp_install import resolve_yt_dlp_path, ytdlp_missing_message
 
 RIGHTS_NOTICE = (
     "The ClipForge Agent only works with videos you own or have the "
@@ -260,20 +260,17 @@ def _trending_meta(cfg: AgentConfig) -> dict:
     }
 
 
-def _latest_channel_video_url(channel_url: str) -> str:
+def _latest_channel_video_url(channel_url: str, data_dir: str | Path | None = None) -> str:
     """Latest video URL of a YouTube channel, via yt-dlp (flat playlist).
 
     Raises AgentError with a plain message when yt-dlp is missing or
     the channel cannot be read — the agent never pretends it fetched
-    a channel it did not.
+    a channel it did not. The bundled yt-dlp (one-click install) is
+    used first, then PATH.
     """
-    yt_dlp = shutil.which("yt-dlp")
+    yt_dlp = resolve_yt_dlp_path(data_dir)
     if not yt_dlp:
-        raise AgentError(
-            "Channel fetch needs yt-dlp, which is not installed here. "
-            "Install yt-dlp (pip install yt-dlp) or give the agent a "
-            "single video URL instead."
-        )
+        raise AgentError(ytdlp_missing_message() + " Or give the agent a single video URL instead.")
     try:
         proc = subprocess.run(
             [yt_dlp, "--flat-playlist", "--playlist-end", "1", "--get-id", channel_url],
@@ -296,6 +293,21 @@ def _latest_channel_video_url(channel_url: str) -> str:
     if not video_id or not video_id[0].strip():
         raise AgentError("The channel has no videos the agent could read.")
     return f"https://www.youtube.com/watch?v={video_id[0].strip()}"
+
+
+def _require_pipeline_tools(config: AgentConfig, data_dir: str | Path | None = None) -> None:
+    """Pre-flight for a real-video run: the pipeline downloads the
+    source with yt-dlp, an optional external tool. Fail fast — before
+    any thread starts — with the plain-language reason, instead of
+    briefly reporting "running" and then landing in "error" while the
+    toggle still shows ON. That silent failure is what made the Agent
+    toggle look broken: ON did nothing visible and gave no reason.
+    The demo-transcript path needs no download, so it is exempt.
+    The bundled yt-dlp (one-click install) counts as installed."""
+    if config.transcript_text:
+        return
+    if resolve_yt_dlp_path(data_dir) is None:
+        raise AgentError(ytdlp_missing_message() + " Or use a local file instead.")
 
 
 class Agent:
@@ -364,6 +376,7 @@ class Agent:
             if not cfg.enabled:
                 raise AgentError("The agent is off — turn it on in the agent settings first.")
             cfg.validate()  # rights flag, source URL, niche, platforms
+            _require_pipeline_tools(cfg, self.data_dir)  # fail fast, before any thread
             self.store.save_config(cfg)
             self._stop.clear()
             self._set_state(
@@ -398,6 +411,7 @@ class Agent:
             if not config.enabled:
                 raise AgentError("The agent is off — turn it on in the agent settings first.")
             config.validate()  # rights flag, source URL, trending guardrail
+            _require_pipeline_tools(config, self.data_dir)  # fail fast, before any thread
             self._stop.clear()
             self._set_state(
                 status="running",
@@ -419,9 +433,21 @@ class Agent:
             return self.status()
 
     def stop(self) -> dict:
-        """Ask a running agent to stop; idle agents just report stopped."""
+        """Ask a running agent to stop; idle agents just report stopped.
+
+        OFF is authoritative here, not just in the UI: the stored
+        config is persisted with ``enabled=False``, so a stop survives
+        a reload/restart and no later start can pick up a stale ON.
+        Previously stop() only set the in-memory stop event and the
+        run state — the config stayed enabled, so the toggle (and any
+        restart) still showed the agent as on after it was turned off.
+        """
         with self._lock:
             self._stop.set()
+            config = self.store.load_config()
+            if config.enabled:
+                config.enabled = False
+                self.store.save_config(config)
             state = self.store.load_state()
             if state.status == "running":
                 self._set_state(status="stopped", progress_pct=state.progress_pct)
@@ -433,9 +459,18 @@ class Agent:
         try:
             self.run_once(config)
         except AgentError as exc:
-            self._set_state(status="error", last_error=str(exc))
+            # A stop requested mid-run is a stop, not a failure: the
+            # run ends "stopped" (no misleading last_error, no "done"
+            # resurrecting it after OFF).
+            if self._stop.is_set():
+                self._set_state(status="stopped", last_error=None)
+            else:
+                self._set_state(status="error", last_error=str(exc))
         except Exception as exc:  # noqa: BLE001 — thread must not die silently
-            self._set_state(status="error", last_error=f"{type(exc).__name__}: {exc}")
+            if self._stop.is_set():
+                self._set_state(status="stopped", last_error=None)
+            else:
+                self._set_state(status="error", last_error=f"{type(exc).__name__}: {exc}")
 
     # ------------------------------------------------------------ the run
     def run_once(self, config: AgentConfig | None = None, *, client=None) -> dict:
@@ -450,6 +485,11 @@ class Agent:
         if not cfg.enabled:
             raise AgentError("The agent is off — turn it on in the agent settings first.")
         cfg.validate()
+        if self._stop.is_set():
+            # Stop was requested between start() and this thread starting:
+            # never overwrite the "stopped" state with a fresh "running".
+            self._set_state(status="stopped", last_error=None)
+            return self.status()
         engine, provider = resolve_engine(self._settings())
         self._set_state(
             status="running",
@@ -469,18 +509,33 @@ class Agent:
                 session, job, candidates, cfg, engine, provider, client=client
             )
             session.commit()
-            self._set_state(
-                status="done",
-                progress_pct=100.0,
-                queued=queued,
-                approved=approved,
-                published=published,
-                demo=demo,
-            )
+            if self._stop.is_set():
+                # Stopped after the last post was queued but before the
+                # run could report "done": OFF wins, the run is stopped.
+                self._set_state(
+                    status="stopped",
+                    progress_pct=100.0,
+                    queued=queued,
+                    approved=approved,
+                    published=published,
+                    demo=demo,
+                )
+            else:
+                self._set_state(
+                    status="done",
+                    progress_pct=100.0,
+                    queued=queued,
+                    approved=approved,
+                    published=published,
+                    demo=demo,
+                )
             return self.status()
         except AgentError as exc:
             session.rollback()
-            self._set_state(status="error", last_error=str(exc))
+            if self._stop.is_set():
+                self._set_state(status="stopped", last_error=None)
+            else:
+                self._set_state(status="error", last_error=str(exc))
             raise
         finally:
             session.close()
@@ -525,7 +580,7 @@ class Agent:
         # Real source: channel -> latest video, then the full pipeline.
         video_url = cfg.source_url
         if cfg.source_type == "channel":
-            video_url = _latest_channel_video_url(cfg.source_url)
+            video_url = _latest_channel_video_url(cfg.source_url, self.data_dir)
         if self._stop.is_set():
             raise AgentError("Agent stopped before the source was fetched.")
         return self._run_pipeline(session, cfg, video_url, engine)

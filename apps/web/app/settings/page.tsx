@@ -24,6 +24,7 @@ import {
 } from "@/lib/api";
 import { UpdateSection } from "@/components/Updater";
 import { FfmpegInstallSection } from "@/components/FfmpegInstaller";
+import { YtDlpInstallSection } from "@/components/YtDlpInstaller";
 import GeminiSetup from "@/components/GeminiSetup";
 import { REPLAY_EVENT } from "@/components/Onboarding";
 import Link from "next/link";
@@ -363,6 +364,16 @@ export default function SettingsPage() {
                     <>Found ({view.ffmpeg.path}{view.ffmpeg.version ? ` — ${view.ffmpeg.version}` : ""})</>
                   ) : (
                     <FfmpegInstallSection onInstalled={() => { load().catch(() => {}); }} />
+                  )}
+                </dd>
+              </div>
+              <div className="flex justify-between gap-2">
+                <dt className="text-neutral-400">yt-dlp</dt>
+                <dd className="min-w-0 flex-1">
+                  {view.yt_dlp.found ? (
+                    <>Found ({view.yt_dlp.path}{view.yt_dlp.version ? ` — ${view.yt_dlp.version}` : ""})</>
+                  ) : (
+                    <YtDlpInstallSection onInstalled={() => { load().catch(() => {}); }} />
                   )}
                 </dd>
               </div>

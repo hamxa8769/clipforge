@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
@@ -54,6 +53,7 @@ from clipforge.auth.secrets import SecretStore, mask_secret
 from clipforge.auth.settings_store import SettingsStore
 from clipforge.auth.token_store import TokenRecord, TokenStore
 from clipforge.niches import niche_keywords, niche_label, normalize_niche
+from clipforge.ytdlp_install import resolve_yt_dlp_path, ytdlp_missing_message
 
 YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
 # SecretStore name for the saved YouTube Data API key (never logged,
@@ -713,12 +713,11 @@ def match_own_video(channel_url: str, trending_title: str, *, playlist_end: int 
     """
     if not channel_url or not _URL_RE.match(channel_url.strip()):
         raise TrendingError("Give a YouTube channel URL to match against the trending topic.")
-    yt_dlp = shutil.which("yt-dlp")
+    # The bundled yt-dlp (one-click install) is used first, then PATH.
+    yt_dlp = resolve_yt_dlp_path()
     if not yt_dlp:
         raise TrendingError(
-            "Matching your channel needs yt-dlp, which is not installed "
-            "here. Install yt-dlp (pip install yt-dlp) or paste your own "
-            "video URL directly instead."
+            ytdlp_missing_message() + " Or paste your own video URL directly instead."
         )
     try:
         proc = subprocess.run(

@@ -295,6 +295,13 @@ class BatchQueue:
                 item.error = "cancelled"
             elif self._item_is_paused(batch):
                 item.state = "paused"
+            elif isinstance(result, dict) and result.get("status") in {"blocked", "failed"}:
+                # The processor ran but the pipeline refused or failed
+                # the job (e.g. transcription backend missing): marking
+                # it "done" would be a lie — the batch would report
+                # success with zero clips and no reason.
+                item.state = "failed"
+                item.error = str(result.get("error") or f"pipeline {result['status']}")[:300]
             else:
                 item.state = "done"
                 item.progress = 100
@@ -345,11 +352,23 @@ _default_lock = threading.Lock()
 
 
 def get_queue(data_dir: str | Path | None = None, processor=None) -> BatchQueue:
-    """The shared process-wide queue (created on first use)."""
+    """The shared process-wide queue (created on first use).
+
+    A read-only caller (``GET /batch/{id}``) creates the queue with
+    the simulated default processor; a later ``POST /batch`` passing
+    the real processor must still win. Before this fix the passed
+    processor was silently ignored once the queue existed, so every
+    batch created after any read ran the simulation and reported a
+    fake "done" with no job and no clips. A real processor is adopted
+    over the simulated one; an explicitly passed processor never
+    replaces a real one.
+    """
     global _default_queue
     with _default_lock:
         if _default_queue is None:
             _default_queue = BatchQueue(data_dir=data_dir, processor=processor)
+        elif processor is not None and _default_queue._processor is _default_processor:
+            _default_queue._processor = processor
         return _default_queue
 
 

@@ -43,11 +43,12 @@
     "targets": "all",
     "windows": {
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "installerHooks": "./installer-hooks.nsh"
       }
     }
   },
   "identifier": "com.clipforge.app",
   "productName": "ClipForge",
-  "version": "0.8.0"
+  "version": "0.8.1"
 }

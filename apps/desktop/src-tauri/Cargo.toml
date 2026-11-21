@@ -1,6 +1,6 @@
 [package]
 name = "clipforge-desktop"
-version = "0.8.0"
+version = "0.8.1"
 description = "ClipForge desktop shell (Tauri v2) — launches and manages the clipforge-server sidecar, no terminal window."
 authors = ["ClipForge"]
 edition = "2021"
@@ -20,6 +20,15 @@ ctrlc = { version = "3", features = ["termination"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Job Objects (kill the whole sidecar process tree when the shell exits)
+# + OpenProcess/WaitForSingleObject (wait until a pid is really gone).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [profile.release]
 lto = true

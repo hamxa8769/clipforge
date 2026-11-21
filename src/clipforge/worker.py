@@ -314,12 +314,15 @@ def _run_stages(
             require_tool(
                 "yt-dlp",
                 "yt-dlp downloads the YouTube source",
-                "Install yt-dlp (pip install yt-dlp) or use a local file upload.",
+                "Press 'Install yt-dlp' in ClipForge (Pipeline or Agent page, "
+                "or Settings) to install it automatically, or use a local "
+                "file upload.",
             )
             source = ingest_youtube(
                 job.source_url or "",
                 own_content=bool(job.own_content),
                 out_dir=data / "uploads",
+                data_dir=data,
             )
         elif job.source_type == "live":
             # Live capture (v0.7.0): record a bounded segment of the
@@ -331,7 +334,9 @@ def _run_stages(
             require_tool(
                 "yt-dlp",
                 "yt-dlp records the live stream",
-                "Install yt-dlp (pip install yt-dlp) or use a local file upload.",
+                "Press 'Install yt-dlp' in ClipForge (Pipeline or Agent page, "
+                "or Settings) to install it automatically, or use a local "
+                "file upload.",
             )
             live_meta = dict(job.meta_json or {})
             try:
@@ -383,8 +388,8 @@ def _run_stages(
             require_tool(
                 "ffprobe",
                 "ffprobe validates the local source file",
-                f"Install FFmpeg from {FFMPEG_DOWNLOAD_URL} "
-                "(ffprobe ships with it) and make sure it is on PATH.",
+                "Press 'Install FFmpeg' in ClipForge (ffprobe ships with it) "
+                f"or install it from {FFMPEG_DOWNLOAD_URL}.",
             )
             source = ingest_local(str(job.source_path or job.source_url or ""))
     except MissingDependencyError as exc:
@@ -450,8 +455,9 @@ def _run_stages(
                 kind="tool",
                 detail=str(exc),
                 required_action=(
-                    f"Install FFmpeg from {FFMPEG_DOWNLOAD_URL} "
-                    "and make sure it is on PATH, then retry the job."
+                    "Press 'Install FFmpeg' in ClipForge (Settings, or the "
+                    "onboarding wizard) to install it automatically, or "
+                    f"install it from {FFMPEG_DOWNLOAD_URL}, then retry the job."
                 ),
             )
             tracker.block("transcribe", dep)
@@ -462,8 +468,13 @@ def _run_stages(
                 dependency="faster-whisper or OPENAI_API_KEY",
                 kind="package",
                 detail=str(exc),
-                required_action="Install faster-whisper or set OPENAI_API_KEY, "
-                "or supply transcript_text for the demo fallback.",
+                required_action="Install faster-whisper (pip install "
+                "faster-whisper) or set OPENAI_API_KEY, or supply "
+                "transcript_text for the demo fallback. Note: the first real "
+                "transcription after installing faster-whisper downloads the "
+                "Whisper model (about 500 MB for the default 'small' model) "
+                "with no progress shown; the Whisper API key path skips that "
+                "download.",
             )
             tracker.block("transcribe", dep)
             raise dep
@@ -637,8 +648,9 @@ def _run_stages(
         require_tool(
             "ffmpeg",
             "FFmpeg renders the clips",
-            f"Install FFmpeg from {FFMPEG_DOWNLOAD_URL} "
-            "and make sure it is on PATH, then retry the job.",
+            "Press 'Install FFmpeg' in ClipForge (Settings, or the "
+            "onboarding wizard) to install it automatically, or install it "
+            f"from {FFMPEG_DOWNLOAD_URL}, then retry the job.",
         )
     except MissingDependencyError as exc:
         tracker.block("render", exc)

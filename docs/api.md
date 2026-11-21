@@ -204,6 +204,36 @@ yet — `brew install ffmpeg` is the one-command route). The same
 installer is available from the command line:
 `python scripts/install-ffmpeg.py [--data-dir ./data] [--force]`.
 
+### `GET /yt-dlp/status` · `POST /yt-dlp/install` (v0.8.1)
+
+One-click yt-dlp install — the same pattern as FFmpeg, for the tool
+that downloads YouTube sources. `POST /yt-dlp/install` (202) starts
+the install in the background and returns immediately;
+`GET /yt-dlp/status` is polled for progress (`state`: idle /
+downloading / verifying / installing / done / error / unsupported,
+`progress_pct` 0–100, `downloaded_bytes` / `total_bytes`,
+plain-language `error`). The server downloads the official release
+binary for the platform — Windows: `yt-dlp.exe`, Linux:
+`yt-dlp_linux`, macOS: `yt-dlp_macos`, all from
+`https://github.com/yt-dlp/yt-dlp/releases/latest/download/` — checks
+its SHA-256 against the release's published `SHA2-256SUMS` when that
+file is reachable (a mismatch is a hard failure; a missing sums file
+is reported honestly as `checksum_verified: false`), verifies
+`yt-dlp --version` runs, and installs it to `<data_dir>/yt-dlp/`.
+On Windows the folder is also added to the user PATH (registry
+`HKCU\Environment`, so new terminals find it too); inside ClipForge
+ingest, live capture, channel fetch and trending match work
+immediately with no restart, because the app always prefers the
+installed binary. A failed install leaves no half-installed files
+behind. `POST /yt-dlp/install?force=true` re-installs over an
+existing yt-dlp; without it, an already-installed yt-dlp answers
+`done` at once. An unknown platform answers `422`. The same installer
+is available from the command line:
+`python scripts/install-ytdlp.py [--data-dir ./data] [--force]`.
+A job blocked at Ingest with `yt_dlp_missing` is retryable from the
+Pipeline page once the install finishes — the install button sits
+right on the blocked Ingest stage, next to Retry.
+
 ### `GET /analytics` · `GET /analytics/{account_id}`
 
 Retention / viewed-vs-swiped signals feeding the next clip picks.

@@ -69,6 +69,68 @@ def test_get_unknown_batch_returns_none(queue):
     assert queue.cancel_batch("nope") is None
 
 
+# ------------------------------------------------------- v0.8.1 batch fix
+def test_get_queue_adopts_real_processor_over_simulated(tmp_path):
+    """A read before the first write must not poison the shared queue
+    with the simulated processor: a GET /batch/{id} (404 or not) used
+    to create the process-wide queue with the no-op processor, and
+    every later POST /batch silently ran the simulation — fake "done",
+    no job, no clips. The real processor is adopted over the simulated
+    one; the shared instance itself is unchanged."""
+    from clipforge import batch_queue as bq_mod
+
+    calls: list[str] = []
+
+    def _real(item, set_progress, is_paused):
+        calls.append(item["source"])
+        return {"job_id": "j1", "clips": 0, "status": "done"}
+
+    orig = bq_mod._default_queue
+    bq_mod._default_queue = None
+    try:
+        q1 = bq_mod.get_queue(tmp_path)  # read-only caller: simulated
+        assert q1._processor is bq_mod._default_processor
+        q2 = bq_mod.get_queue(tmp_path, processor=_real)
+        assert q2 is q1
+        assert q2._processor is _real
+        batch_id = q2.create_batch(["a.mp4"])
+        done = q2.wait_until_done(batch_id, timeout=10.0)
+        assert done is not None
+        assert calls == ["a.mp4"]
+        assert done["items"][0]["result"] == {"job_id": "j1", "clips": 0, "status": "done"}
+        assert done["items"][0]["state"] == "done"
+    finally:
+        if bq_mod._default_queue is not None:
+            bq_mod._default_queue.shutdown()
+        bq_mod._default_queue = orig
+
+
+def test_blocked_pipeline_result_marks_item_failed(tmp_path):
+    """A processor result with status blocked/failed is a failed item
+    carrying the plain reason — never a fake "done" with zero clips."""
+
+    def _blocked(item, set_progress, is_paused):
+        return {
+            "job_id": "j1",
+            "clips": 0,
+            "status": "blocked",
+            "error": "faster-whisper or OPENAI_API_KEY missing (transcription_backend_missing)",
+        }
+
+    q = BatchQueue(data_dir=tmp_path, processor=_blocked)
+    try:
+        batch_id = q.create_batch(["a.mp4"])
+        done = q.wait_until_done(batch_id, timeout=10.0)
+        assert done is not None
+        item = done["items"][0]
+        assert item["state"] == "failed"
+        assert "transcription" in item["error"]
+        assert item["result"]["status"] == "blocked"
+        assert done["status"] == "partial"
+    finally:
+        q.shutdown()
+
+
 def test_pause_and_resume(tmp_path):
     gate = threading.Event()
 

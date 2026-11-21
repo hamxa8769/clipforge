@@ -188,7 +188,9 @@ def test_search_with_saved_key_returns_live_shaped_results(monkeypatch):
 
 # ------------------------------------------------------------------ match
 def test_match_without_yt_dlp_is_plain_422(monkeypatch):
-    monkeypatch.setattr("clipforge.trending.shutil.which", lambda name: None)
+    # yt-dlp resolution now goes through resolve_yt_dlp_path (bundled
+    # install first, then PATH) — patch that seam, not shutil.which.
+    monkeypatch.setattr("clipforge.trending.resolve_yt_dlp_path", lambda *a, **k: None)
     resp = client.post(
         "/api/trending/match",
         json={

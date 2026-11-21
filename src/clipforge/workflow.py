@@ -39,6 +39,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from clipforge.db import Job, JobStageEvent, JobStatus, WorkerRun
+from clipforge.ytdlp_install import bundled_yt_dlp_path, ytdlp_missing_message
 
 # ---------------------------------------------------------------- stages
 # (name, weight % of total progress, JobStatus while the stage runs)
@@ -159,7 +160,9 @@ def check_dependencies() -> list[Dependency]:
 
     def _tool(name: str, detail: str) -> Dependency:
         # ffmpeg/ffprobe also count when the one-click installer put them
-        # in <data_dir>/ffmpeg/bin (no PATH edit / restart needed there).
+        # in <data_dir>/ffmpeg/bin (no PATH edit / restart needed there);
+        # yt-dlp likewise counts when its installer put it in
+        # <data_dir>/yt-dlp.
         found = shutil.which(name) is not None
         if not found and name in ("ffmpeg", "ffprobe"):
             from clipforge.ffmpeg_install import (  # noqa: PLC0415
@@ -174,6 +177,9 @@ def check_dependencies() -> list[Dependency]:
                 else bundled_ffprobe_path(data_dir)
             )
             found = bundled.is_file()
+        if not found and name == "yt-dlp":
+            data_dir = os.environ.get("CLIPFORGE_DATA_DIR") or "./data"
+            found = bundled_yt_dlp_path(data_dir).is_file()
         return Dependency(
             name=name,
             kind="tool",
@@ -239,6 +245,9 @@ def require_tool(name: str, detail: str, required_action: str) -> None:
             bundled_ffmpeg_path(data_dir) if name == "ffmpeg" else bundled_ffprobe_path(data_dir)
         )
         found = bundled.is_file()
+    if not found and name == "yt-dlp":
+        data_dir = os.environ.get("CLIPFORGE_DATA_DIR") or "./data"
+        found = bundled_yt_dlp_path(data_dir).is_file()
     if not found:
         raise MissingDependencyError(
             code=f"{name.replace('-', '_')}_missing",
@@ -266,7 +275,11 @@ def require_transcription_backend() -> None:
         dependency="faster-whisper or OPENAI_API_KEY",
         kind="package",
         detail="faster-whisper is not installed and OPENAI_API_KEY is not set, "
-        "so there is no transcription backend",
+        "so there is no transcription backend. Note: the first real "
+        "transcription after installing faster-whisper downloads the "
+        "Whisper model (about 500 MB for the default 'small' model) from "
+        "HuggingFace with no progress shown — set OPENAI_API_KEY instead "
+        "to use the Whisper API and skip that download.",
         required_action="Install faster-whisper (pip install faster-whisper) "
         "or set OPENAI_API_KEY — or supply transcript_text to run the "
         "deterministic fallback (flagged demo, not real transcription).",
@@ -454,6 +467,7 @@ __all__ = [
     "MIN_SCORE_THRESHOLD",
     "FFMPEG_DOWNLOAD_URL",
     "ffmpeg_missing_message",
+    "ytdlp_missing_message",
     "stage_progress_before",
     "MissingDependencyError",
     "Dependency",

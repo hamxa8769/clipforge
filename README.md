@@ -8,10 +8,14 @@ captions, writes a different title / description / hashtag set for each
 platform, and publishes **only after a human approves** — through the
 platforms' official APIs, and nothing else.
 
-> **Status: v0.8.0 — production-level single-window app.** The clipping
+> **Status: v0.8.1 — production-level single-window app.** The clipping
 > pipeline, review UI, and publishing adapters are under active
 > development. Nothing in this repo posts to any platform automatically,
-> and `DRY_RUN=true` is the default. v0.8.0 adds ClipForge Pro: Clip
+> and `DRY_RUN=true` is the default. v0.8.1 fixes the server staying
+> alive after the app closes (close = quit, no background server), the
+> NSIS installer hitting a locked `clipforge-server.exe`, the Agent
+> on/off toggle, and adds one-click yt-dlp install.
+> v0.8.0 adds ClipForge Pro: Clip
 > Studio with deeper AI detection, Export Hub, Batch mode, X (Twitter),
 > a monetization layer, and low-end / no-GPU performance profiles.
 > v0.7.0 adds Creative Commons
@@ -237,6 +241,29 @@ Things to know:
 Building the exe yourself: `python scripts/build_exe.py --with-web`
 (see `clipforge-server.spec`).
 
+## What's new in v0.8.1 — shutdown fix, Agent toggle, one-click yt-dlp
+
+- **Close = quit.** Closing the main window now stops the
+  `clipforge-server` sidecar and exits the app completely — nothing
+  keeps running in the background, so the server can never lock its
+  own exe and block the next install. The sidecar is killed as a
+  whole process tree (Windows Job Object with kill-on-job-close,
+  Unix process group), stale servers from previous runs are cleaned
+  up on startup, and the in-app updater stops the server and waits
+  for the process and the exe file to be free before launching the
+  installer. The Windows installer also kills leftover ClipForge
+  processes before writing any file.
+- **Agent on/off toggle fixed.** The toggle now really starts and
+  stops the agent and persists across restarts; turning it on fails
+  fast with a plain message when a required tool is missing instead
+  of silently doing nothing.
+- **One-click yt-dlp install.** A missing yt-dlp no longer blocks
+  the Agent at Ingest with only an error: an "Install yt-dlp" button
+  sits right on the blocked Ingest stage (and on the Agent and
+  Settings pages), downloads the official release, verifies it, and
+  installs it into the app data dir. See `docs/missing-tools.md` for
+  the full audit of every other tool the pipeline needs.
+
 ## What's new in v0.8.0 — ClipForge Pro
 
 - **Clip Studio** — AI clip suggestions as cards with a viral score
@@ -428,6 +455,23 @@ Building the exe yourself: `python scripts/build_exe.py --with-web`
   `python scripts/install-ffmpeg.py`. macOS is not auto-installed yet
   (`brew install ffmpeg` instead). A **Reinstall FFmpeg** button in
   Settings / onboarding re-installs over an existing FFmpeg.
+- **One-click yt-dlp install** — the same fix for the other missing
+  tool: press **Install yt-dlp** right on a blocked Ingest stage
+  (Pipeline), on the Agent page when a run cannot start, or in
+  Settings → This app. The app downloads the official release binary
+  (Windows: `yt-dlp.exe`; Linux: `yt-dlp_linux`; macOS: `yt-dlp_macos`,
+  all from github.com/yt-dlp/yt-dlp releases), checks it against the
+  release's published `SHA2-256SUMS` SHA-256 when reachable, verifies
+  `yt-dlp --version` runs, installs it into the data folder, saves the
+  path, and adds it to the Windows user PATH — with download progress,
+  plain-language errors that name the failed step (download / verify /
+  install), and retry. A failed download is retried once, then the
+  installer tries the version-pinned fallback release (2026.10.26,
+  verified at build time). After the install, retry the blocked job
+  from the same page and it runs past Ingest. Same installer from the
+  command line: `python scripts/install-ytdlp.py`. See
+  [docs/missing-tools.md](docs/missing-tools.md) for the audit of every
+  other tool the pipeline needs.
 - **Workflow fixes from a full audit** — local files given as
   `file://` URLs now ingest instead of failing with "source file does
   not exist"; the approval queue stays in sync after a live post; the
@@ -561,6 +605,8 @@ Building the exe yourself: `python scripts/build_exe.py --with-web`
 | `GET` | `/accounts` | Connected social accounts |
 | `GET` | `/ffmpeg/status` | Pollable FFmpeg install state + live detection |
 | `POST` | `/ffmpeg/install` | Start the one-click FFmpeg install (202; `?force=true` re-installs) |
+| `GET` | `/yt-dlp/status` | Pollable yt-dlp install state + live detection |
+| `POST` | `/yt-dlp/install` | Start the one-click yt-dlp install (202; `?force=true` re-installs) |
 
 Full reference: [docs/api.md](docs/api.md).
 

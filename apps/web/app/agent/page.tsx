@@ -24,6 +24,7 @@ import {
   NICHE_PRESETS, type AgentConfig, type AgentStatus, type LlmProvider,
 } from "@/lib/api";
 import GeminiSetup from "@/components/GeminiSetup";
+import { YtDlpInstallSection } from "@/components/YtDlpInstaller";
 import {
   Card, CardHeader, DemoBadge, EmptyState, ErrorBanner, PrimaryButton,
   ProgressBar, SecondaryButton, Skeleton, Toggle, platformLabel,
@@ -35,6 +36,11 @@ const ENGINE_BLURB: Record<string, string> = {
   "AI engine": "Your saved AI key picks the best moments and writes the titles.",
   "rule-based engine": "No AI key is connected, so the built-in rule-based engine picks moments and writes titles from templates. Connect Gemini below for smarter picks.",
 };
+
+/** True when a message is the yt-dlp-missing block (start failure or run error). */
+function ytDlpMissing(text: string | null | undefined): boolean {
+  return !!text && text.toLowerCase().includes("yt-dlp");
+}
 
 export default function AgentPage() {
   const [status, setStatus] = useState<AgentStatus | null>(null);
@@ -136,6 +142,13 @@ export default function AgentPage() {
     const res = next ? await startAgent() : await stopAgent();
     setActing(false);
     if (!res.ok) {
+      // The agent could not be turned (on|off): never leave the switch
+      // showing a state the server did not reach. When starting failed
+      // (e.g. yt-dlp missing) roll the toggle back OFF so it shows the
+      // truth instead of a stuck ON that silently does nothing.
+      if (next) {
+        await save({ enabled: false });
+      }
       setNotice(res.error ?? (next ? "Could not start the agent." : "Could not stop the agent."));
       await load();
       return;
@@ -169,6 +182,15 @@ export default function AgentPage() {
       {notice && (
         <div className="rounded-xl border border-sky-500/40 bg-sky-500/10 p-4 text-sm text-sky-100">{notice}</div>
       )}
+      {ytDlpMissing(notice) && (
+        <Card>
+          <CardHeader title="Install yt-dlp" hint="One click — no restart needed" />
+          <YtDlpInstallSection onInstalled={() => { load().catch(() => {}); }} />
+          <p className="mt-3 text-sm text-neutral-400">
+            After the install finishes, turn the agent on again above — it will pick up your saved source and niche.
+          </p>
+        </Card>
+      )}
 
       <Card>
         <CardHeader title="Agent status" hint="Live from the agent service" />
@@ -183,14 +205,43 @@ export default function AgentPage() {
               <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${status.enabled ? "bg-emerald-500/15 text-emerald-300" : "bg-neutral-700/50 text-neutral-300"}`}>
                 {status.enabled ? "Enabled" : "Disabled"}
               </span>
-              <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${status.running ? "bg-amber-500/15 text-amber-300" : "bg-neutral-700/50 text-neutral-300"}`}>
-                {status.running ? "Running" : "Idle"}
+              <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${status.running ? "bg-amber-500/15 text-amber-300" : status.state === "error" ? "bg-red-500/15 text-red-300" : status.state === "done" ? "bg-emerald-500/15 text-emerald-300" : "bg-neutral-700/50 text-neutral-300"}`}>
+                {status.running ? "Running" : status.state === "error" ? "Error" : status.state === "done" ? "Done" : status.state === "stopped" ? "Stopped" : "Idle"}
               </span>
               <span className="text-sm text-neutral-300">
                 Engine: <span className="font-medium text-neutral-100">{engine}</span>
               </span>
             </div>
             <p className="text-sm text-neutral-400">{ENGINE_BLURB[engine]}</p>
+            {status.running && (
+              <div>
+                <ProgressBar value={status.progress_pct} />
+                <p className="mt-1 text-xs text-neutral-400">{Math.round(status.progress_pct)}% — working through your source…</p>
+              </div>
+            )}
+            {status.state === "error" && status.last_error && (
+              <div role="alert" className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-200">
+                The agent could not run: {status.last_error}
+              </div>
+            )}
+            {status.state === "error" && ytDlpMissing(status.last_error) && (
+              <div className="rounded-lg border border-neutral-800 bg-neutral-950 p-3">
+                <YtDlpInstallSection onInstalled={() => { load().catch(() => {}); }} />
+                <p className="mt-3 text-sm text-neutral-400">
+                  After the install finishes, turn the agent on again — it will pick up your saved source and niche.
+                </p>
+              </div>
+            )}
+            {status.state === "done" && (
+              <p className="text-sm text-emerald-200">
+                Last run finished — {status.queued} clip{status.queued === 1 ? "" : "s"} queued for approval
+                {status.approved > 0 ? `, ${status.approved} approved` : ""}
+                {status.published > 0 ? `, ${status.published} published` : ""}.
+              </p>
+            )}
+            {status.state === "stopped" && (
+              <p className="text-sm text-neutral-300">The agent was stopped. Turn it on again to run it.</p>
+            )}
             {status.current_job && (
               <p className="text-sm text-neutral-300">Current job: <span className="font-medium">{status.current_job}</span></p>
             )}

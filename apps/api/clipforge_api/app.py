@@ -1,4 +1,4 @@
-"""ClipForge API v0.8.0 — FastAPI app.
+"""ClipForge API v0.8.1 — FastAPI app.
 
 Endpoints (all dry-run by default; nothing publishes live without an
 approved Post record, explicit credentials, and ``dry_run=false``):
@@ -38,6 +38,11 @@ approved Post record, explicit credentials, and ``dry_run=false``):
                                      (one-click FFmpeg install: official
                                       build into <data_dir>/ffmpeg, progress
                                       pollable, PATH updated on Windows)
+  GET  /yt-dlp/status | POST /yt-dlp/install
+                                     (one-click yt-dlp install: official
+                                      release binary into <data_dir>/yt-dlp,
+                                      SHA-256 verified, progress pollable,
+                                      PATH updated on Windows)
   GET  /monetization                 (tracker; ?platform=&subs=&...)
   GET  /analytics | GET /analytics/{account_id}
   POST /scheduler/run                (run due posts; dry-run default)
@@ -195,6 +200,7 @@ from clipforge.workflow import (
     stage_event_out,
     stage_events_for,
 )
+from clipforge.ytdlp_install import YtDlpInstaller, ensure_bundled_yt_dlp_on_path
 
 
 # ------------------------------------------------------------------ schemas
@@ -1927,6 +1933,64 @@ def ffmpeg_install(force: bool = Query(default=False)):
     return result
 
 
+# ------------------------------------------------- one-click yt-dlp install
+# One installer per data dir (tests point CLIPFORGE_DATA_DIR at a temp
+# dir); the installer owns the background thread + pollable state file.
+_YTDLP_INSTALLERS: dict[str, YtDlpInstaller] = {}
+
+
+def _ytdlp_installer() -> YtDlpInstaller:
+    key = str(_data_dir())
+    installer = _YTDLP_INSTALLERS.get(key)
+    if installer is None:
+        installer = YtDlpInstaller(
+            _data_dir(),
+            on_installed=lambda path: _settings_store().set_yt_dlp_path(path),
+        )
+        _YTDLP_INSTALLERS[key] = installer
+    return installer
+
+
+@app.get("/yt-dlp/status")
+def ytdlp_status():
+    """Pollable yt-dlp install state + live detection.
+
+    ``state`` is one of idle / downloading / verifying / installing /
+    done / error / unsupported; ``progress_pct`` moves 0 → 100 through
+    a run; ``error`` is a plain-language message (or ""), never a
+    traceback — it starts with the step that failed
+    ("Download failed: …" / "Verification failed: …" /
+    "Install failed: …"), and ``failed_step`` carries that step
+    machine-readably (download / verify / install).
+    ``path_warning`` is a non-fatal Windows PATH warning on an
+    otherwise successful install; ``checksum_verified`` is True when
+    the published SHA-256 (release ``SHA2-256SUMS``) matched, False
+    when no checksum file was available for the build (the download
+    still came over HTTPS from the official source), None before
+    verification ran. ``found`` / ``path`` / ``version`` say whether
+    yt-dlp is usable right now, whatever installed it.
+    """
+    return _ytdlp_installer().status()
+
+
+@app.post("/yt-dlp/install", status_code=202)
+def ytdlp_install(force: bool = Query(default=False)):
+    """Start the one-click yt-dlp install (returns immediately).
+
+    Downloads the official release binary for this platform into
+    ``<data_dir>/yt-dlp/``, verifies its published SHA-256 checksum
+    and that ``yt-dlp --version`` runs, and adds it to the user PATH
+    on Windows. Poll ``GET /yt-dlp/status`` for progress. A second
+    call while a run is active returns the live status instead of
+    starting a duplicate download; ``force=true`` re-installs over an
+    existing yt-dlp. An unknown platform answers 422.
+    """
+    result = _ytdlp_installer().start_install(force=force)
+    if result["state"] == "unsupported":
+        raise HTTPException(422, result["error"] or result["message"])
+    return result
+
+
 # ------------------------------------------------- monetization / analytics / scheduler
 @app.get("/monetization")
 def get_monetization(
@@ -2626,7 +2690,11 @@ def update_agent_config(payload: AgentConfigUpdate):
 @app.post("/api/agent/start")
 def start_agent():
     """Start the agent (background thread). 409 when already running,
-    422 when it is off / has no source / rights are not confirmed."""
+    422 when it is off / has no source / rights are not confirmed, or
+    when the run cannot start at all (e.g. yt-dlp is missing for a
+    real-video source — the pre-flight fails fast instead of briefly
+    reporting "running" and then silently erroring with the toggle
+    still ON)."""
     agent = _agent()
     try:
         state = agent.start()
@@ -2639,7 +2707,11 @@ def start_agent():
 
 @app.post("/api/agent/stop")
 def stop_agent():
-    """Ask the agent to stop. Always 200 with the current state."""
+    """Ask the agent to stop. Always 200 with the current state. OFF
+    is persisted here (stored config ``enabled=False``), so the agent
+    stays off across reloads/restarts — stopping is not only a UI-side
+    config write. A run stopped mid-flight ends in state "stopped",
+    never "done" or a misleading "error"."""
     return {"ok": True, "state": _agent().stop()}
 
 
@@ -2773,6 +2845,11 @@ def save_gemini_key(payload: GeminiKeyIn):
 # <data_dir>/ffmpeg/bin: prefer it from the first request, with no
 # restart and no PATH edit (see clipforge.ffmpeg_install).
 ensure_bundled_on_path(_data_dir())
+
+# Same for yt-dlp: a previous one-click install already put it in
+# <data_dir>/yt-dlp — prefer it from the first request, with no
+# restart and no PATH edit (see clipforge.ytdlp_install).
+ensure_bundled_yt_dlp_on_path(_data_dir())
 
 
 __all__ = ["app"]

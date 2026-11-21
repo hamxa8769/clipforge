@@ -31,6 +31,7 @@ from clipforge.auth.secrets import SecretStore, mask_secret
 from clipforge.ffmpeg_install import resolve_ffmpeg_path
 from clipforge.monetization import THRESHOLDS
 from clipforge.workflow import FFMPEG_DOWNLOAD_URL
+from clipforge.ytdlp_install import YTDLP_DOWNLOAD_PAGE, resolve_yt_dlp_path
 
 # Secret names in the SecretStore (never shown, never logged).
 SECRET_NAMES = {
@@ -128,6 +129,39 @@ def ffmpeg_info(data_dir: str | Path | None = None, stored_path: str | None = No
     return info
 
 
+def ytdlp_info(data_dir: str | Path | None = None, stored_path: str | None = None) -> dict:
+    """Honest yt-dlp report: found, where, and which version.
+
+    Resolution order: the path saved by the one-click install, then
+    the installer-managed ``<data_dir>/yt-dlp/`` binary, then whatever
+    is on PATH. ``version`` is the output of ``yt-dlp --version``
+    (e.g. ``2026.10.26``) when the binary runs, else "" — never a
+    guessed version, never a crash when the binary is absent.
+    """
+    path: str | None = None
+    if data_dir is not None:
+        path = resolve_yt_dlp_path(data_dir, stored_path)
+    else:
+        path = stored_path if stored_path and Path(stored_path).is_file() else None
+        if path is None:
+            path = shutil.which("yt-dlp")
+    info = {
+        "found": bool(path),
+        "path": path or "",
+        "version": "",
+        "install_url": YTDLP_DOWNLOAD_PAGE,
+    }
+    if not path:
+        return info
+    try:
+        proc = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=10)
+        first = (proc.stdout or "").strip().splitlines()[0].strip() if proc.stdout else ""
+        info["version"] = first
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return info
+
+
 @dataclass
 class AppSettings:
     """Non-secret preferences (stored in settings.json)."""
@@ -144,6 +178,9 @@ class AppSettings:
     # ("" = none installed; detection then falls back to the bundled
     # location and PATH). Saved by the installer, never typed by hand.
     ffmpeg_path: str = ""
+    # Path of the yt-dlp binary installed by the one-click installer
+    # ("" = none installed; same fallback as ffmpeg_path).
+    yt_dlp_path: str = ""
     # First-run onboarding progress (see DEFAULT_ONBOARDING).
     onboarding: dict[str, object] = field(default_factory=lambda: dict(DEFAULT_ONBOARDING))
 
@@ -220,6 +257,12 @@ class SettingsStore:
         """Remember an installed FFmpeg binary (one-click installer)."""
         current = self.load()
         current.ffmpeg_path = ffmpeg_path
+        self.save(current)
+
+    def set_yt_dlp_path(self, yt_dlp_path: str) -> None:
+        """Remember an installed yt-dlp binary (one-click installer)."""
+        current = self.load()
+        current.yt_dlp_path = yt_dlp_path
         self.save(current)
 
     # ------------------------------------------------------------ secrets
@@ -302,6 +345,7 @@ class SettingsStore:
             "data_dir": str(self.data_dir.resolve()),
             "secret_backend": self.secrets.backend,
             "ffmpeg": ffmpeg_info(self.data_dir, stored_path=settings.ffmpeg_path),
+            "yt_dlp": ytdlp_info(self.data_dir, stored_path=settings.yt_dlp_path),
             "monetization_thresholds": [
                 {
                     "platform": platform,
@@ -484,4 +528,5 @@ __all__ = [
     "SettingsStore",
     "ffmpeg_info",
     "normalize_onboarding",
+    "ytdlp_info",
 ]

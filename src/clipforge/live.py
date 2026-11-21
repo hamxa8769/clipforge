@@ -48,7 +48,6 @@ that is not readable at all.
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 import threading
 import time
@@ -70,6 +69,7 @@ from clipforge.trending import (
     own_channel_id,
 )
 from clipforge.trending import extract_youtube_video_id as _extract_id
+from clipforge.ytdlp_install import resolve_yt_dlp_path, ytdlp_missing_message
 
 # ------------------------------------------------------------------ limits
 # A live capture is always bounded: the user picks 60–300 seconds.
@@ -652,13 +652,11 @@ def capture_live_stream(
     from clipforge.ingest import validate_local_file  # noqa: PLC0415 (avoid cycle)
 
     seconds = validate_live_duration(duration_s)
-    yt_dlp = (which or shutil.which)("yt-dlp")
+    # ``which`` is injectable for tests; otherwise the bundled yt-dlp
+    # (one-click install) is used first, then PATH.
+    yt_dlp = which("yt-dlp") if which is not None else resolve_yt_dlp_path()
     if not yt_dlp:
-        raise LiveCaptureError(
-            "yt-dlp is not installed (no 'yt-dlp' on PATH), so ClipForge "
-            "cannot record a live stream. Install yt-dlp "
-            "(pip install yt-dlp) and try again."
-        )
+        raise LiveCaptureError(ytdlp_missing_message() + " Live capture cannot record without it.")
     video_id = _extract_id(url)
     if not video_id and not url.startswith("http"):
         raise LiveCaptureError(f"Not a YouTube live URL: {url!r}.")

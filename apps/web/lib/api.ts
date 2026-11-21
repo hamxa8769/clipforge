@@ -35,7 +35,8 @@ export type JobStatus =
   | "rendering"
   | "review"
   | "ready"
-  | "failed";
+  | "failed"
+  | "blocked";
 
 export const JOB_STATUSES: readonly JobStatus[] = [
   "pending",
@@ -45,6 +46,7 @@ export const JOB_STATUSES: readonly JobStatus[] = [
   "review",
   "ready",
   "failed",
+  "blocked",
 ];
 
 /** Statuses that count as "still processing" on the dashboard. */
@@ -805,6 +807,72 @@ export function ffmpegInstallRunning(status: FfmpegInstallStatus | null): boolea
   return status !== null && ["downloading", "verifying", "extracting", "installing"].includes(status.state);
 }
 
+/** One-click yt-dlp install state, exactly as GET /yt-dlp/status returns it. */
+export type YtDlpInstallState =
+  | "idle" | "downloading" | "verifying" | "installing"
+  | "done" | "error" | "unsupported";
+export interface YtDlpInstallStatus {
+  state: YtDlpInstallState;
+  progress_pct: number;
+  downloaded_bytes: number;
+  total_bytes: number | null;
+  message: string;
+  error: string;
+  version: string;
+  path: string;
+  found: boolean;
+  download_url: string;
+  platform: string;
+  path_added: boolean | null;
+  checksum_verified: boolean | null;
+  /** Step that failed ("" when nothing failed): download / verify / install. */
+  failed_step: string;
+  /** Non-fatal Windows PATH warning on an otherwise successful install ("" when none). */
+  path_warning: string;
+}
+
+const YTDLP_INSTALL_STATES: YtDlpInstallState[] = [
+  "idle", "downloading", "verifying", "installing", "done", "error", "unsupported",
+];
+
+export function normalizeYtDlpInstallStatus(raw: unknown): YtDlpInstallStatus | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (typeof r.state !== "string" || !(YTDLP_INSTALL_STATES as string[]).includes(r.state)) return null;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  return {
+    state: r.state as YtDlpInstallState,
+    progress_pct: num(r.progress_pct),
+    downloaded_bytes: num(r.downloaded_bytes),
+    total_bytes: typeof r.total_bytes === "number" ? r.total_bytes : null,
+    message: typeof r.message === "string" ? r.message : "",
+    error: typeof r.error === "string" ? r.error : "",
+    version: typeof r.version === "string" ? r.version : "",
+    path: typeof r.path === "string" ? r.path : "",
+    found: r.found === true,
+    download_url: typeof r.download_url === "string" ? r.download_url : "",
+    platform: typeof r.platform === "string" ? r.platform : "",
+    path_added: typeof r.path_added === "boolean" ? r.path_added : null,
+    checksum_verified: typeof r.checksum_verified === "boolean" ? r.checksum_verified : null,
+    failed_step: typeof r.failed_step === "string" ? r.failed_step : "",
+    path_warning: typeof r.path_warning === "string" ? r.path_warning : "",
+  };
+}
+
+/** GET /yt-dlp/status — pollable install progress (returns null when the API is unreachable). */
+export async function getYtDlpInstallStatus(): Promise<YtDlpInstallStatus | null> {
+  return normalizeYtDlpInstallStatus(await apiGet<unknown>("/yt-dlp/status"));
+}
+
+/** POST /yt-dlp/install — start the one-click install (returns immediately; poll the status). */
+export async function installYtDlp(force = false): Promise<ApiResult> {
+  return apiPostJson(`/yt-dlp/install?force=${force ? "true" : "false"}`);
+}
+
+/** True while an install run is in progress (download / verify / install). */
+export function ytdlpInstallRunning(status: YtDlpInstallStatus | null): boolean {
+  return status !== null && ["downloading", "verifying", "installing"].includes(status.state);
+}
+
 /** Channel status, exactly as GET /channels returns it (clipforge.auth.channels). */
 export type ChannelStatusValue = "connected" | "expired" | "not_connected";
 export interface ChannelStatus {
@@ -953,6 +1021,7 @@ export interface AppSettingsView {
   credentials: Record<string, { client_id: MaskedCredential; client_secret: MaskedCredential }>;
   data_dir: string; secret_backend: string;
   ffmpeg: { found: boolean; path: string; version: string; install_url: string };
+  yt_dlp: { found: boolean; path: string; version: string; install_url: string };
   monetization_thresholds: { platform: string; program: string; threshold: Record<string, number>; note: string }[];
 }
 
@@ -972,6 +1041,7 @@ export function normalizeSettings(raw: unknown): AppSettingsView | null {
   const creds = (r.credentials ?? {}) as Record<string, Record<string, unknown>>;
   const llm = (r.llm ?? {}) as Record<string, unknown>;
   const ffmpeg = (r.ffmpeg ?? {}) as Record<string, unknown>;
+  const ytDlp = (r.yt_dlp ?? {}) as Record<string, unknown>;
   return {
     dry_run: r.dry_run,
     dry_run_source: r.dry_run_source === "settings" ? "settings" : "env",
@@ -996,6 +1066,12 @@ export function normalizeSettings(raw: unknown): AppSettingsView | null {
       path: String(ffmpeg.path ?? ""),
       version: String(ffmpeg.version ?? ""),
       install_url: String(ffmpeg.install_url ?? ""),
+    },
+    yt_dlp: {
+      found: ytDlp.found === true,
+      path: String(ytDlp.path ?? ""),
+      version: String(ytDlp.version ?? ""),
+      install_url: String(ytDlp.install_url ?? ""),
     },
     monetization_thresholds: Array.isArray(r.monetization_thresholds)
       ? (r.monetization_thresholds as Record<string, unknown>[]).map((t) => ({
@@ -1165,6 +1241,23 @@ export interface AgentStatus {
   enabled: boolean; running: boolean;
   current_job: string | null;
   accounts: AgentAccountStatus[];
+  // Run outcome — the Agent page needs these to show the TRUE state.
+  // Before v0.8.1 normalizeAgentStatus dropped them, so the page could
+  // only show Enabled/Idle while a run had silently errored: the
+  // toggle looked broken because ON did nothing visible and gave no
+  // reason. Fields default safely when an older server omits them.
+  state: string;
+  progress_pct: number;
+  queued: number;
+  approved: number;
+  published: number;
+  engine: string;
+  demo: boolean;
+  last_error: string | null;
+  last_run_at: string | null;
+  niche: string;
+  auto_post: boolean;
+  rights_confirmed: boolean;
 }
 
 export function normalizeAgentAccount(raw: unknown): AgentAccountStatus {
@@ -1184,11 +1277,24 @@ export function normalizeAgentAccount(raw: unknown): AgentAccountStatus {
 export function normalizeAgentStatus(raw: unknown): AgentStatus | null {
   const r = (raw ?? {}) as Record<string, unknown>;
   if (typeof r.enabled !== "boolean" || typeof r.running !== "boolean") return null;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
   return {
     enabled: r.enabled,
     running: r.running,
     current_job: typeof r.current_job === "string" ? r.current_job : null,
     accounts: Array.isArray(r.accounts) ? r.accounts.map(normalizeAgentAccount) : [],
+    state: typeof r.state === "string" ? r.state : r.running ? "running" : "idle",
+    progress_pct: num(r.progress_pct),
+    queued: num(r.queued),
+    approved: num(r.approved),
+    published: num(r.published),
+    engine: typeof r.engine === "string" ? r.engine : "",
+    demo: r.demo === true,
+    last_error: typeof r.last_error === "string" ? r.last_error : null,
+    last_run_at: typeof r.last_run_at === "string" ? r.last_run_at : null,
+    niche: typeof r.niche === "string" ? r.niche : "",
+    auto_post: r.auto_post === true,
+    rights_confirmed: r.rights_confirmed === true,
   };
 }
 

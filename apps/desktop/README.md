@@ -146,6 +146,39 @@ is at `<install>\binaries\web\out\index.html`. So `CLIPFORGE_WEB_OUT`
 is needed on Windows too; the release workflow proves both files are
 inside the MSI (admin-install extraction) before publishing.
 
+**Windows installer: kill-before-install (v0.8.1)**
+
+The app hides to the tray on close, so `clipforge-server.exe` can still
+be running when the user runs a new installer — and a running exe is
+locked by Windows. The v0.8.0 install failed exactly this way (NSIS
+"Error opening file for writing: ...\clipforge-server.exe"). Two layers
+guard against it now:
+
+1. **NSIS hook (installer-side, always runs).**
+   `src-tauri/installer-hooks.nsh`, wired in via
+   `tauri.conf.json > bundle.windows.nsis.installerHooks` (Tauri v2
+   mechanism; the bundler `!include`s it and expands
+   `NSIS_HOOK_PREINSTALL` before the first `File` instruction).
+   Before any file is written it force-kills `clipforge-server.exe`,
+   `clipforge-desktop.exe` and `ClipForge.exe` with
+   `taskkill /F /IM <name> /T`, waits up to ~10 s for each to disappear
+   from `tasklist`, and if one is still locked aborts with a clear
+   message ("close ClipForge or end <name> in Task Manager") instead of
+   the raw NSIS error. The same hook runs as `NSIS_HOOK_PREUNINSTALL`
+   before uninstall deletes files. Note Tauri's own template only
+   guards the *main* binary (`CheckIfAppIsRunning` on
+   `${MAINBINARYNAME}.exe`) — it never checks the sidecar, which is
+   the gap this hook closes.
+2. **Updater ordering (app-side, makes updates smooth).** The in-app
+   updater must stop the server and verify it is gone *before*
+   launching the installer: `stop_sidecar_if_running` →
+   `updater::wait_for_process_gone("clipforge-server.exe", …)` (and the
+   app exe, see `INSTALLER_GUARD_PROCESSES` in `src/updater.rs`) →
+   `updater::launch_installer` → `app.exit(0)` at once. Launching
+   first and quitting afterwards is the bug — the hook is only the
+   backstop. Regression tests:
+   `tests/unit/test_desktop_installer_hooks.py`.
+
 **Headless smoke test (installed .deb, Xvfb — verified 2026-11-20)**
 
 ```sh

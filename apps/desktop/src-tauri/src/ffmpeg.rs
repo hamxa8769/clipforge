@@ -5,9 +5,9 @@
 //! reports it and offers a "continue without clipping" path.
 
 use serde::Serialize;
-use std::process::Command;
 #[cfg(windows)]
 use std::path::PathBuf;
+use std::process::Command;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FfmpegStatus {
@@ -42,10 +42,7 @@ fn windows_candidates() -> Vec<PathBuf> {
     // install the app itself performed is found even before a logoff
     // (the user-PATH edit only reaches new processes).
     if let Ok(appdata) = std::env::var("APPDATA") {
-        out.push(
-            PathBuf::from(appdata)
-                .join("com.clipforge.app/ffmpeg/bin/ffmpeg.exe"),
-        );
+        out.push(PathBuf::from(appdata).join("com.clipforge.app/ffmpeg/bin/ffmpeg.exe"));
     }
     if let Ok(pf) = std::env::var("ProgramFiles") {
         out.push(PathBuf::from(&pf).join("ffmpeg/bin/ffmpeg.exe"));
@@ -101,10 +98,15 @@ mod tests {
     #[test]
     fn parses_version_line() {
         assert_eq!(
-            parse_ffmpeg_version("ffmpeg version 6.1.1-essentials_build-www.gyan.dev Copyright (c) 2000-2023"),
+            parse_ffmpeg_version(
+                "ffmpeg version 6.1.1-essentials_build-www.gyan.dev Copyright (c) 2000-2023"
+            ),
             Some("6.1.1-essentials_build-www.gyan.dev".into())
         );
-        assert_eq!(parse_ffmpeg_version("ffmpeg version 7.1"), Some("7.1".into()));
+        assert_eq!(
+            parse_ffmpeg_version("ffmpeg version 7.1"),
+            Some("7.1".into())
+        );
         assert_eq!(parse_ffmpeg_version("not ffmpeg"), None);
         assert_eq!(parse_ffmpeg_version("ffmpeg version"), None);
     }

@@ -19,9 +19,11 @@ import {
   normalizeAnalyticsSnapshot,
   normalizeAutomationRule,
   ffmpegInstallRunning,
+  ytdlpInstallRunning,
   normalizeChannelStatus,
   normalizeChannels,
   normalizeFfmpegInstallStatus,
+  normalizeYtDlpInstallStatus,
   normalizeJob,
   normalizeJobs,
   normalizeJobStatus,
@@ -59,7 +61,7 @@ import {
 } from "./api.js";
 
 test("normalizeJobStatus passes backend statuses through unchanged", () => {
-  for (const s of ["pending", "transcribing", "scoring", "rendering", "review", "ready", "failed"]) {
+  for (const s of ["pending", "transcribing", "scoring", "rendering", "review", "ready", "failed", "blocked"]) {
     assert.equal(normalizeJobStatus(s), s);
   }
 });
@@ -427,6 +429,86 @@ test("ffmpegInstallRunning is true only while a run is active", () => {
   assert.equal(ffmpegInstallRunning(null), false);
 });
 
+test("normalizeYtDlpInstallStatus passes a full status through", () => {
+  const s = normalizeYtDlpInstallStatus({
+    state: "downloading", progress_pct: 42.5, downloaded_bytes: 17000000, total_bytes: 40000000,
+    message: "Downloading yt-dlp…", error: "", version: "", path: "",
+    found: false, download_url: "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux",
+    platform: "Linux", path_added: null, checksum_verified: null,
+    failed_step: "", path_warning: "",
+  });
+  assert.ok(s);
+  assert.equal(s?.state, "downloading");
+  assert.equal(s?.progress_pct, 42.5);
+  assert.equal(s?.total_bytes, 40000000);
+  assert.equal(s?.download_url, "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux");
+  assert.equal(s?.failed_step, "");
+  assert.equal(s?.path_warning, "");
+});
+
+test("normalizeYtDlpInstallStatus passes failed_step and path_warning through", () => {
+  const failed = normalizeYtDlpInstallStatus({
+    state: "error", progress_pct: 0, downloaded_bytes: 0, total_bytes: null,
+    message: "", error: "Verification failed: The downloaded file did not match its published checksum.",
+    version: "", path: "", found: false, download_url: "", platform: "Linux",
+    path_added: null, checksum_verified: null, failed_step: "verify", path_warning: "",
+  });
+  assert.equal(failed?.failed_step, "verify");
+  assert.equal(failed?.error, "Verification failed: The downloaded file did not match its published checksum.");
+  const warned = normalizeYtDlpInstallStatus({
+    state: "done", progress_pct: 100, downloaded_bytes: 0, total_bytes: null,
+    message: "yt-dlp is installed and ready.", error: "",
+    version: "2026.10.26", path: "C:\\clipforge\\yt-dlp\\yt-dlp.exe", found: true,
+    download_url: "", platform: "Windows", path_added: false, checksum_verified: true,
+    failed_step: "", path_warning: "Could not add yt-dlp to your Windows PATH.",
+  });
+  assert.equal(warned?.path_added, false);
+  assert.equal(warned?.path_warning, "Could not add yt-dlp to your Windows PATH.");
+});
+
+test("normalizeYtDlpInstallStatus rejects unknown states and non-objects", () => {
+  assert.equal(normalizeYtDlpInstallStatus({ state: "flying" }), null);
+  assert.equal(normalizeYtDlpInstallStatus(null), null);
+  assert.equal(normalizeYtDlpInstallStatus("done"), null);
+});
+
+test("ytdlpInstallRunning is true only while a run is active (no extracting step)", () => {
+  const base = { progress_pct: 0, downloaded_bytes: 0, total_bytes: null, message: "", error: "", version: "", path: "", found: false, download_url: "", platform: "Linux", path_added: null, checksum_verified: null, failed_step: "", path_warning: "" };
+  for (const state of ["downloading", "verifying", "installing"] as const) {
+    assert.equal(ytdlpInstallRunning({ ...base, state }), true);
+  }
+  for (const state of ["idle", "done", "error", "unsupported"] as const) {
+    assert.equal(ytdlpInstallRunning({ ...base, state }), false);
+  }
+  assert.equal(ytdlpInstallRunning(null), false);
+});
+
+test("normalizeSettings keeps the yt-dlp version when present", () => {
+  const s = normalizeSettings({
+    dry_run: true, dry_run_source: "env", default_privacy: {}, default_platforms: [],
+    llm: { provider: "openai-compatible", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini", api_key: { configured: false, last4: "", masked: "", source: "none" } },
+    credentials: {}, data_dir: "/tmp", secret_backend: "file",
+    ffmpeg: { found: true, path: "/tmp/ffmpeg/bin/ffmpeg", version: "ffmpeg version 9.1", install_url: "https://ffmpeg.org/download.html" },
+    yt_dlp: { found: true, path: "/tmp/yt-dlp/yt-dlp", version: "2026.10.26", install_url: "https://github.com/yt-dlp/yt-dlp/releases/latest" },
+    monetization_thresholds: [],
+  });
+  assert.equal(s?.yt_dlp.found, true);
+  assert.equal(s?.yt_dlp.version, "2026.10.26");
+  assert.equal(s?.ffmpeg.found, true);
+});
+
+test("normalizeSettings defaults yt-dlp to not found when the backend predates it", () => {
+  const s = normalizeSettings({
+    dry_run: true, dry_run_source: "env", default_privacy: {}, default_platforms: [],
+    llm: { provider: "openai-compatible", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini", api_key: { configured: false, last4: "", masked: "", source: "none" } },
+    credentials: {}, data_dir: "/tmp", secret_backend: "file",
+    ffmpeg: { found: false, path: "", version: "", install_url: "https://ffmpeg.org/download.html" },
+    monetization_thresholds: [],
+  });
+  assert.equal(s?.yt_dlp.found, false);
+  assert.equal(s?.yt_dlp.path, "");
+});
+
 test("normalizeSettings keeps the ffmpeg version when present", () => {
   const s = normalizeSettings({
     dry_run: true, dry_run_source: "env", default_privacy: {}, default_platforms: [],
@@ -450,6 +532,28 @@ test("normalizeAgentStatus requires enabled/running booleans", () => {
   assert.equal(s?.current_job, "job-1");
   assert.equal(s?.accounts[0]?.published, 3);
   assert.equal(normalizeAgentStatus({ enabled: false, running: false })?.accounts.length, 0);
+});
+
+test("normalizeAgentStatus keeps the run outcome (v0.8.1 toggle fix)", () => {
+  // Before the fix the normaliser dropped state/last_error/progress, so
+  // the Agent page could only show Enabled/Idle while a run had silently
+  // errored — the toggle looked broken. These fields must survive.
+  const s = normalizeAgentStatus({
+    enabled: true, running: false, state: "error", progress_pct: 5,
+    queued: 0, approved: 0, published: 0, engine: "rules", demo: false,
+    last_error: "yt-dlp is not installed (no 'yt-dlp' on PATH).",
+    last_run_at: "2026-11-21T21:19:06+00:00", niche: "gaming",
+    auto_post: false, rights_confirmed: true, current_job: null, accounts: [],
+  });
+  assert.equal(s?.state, "error");
+  assert.equal(s?.last_error, "yt-dlp is not installed (no 'yt-dlp' on PATH).");
+  assert.equal(s?.progress_pct, 5);
+  assert.equal(s?.queued, 0);
+  // Older servers omit the outcome fields: safe defaults, never a crash.
+  const bare = normalizeAgentStatus({ enabled: false, running: false });
+  assert.equal(bare?.state, "idle");
+  assert.equal(bare?.last_error, null);
+  assert.equal(bare?.progress_pct, 0);
 });
 
 test("normalizeAgentConfig defaults source_type to video and auto_post to false", () => {

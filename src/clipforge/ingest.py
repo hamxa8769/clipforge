@@ -9,8 +9,11 @@ only):
   ``own_content=True``. The declaration is recorded on the returned
   :class:`SourceInfo`. Downloading another creator's content is refused
   by design — there is no code path that downloads without the flag.
-* yt-dlp is an optional external dependency: if it is not installed, a
-  clear error is raised instead of failing obscurely.
+* yt-dlp is an external dependency: the one-click installer puts it in
+  ``<data_dir>/yt-dlp/`` and ingest uses that bundled binary first
+  (then PATH). If it is not installed anywhere, a clear error is
+  raised that points at the in-app Install button instead of failing
+  obscurely.
 * Every source file is SHA-256 hashed so transcripts can be cached by
   source hash and never re-transcribed (report §2, stage 2).
 """
@@ -19,13 +22,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from clipforge.workflow import ffmpeg_missing_message
+from clipforge.ytdlp_install import resolve_yt_dlp_path, ytdlp_missing_message
 
 ALLOWED_EXTENSIONS = {".mp4", ".mov"}
 ALLOWED_FORMATS = {"mov,mp4,m4a,3gp,3g2,mj2", "mp4", "mov"}
@@ -193,13 +196,18 @@ def ingest_youtube(
     own_content: bool = False,
     out_dir: str | Path = "data/uploads",
     cookies_from_browser: str | None = None,
+    data_dir: str | Path | None = None,
 ) -> SourceInfo:
     """Download a YouTube video **only for the caller's own content**.
 
     The caller must pass ``own_content=True`` — an explicit declaration
     that the video is theirs / they hold the rights to it. Without it,
     :class:`OwnContentRequiredError` is raised and nothing is downloaded.
-    Requires ``yt-dlp`` on PATH; otherwise a clear error is raised.
+    Requires ``yt-dlp``: the one-click installer's bundled binary
+    (``<data_dir>/yt-dlp/``, ``data_dir`` falling back to
+    ``CLIPFORGE_DATA_DIR`` / ``./data``) is tried first, then PATH.
+    When it is missing altogether a clear error is raised that points
+    at the in-app Install button instead of failing obscurely.
     """
     if not own_content:
         raise OwnContentRequiredError(
@@ -209,17 +217,14 @@ def ingest_youtube(
         )
     if not _is_youtube_url(url):
         raise IngestError(f"not a YouTube URL: {url!r}")
-    if shutil.which("yt-dlp") is None:
-        raise IngestError(
-            "yt-dlp is not installed (no 'yt-dlp' on PATH). Install it "
-            "(e.g. `pip install yt-dlp`) to ingest YouTube links, or use a "
-            "local file instead."
-        )
+    yt_dlp = resolve_yt_dlp_path(data_dir)
+    if yt_dlp is None:
+        raise IngestError(ytdlp_missing_message())
     dest = Path(out_dir)
     dest.mkdir(parents=True, exist_ok=True)
     template = str(dest / "%(id)s.%(ext)s")
     cmd = [
-        "yt-dlp",
+        yt_dlp,
         "--no-playlist",
         "--format",
         "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",

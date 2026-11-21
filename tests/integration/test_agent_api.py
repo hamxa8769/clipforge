@@ -214,6 +214,41 @@ def test_agent_stop_on_idle_is_ok():
     assert resp.json()["ok"] is True
 
 
+# ------------------------------------------------------- v0.8.1 toggle fix
+def test_agent_toggle_off_persists_after_run():
+    """The exact UI toggle sequence — PUT enabled=true, POST start,
+    wait done, POST stop — leaves enabled=false in the stored config
+    and in status, so the toggle shows OFF and stays OFF on reload."""
+    _put_config()
+    started = client.post("/api/agent/start")
+    assert started.status_code == 200, started.text
+    done = _wait_for_state("done")
+    assert done["queued"] == 12
+
+    stopped = client.post("/api/agent/stop")
+    assert stopped.status_code == 200
+    assert stopped.json()["state"]["enabled"] is False
+    assert client.get("/api/agent/config").json()["enabled"] is False
+    assert client.get("/api/agent/status").json()["enabled"] is False
+
+
+def test_agent_start_real_video_without_yt_dlp_fails_fast(monkeypatch):
+    """ON with a real video source and no yt-dlp is a 422 at click
+    time — the toggle never shows a fake "running" that silently
+    becomes "error" while ON is still displayed."""
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    saved = _put_config(transcript_text=None)
+    assert saved.status_code == 200, saved.text
+    started = client.post("/api/agent/start")
+    assert started.status_code == 422
+    assert "yt-dlp" in started.json()["detail"]
+    status = client.get("/api/agent/status").json()
+    assert status["running"] is False
+    assert status["state"] == "idle"
+
+
 # ---------------------------------------------------------------- llm providers
 def test_llm_providers_list_contract():
     providers = client.get("/api/llm/providers").json()
