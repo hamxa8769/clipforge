@@ -8,10 +8,13 @@ captions, writes a different title / description / hashtag set for each
 platform, and publishes **only after a human approves** — through the
 platforms' official APIs, and nothing else.
 
-> **Status: v0.6.0 — production-level single-window app.** The clipping
+> **Status: v0.7.0 — production-level single-window app.** The clipping
 > pipeline, review UI, and publishing adapters are under active
 > development. Nothing in this repo posts to any platform automatically,
-> and `DRY_RUN=true` is the default. v0.6.0 adds live niche trending
+> and `DRY_RUN=true` is the default. v0.7.0 adds Creative Commons
+> discovery (Licensed only toggle), licence-checked CC clipping with
+> auto-attribution and generated thumbnails, and live-stream clipping.
+> v0.6.0 adds live niche trending
 > search with a trending-to-agent loop, and a Growth view that turns your
 > own posted-clip stats into advice. v0.5.0 adds a live dashboard, a
 > per-job pipeline view, the ClipForge Agent (approval-first auto-clipping
@@ -230,6 +233,39 @@ Things to know:
 
 Building the exe yourself: `python scripts/build_exe.py --with-web`
 (see `clipforge-server.spec`).
+
+## What's new in v0.7.0
+
+- **Creative Commons discovery** — the Trending page now has a prominent
+  "Licensed only (CC)" toggle (default ON, your last choice is
+  remembered on this device, never forced on). When ON, search uses
+  YouTube's `videoLicense=creativeCommon` filter and every result is
+  verified (`status.license == "creativeCommon"`) before it is shown,
+  with a licence badge on each video. When OFF, trending shows all
+  videos as before — but each result still says clearly whether it can
+  be clipped, and standard-licence videos cannot be clipped.
+- **Licence check** — paste any YouTube URL on the Trending page and the
+  app checks its licence live: Creative Commons / public-domain / your
+  own video → "Can clip"; standard-licence video by another creator →
+  "Can't clip", with a plain-language reason. The agent and the publish
+  path refuse standard-licence third-party videos (422/409).
+- **CC clipping pipeline** — pick a CC video → transcribe → score →
+  clip (9:16, captions) → light edit → NEW thumbnail (generated from
+  the clip, with Regenerate and 2 variants) → SEO → approval queue →
+  schedule/post. For CC-BY sources the description automatically
+  carries the required credit (original title, creator, source URL,
+  licence name + link) — built into SEO so it is never forgotten and
+  never duplicated. Every clip record keeps its source licence info.
+- **Live video clipping** — the "Live now" tab lists live streams with
+  viewers, start time and licence. Capture a bounded segment
+  (60–300 s) from your OWN live stream or a CC-licensed live stream,
+  then the normal clip → SEO → approve → post flow runs. If a live
+  stream cannot be captured (ended, DRM, age/geo restricted), the job
+  fails with a plain-language reason — nothing is faked.
+- If you have v0.6.0 installed, update from inside the app
+  (Settings → Updates, or the "Update available" banner) — no need to
+  download anything by hand. Installing v0.7.0 over v0.6.0 keeps your
+  clips, settings, and keys.
 
 ## What's new in v0.6.0
 
