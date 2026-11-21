@@ -14,11 +14,15 @@ const NAV: { href: string; label: string; hint: string; icon: React.ReactNode }[
   // v0.5.0 (worker 3): Pipeline + Agent pages.
   { href: "/pipeline", label: "Pipeline", hint: "Every step, live, per job", icon: <path d="M4 6h16M4 12h16M4 18h16" /> },
   { href: "/agent", label: "Agent", hint: "Auto-clipping, approval-first", icon: <path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.2-2.6 5.5V18a2 2 0 0 1-2 2h-4.8a2 2 0 0 1-2-2v-3.5C6.2 13.2 5 11.4 5 9a7 7 0 0 1 7-7zM9 22h6" /> },
+  // v0.6.0 (worker B): Trending page — live niche search + agent loop.
+  { href: "/trending", label: "Trending", hint: "What's hot in your niche", icon: <path d="M3 17l6-6 4 4 8-8M15 7h6v6" /> },
   { href: "/automation", label: "Automation", hint: "Runner, rules & history", icon: <path d="M4 12a8 8 0 1 1 2.3 5.6M4 12V7m0 5h5" /> },
   { href: "/channels", label: "Channels", hint: "Connect accounts", icon: <path d="M12 3v10m0 0l-3-3m3 3l3-3M5 21h14" /> },
   { href: "/queue", label: "Approval Queue", hint: "Review clips before posting", icon: <path d="M9 11l3 3 8-8M5 21h14M5 3h14" /> },
   { href: "/schedule", label: "Schedule", hint: "When clips go out", icon: <path d="M8 3v4M16 3v4M3 9h18M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z" /> },
   { href: "/monetization", label: "Monetization", hint: "Thresholds per platform", icon: <path d="M3 17l6-6 4 4 8-8M15 7h6v6" /> },
+  // v0.6.0 (worker C): Growth page — posted-clip stats + advice.
+  { href: "/growth", label: "Growth", hint: "Posted clips & what to post next", icon: <path d="M3 17l6-6 4 4 8-8M15 7h6v6" /> },
   { href: "/settings", label: "Settings", hint: "Keys, FFmpeg & app", icon: <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19 12a7 7 0 0 0-.1-1.2l2-1.5-2-3.4-2.3 1a7 7 0 0 0-2-1.2L14.2 3h-4l-.4 2.7a7 7 0 0 0-2 1.2l-2.3-1-2 3.4 2 1.5A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 2 1.2l.4 2.7h4l.4-2.7a7 7 0 0 0 2-1.2l2.3 1 2-3.4-2-1.5c.1-.4.1-.8.1-1.2z" /> },
 ];
 
