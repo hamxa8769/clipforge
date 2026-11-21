@@ -370,6 +370,15 @@ from clipforge_api.setup import router as setup_router  # noqa: E402
 
 app.include_router(setup_router)
 
+# --- v0.6.0: trending discovery + growth routers (Worker B/C).
+# Registered here, before __main__ adds the "/" StaticFiles mount,
+# so /api/trending/* and /growth/* are never swallowed by static serving.
+from clipforge_api.growth import router as growth_router  # noqa: E402
+from clipforge_api.trending import router as trending_router  # noqa: E402
+
+app.include_router(growth_router)
+app.include_router(trending_router)
+
 
 def _job_out(job: Job, db: Session, detail: bool = False) -> dict:
     """Job summary. ``detail=True`` adds the live-workflow view: stage

@@ -69,8 +69,27 @@ def _truncate(text: str, max_len: int) -> str:
 
 
 def _front_load(keyword: str, text: str, max_len: int) -> str:
-    """Put the keyword first, then the hook text, truncated at a word boundary."""
-    base = f"{keyword.strip()}: {text.strip()}" if text.strip() else keyword.strip()
+    """Put the keyword first, then the hook text, truncated at a word boundary.
+
+    If the text already starts with the keyword (e.g. a niche template
+    produced "gameplay: the clutch moment..."), do not prepend it again —
+    "gameplay: gameplay: ..." is a real bug seen in v0.6.0 trending runs.
+    """
+    text = text.strip()
+    keyword = keyword.strip()
+    if not text:
+        return keyword
+    lowered = text.lower()
+    key_lower = keyword.lower()
+    if (
+        lowered == key_lower
+        or lowered.startswith(key_lower + ":")
+        or lowered.startswith(key_lower + " —")
+        or lowered.startswith(key_lower + " -")
+    ):
+        base = text
+    else:
+        base = f"{keyword}: {text}"
     return _truncate(base, max_len)
 
 

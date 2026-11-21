@@ -115,7 +115,20 @@ def _build_app(base: Path):
     from clipforge_api.app import app
 
     web_out_env = os.environ.get("CLIPFORGE_WEB_OUT", "").strip()
-    web_out = Path(web_out_env) if web_out_env else base / "web" / "out"
+    if web_out_env:
+        web_out = Path(web_out_env)
+    else:
+        # Frozen exe: <exe-dir>/web/out. Source checkout: the export
+        # lives at <repo>/apps/web/out, NOT <repo>/web/out — the old
+        # code only tried the frozen layout, so `python -m
+        # clipforge_api` from a checkout silently ran API-only and
+        # every browser navigation to a UI route answered raw JSON
+        # (v0.6.0: found by the coordinator's live audit).
+        candidates = [base / "web" / "out", base / "apps" / "web" / "out"]
+        web_out = next(
+            (c for c in candidates if (c / "index.html").is_file()),
+            candidates[0],
+        )
     if (web_out / "index.html").is_file():
         # Serve the static export BEFORE API routing — but only for
         # paths that look like files. A plain ``app.mount("/",

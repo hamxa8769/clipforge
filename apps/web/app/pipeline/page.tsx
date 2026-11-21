@@ -245,7 +245,7 @@ function PipelinePageInner() {
         <EmptyState
           title="No jobs yet"
           body="The pipeline shows every step a job goes through — ingest, transcribe, score, clip review, SEO, approve, schedule, publish. Ingest a video first and it will appear here."
-          action={<PrimaryButton href="/jobs">Go to Jobs</PrimaryButton>}
+          action={<PrimaryButton href="/automation">Go to Jobs</PrimaryButton>}
         />
       </div>
     );

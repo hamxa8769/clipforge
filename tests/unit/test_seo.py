@@ -137,3 +137,24 @@ def test_generated_variant_validates_clean():
     variant = seo.generate_seo("youtube", "morning routine", "Stop doing this first")
     assert variant["warnings"] == []
     assert seo.validate("youtube", variant) == []
+
+
+def test_front_load_does_not_double_keyword():
+    """v0.6.0: a title hint already starting with the keyword must not
+    get it prepended again ("gameplay: gameplay: ...")."""
+    seo = load_or_skip("clipforge.seo")
+    variant = seo.generate_seo(
+        "youtube",
+        "gameplay",
+        "the clutch moment nobody expected",
+        title_hint="gameplay: the clutch moment nobody expected",
+    )
+    assert variant["title"].lower().count("gameplay") == 1
+    assert variant["title"].startswith("gameplay:")
+    variant2 = seo.generate_seo(
+        "youtube",
+        "gameplay",
+        "the clutch moment nobody expected",
+        title_hint="the clutch moment nobody expected",
+    )
+    assert variant2["title"].startswith("gameplay: the clutch")
