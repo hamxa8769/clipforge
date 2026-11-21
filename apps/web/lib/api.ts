@@ -135,6 +135,11 @@ export interface Job {
   /** Failed stage + run timing (null when the job never ran). */ failed_stage: string | null;
   started_at: string | null; finished_at: string | null; duration_s: number | null;
   stages: StageEvent[]; worker_runs: WorkerRun[];
+  /** Licence record of the job's source (v0.7.0): canonical key, original
+   * title/channel, and the ready-made attribution credit (null for own
+   * content — no credit needed — and for unknown licences). */
+  source_license: VideoLicense;
+  source_title: string; source_channel: string; attribution_text: string | null;
 }
 export interface SeoVariant { title: string; description: string; hashtags: string[]; }
 export interface Candidate {
@@ -144,6 +149,88 @@ export interface Candidate {
   /** Server-side rendered clip path (e.g. data/clips/<job>/clip_01.mp4), if rendered. */
   file_path: string | null;
   seo: Record<string, SeoVariant>;
+  /** Generated thumbnail for the clip (v0.7.0, CC/live work): URL served by the API, or null until rendered. */
+  thumbnail_url: string | null;
+  /** Stored path of the selected thumbnail variant, when the API sends one. */
+  thumbnail_path: string | null;
+  /** Generated thumbnail variants, exactly as the API sends them
+   * (`thumbnails: [{variant, filename, url}]`, variant 1 = default). */
+  thumbnails: ThumbnailVariant[];
+  /** Variant URLs (derived from `thumbnails`) for the picker UI. */
+  thumbnail_variants: string[];
+  /** Licence of the clip's source video (v0.7.0): "cc" | "standard" | "own" | "unknown". */
+  source_license: VideoLicense;
+  /** Source video the clip was cut from (URL + title + channel), for the attribution block. */
+  source_url: string; source_title: string; source_channel: string;
+  /** Ready-to-publish attribution credit for CC sources; null for own/standard sources. */
+  attribution_text: string | null;
+}
+
+/** One generated thumbnail variant, exactly as the API sends it
+ * (`thumbnails` on a candidate, GET /clips/{id}/thumbnail): variant 1
+ * is the default thumbnail. */
+export interface ThumbnailVariant { variant: number; filename: string; url: string; }
+
+export function normalizeThumbnailVariants(raw: unknown): ThumbnailVariant[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((v) => {
+    const q = (v ?? {}) as Record<string, unknown>;
+    if (typeof v === "string") return { variant: 0, filename: "", url: v };
+    return {
+      variant: typeof q.variant === "number" ? q.variant : 0,
+      filename: typeof q.filename === "string" ? q.filename : "",
+      url: typeof q.url === "string" ? q.url : "",
+    };
+  }).filter((t) => t.url !== "");
+}
+
+/** Normalise one raw candidate payload (unknown wire shape) into a typed Candidate. */
+export function normalizeCandidate(raw: unknown): Candidate {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const seoRaw = (r.seo ?? {}) as Record<string, unknown>;
+  const seo: Record<string, SeoVariant> = {};
+  for (const [k, v] of Object.entries(seoRaw)) {
+    const s = (v ?? {}) as Record<string, unknown>;
+    seo[k] = {
+      title: String(s.title ?? ""),
+      description: String(s.description ?? ""),
+      hashtags: Array.isArray(s.hashtags) ? s.hashtags.map(String) : [],
+    };
+  }
+  const variants = normalizeThumbnailVariants(r.thumbnails);
+  if (variants.length === 0 && Array.isArray(r.thumbnail_variants)) {
+    // Older / demo shape: plain URL strings.
+    for (const u of r.thumbnail_variants) if (typeof u === "string" && u) variants.push({ variant: 0, filename: "", url: u });
+  }
+  return {
+    id: String(r.id ?? ""),
+    job_id: String(r.job_id ?? ""),
+    n: typeof r.n === "number" ? r.n : 0,
+    score: typeof r.score === "number" ? r.score : 0,
+    hook_rating: typeof r.hook_rating === "number" ? r.hook_rating : 0,
+    hook_line: String(r.hook_line ?? ""),
+    reason: String(r.reason ?? ""),
+    transcript_excerpt: String(r.transcript_excerpt ?? ""),
+    start_s: typeof r.start_s === "number" ? r.start_s : 0,
+    end_s: typeof r.end_s === "number" ? r.end_s : 0,
+    status: r.status === "approved" || r.status === "rejected" ? r.status : "pending",
+    file_path: typeof r.file_path === "string" ? r.file_path : null,
+    seo,
+    thumbnail_url: typeof r.thumbnail_url === "string" && r.thumbnail_url ? r.thumbnail_url : null,
+    thumbnail_path: typeof r.thumbnail_path === "string" && r.thumbnail_path ? r.thumbnail_path : null,
+    thumbnails: variants,
+    thumbnail_variants: variants.map((t) => t.url),
+    source_license: normalizeVideoLicense(r.source_license ?? r.license),
+    source_url: typeof r.source_url === "string" ? r.source_url : "",
+    source_title: typeof r.source_title === "string" ? r.source_title : "",
+    source_channel: typeof r.source_channel === "string" ? r.source_channel : "",
+    attribution_text: typeof r.attribution_text === "string" && r.attribution_text ? r.attribution_text : null,
+  };
+}
+
+export function normalizeCandidates(raw: unknown): Candidate[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map(normalizeCandidate);
 }
 export interface Post { id: string; clip_id: string; platform: string; caption: string; scheduled_at: string; status: PostStatus; /** Last publish error, when the backend marked the post failed. */ error: string | null; /** Publish attempts so far. */ attempts: number; }
 export interface Monetization { platform: string; program: string; current: Record<string, number>; threshold: Record<string, number>; progress_pct: number; note?: string; }
@@ -232,6 +319,10 @@ export function normalizeJob(raw: unknown): Job {
     duration_s: asOptNumber(r.duration_s),
     stages: Array.isArray(r.stages) ? r.stages.map(normalizeStageEvent) : [],
     worker_runs: Array.isArray(r.worker_runs) ? r.worker_runs.map(normalizeWorkerRun) : [],
+    source_license: normalizeVideoLicense(r.source_license),
+    source_title: typeof r.source_title === "string" ? r.source_title : "",
+    source_channel: typeof r.source_channel === "string" ? r.source_channel : "",
+    attribution_text: typeof r.attribution_text === "string" && r.attribution_text ? r.attribution_text : null,
   };
 }
 
@@ -1273,6 +1364,153 @@ export async function saveSetupState(patch: SetupStatePatch): Promise<ApiResult>
 }
 
 // ---------------------------------------------------------------------------
+// Video licences + the CC clipping guardrail (v0.7.0).
+//
+// The API reports a licence per video (`license` on trending/live results,
+// `source_license` on clip records) and a plain `can_clip` verdict with a
+// `reason`. Values seen on the wire: YouTube's "creativeCommons" / "youtube"
+// (see the YouTube Data API `status.license`), plus the API's own "own"
+// for the user's own videos. Everything normalises to VideoLicense below
+// so the UI never has to compare raw strings.
+//
+// Guardrail (unchanged from v0.6.0, now explicit): a clip may be made from
+// the user's OWN video or a Creative Commons licensed video — never from a
+// standard-licence video by another creator. When the API does not report
+// a licence at all, the video is treated as NOT clippable (fail closed).
+// ---------------------------------------------------------------------------
+
+/** Normalised licence of a video. "own" = the user's own video.
+ * Wire values seen (v0.7.0, Workers A/B): YouTube's raw `status.license`
+ * ("creativeCommon" / "youtube" / "" = not checked) on trending, live and
+ * licence-check results, and the canonical keys ("cc-by-4.0", "cc-by-3.0",
+ * "cc-by-sa-4.0", "cc0", "public-domain", "own", "standard") on clip/job
+ * records (clipforge.licensing). */
+export type VideoLicense = "cc" | "standard" | "own" | "public-domain" | "unknown";
+
+export function normalizeVideoLicense(raw: unknown): VideoLicense {
+  if (typeof raw !== "string") return "unknown";
+  const v = raw.trim().toLowerCase();
+  if (!v) return "unknown";
+  if (v === "cc" || v === "cc0" || v.startsWith("cc-") || v.startsWith("cc ") || v.startsWith("creativecommon") || v.startsWith("creative common")) return "cc";
+  if (v === "public-domain" || v === "public domain") return "public-domain";
+  if (v === "own" || v === "mine" || v === "owned" || v === "own content") return "own";
+  if (v === "standard" || v === "youtube" || v === "std" || v === "all rights reserved" || v === "standard youtube license" || v === "youtube standard license") return "standard";
+  return "unknown";
+}
+
+/** Short badge label for a licence, for the Trending / Live / review UI. */
+export function licenseBadgeLabel(license: VideoLicense): string {
+  if (license === "cc") return "Creative Commons";
+  if (license === "own") return "Your video";
+  if (license === "public-domain") return "Public domain";
+  if (license === "standard") return "Standard licence";
+  return "Licence unknown";
+}
+
+/** Can this video be clipped? The API's `can_clip` wins when present;
+// otherwise derive it from the licence (own + CC + public-domain = yes,
+// anything else = no). */
+export function deriveCanClip(license: VideoLicense, canClip: boolean | null): { canClip: boolean; reason: string } {
+  if (canClip === true) return { canClip: true, reason: license === "own" ? "Your own video." : license === "cc" ? "Creative Commons licence — free to reuse with attribution." : license === "public-domain" ? "Public domain — free to reuse." : "" };
+  if (canClip === false) {
+    return {
+      canClip: false,
+      reason: license === "standard"
+        ? "Standard YouTube licence — this creator did not allow reuse, so it cannot be clipped."
+        : license === "unknown"
+          ? "No licence information — treated as not clippable until the licence is confirmed."
+          : "Not clippable.",
+    };
+  }
+  if (license === "cc") return { canClip: true, reason: "Creative Commons licence — free to reuse with attribution." };
+  if (license === "own") return { canClip: true, reason: "Your own video." };
+  if (license === "public-domain") return { canClip: true, reason: "Public domain — free to reuse." };
+  if (license === "standard") return { canClip: false, reason: "Standard YouTube licence — this creator did not allow reuse, so it cannot be clipped." };
+  return { canClip: false, reason: "No licence information — treated as not clippable until the licence is confirmed." };
+}
+
+/** Attribution credit for a CC / public-domain source, read-only and
+ * always shown in the description preview for such clips. Falls back to
+ * a generated credit from the source fields when the API did not send
+ * ready-made text (the server builds the same block verbatim). */
+export function attributionForClip(c: Pick<Candidate, "source_license" | "source_title" | "source_channel" | "source_url" | "attribution_text">): string | null {
+  if (c.source_license !== "cc" && c.source_license !== "public-domain") return null;
+  if (c.attribution_text) return c.attribution_text;
+  const title = c.source_title || "Untitled video";
+  const channel = c.source_channel || "Unknown creator";
+  const url = c.source_url ? ` — ${c.source_url}` : "";
+  if (c.source_license === "public-domain") {
+    return `Source: "${title}" by ${channel}${url} — public domain. Please keep this credit in the description.`;
+  }
+  return `Source: "${title}" by ${channel}${url} — licensed under Creative Commons (CC BY). Please keep this credit in the description.`;
+}
+
+/** The `source_license` value to send when creating a clip job from a
+ * video (POST /jobs). The server only accepts canonical keys: YouTube's
+ * raw "creativeCommon" licence is CC BY, so it maps to "cc-by-3.0"
+ * (the key the server's own tests use for YouTube CC videos); a
+ * canonical CC key passes through unchanged. */
+export function jobSourceLicense(video: Pick<TrendingVideo, "license" | "license_key">): string {
+  if (video.license === "own") return "own";
+  if (video.license === "public-domain") return "public-domain";
+  if (video.license === "cc") {
+    const key = (video.license_key || "").trim().toLowerCase();
+    if (key.startsWith("cc-") || key === "cc0") return key;
+    return "cc-by-3.0";
+  }
+  return "standard";
+}
+
+/** POST /jobs — create a clip job from a YouTube video (v0.7.0 CC
+ * pipeline). This is the correct path for clipping a CC / own video:
+ * POST /api/trending/run refuses the trending video itself as a source.
+ * The server gates on the licence: standard-licence sources are refused
+ * (422), CC / public-domain / own sources are accepted. Returns the
+ * ApiResult so the caller can read the new job id (`data.id`) or show
+ * the server's plain-language 422. */
+export async function createYoutubeClipJob(input: {
+  source_url: string; title: string; source_license: string;
+  source_title?: string; source_channel?: string; own_content_declaration?: boolean;
+}): Promise<ApiResult> {
+  return apiPostJson("/jobs", {
+    source_type: "youtube",
+    source_url: input.source_url,
+    title: input.title,
+    source_license: input.source_license,
+    source_title: input.source_title ?? "",
+    source_channel: input.source_channel ?? "",
+    own_content_declaration: input.own_content_declaration ?? false,
+  });
+}
+
+/** GET /clips/{candidateId}/thumbnail — generated thumbnails for a clip. */
+export async function getClipThumbnails(candidateId: string): Promise<{ thumbnail_url: string | null; thumbnails: ThumbnailVariant[] } | null> {
+  const raw = await apiGet<unknown>(`/clips/${encodeURIComponent(candidateId)}/thumbnail`);
+  if (raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  return {
+    thumbnail_url: typeof r.thumbnail_url === "string" ? r.thumbnail_url : null,
+    thumbnails: normalizeThumbnailVariants(r.thumbnails),
+  };
+}
+
+/** POST /clips/{candidateId}/thumbnail — ask the API to regenerate a
+ * clip's thumbnail variant(s) from the rendered clip file. `variant`
+ * regenerates one variant (1 or 2); omitted, both are regenerated.
+ * Returns the ApiResult (with the updated variant list) so callers can
+ * surface the honest states: 404 (no such clip), 409 (no rendered
+ * video yet — run the job first). */
+export async function regenerateThumbnail(candidateId: string, variant?: number): Promise<ApiResult> {
+  return apiPostJson(`/clips/${encodeURIComponent(candidateId)}/thumbnail`, variant ? { variant } : {});
+}
+
+/** POST /clips/{candidateId}/thumbnail/select — pick which generated
+ * variant is the clip's thumbnail. */
+export async function selectThumbnailVariant(candidateId: string, variant: number): Promise<ApiResult> {
+  return apiPostJson(`/clips/${encodeURIComponent(candidateId)}/thumbnail/select`, { variant });
+}
+
+// ---------------------------------------------------------------------------
 // Live niche trending search + trending-to-agent loop (v0.6.0, Worker B).
 // Contract: GET /api/trending/niches | /credentials | /search,
 // POST /api/trending/api-key | /match | /run, GET /api/trending/status
@@ -1294,12 +1532,42 @@ export interface TrendingVideo {
   comment_count: number;
   trend_score: number;
   url: string;
+  /** Licence (v0.7.0): "cc" | "standard" | "own" | "public-domain" | "unknown". */
+  license: VideoLicense;
+  /** Raw licence value from the API ("creativeCommon", "cc-by-4.0", ...),
+   * kept so job creation can send the server a canonical key. */
+  license_key: string;
+  /** False when the server never checked this video's licence: trending
+   * search only verifies licences for `licensed_only` runs ("" on the
+   * wire). Unchecked videos show "check before clipping", not a verdict. */
+  license_checked: boolean;
+  /** Licence details page, when the API sends one. */
+  license_url: string | null;
+  /** Whether this video may be clipped (API verdict, or derived from the licence). */
+  can_clip: boolean;
+  /** Plain-language reason for the can_clip verdict. */
+  reason: string;
+  /** Live videos only (v0.7.0): current concurrent viewers. */
+  concurrent_viewers: number | null;
+  /** Live videos only: when the stream started (ISO). */
+  started_at: string | null;
+  /** "live" for live streams, "video" otherwise. */
+  event_type: string;
 }
 
 export function normalizeTrendingVideo(raw: unknown): TrendingVideo | null {
   const r = (raw ?? {}) as Record<string, unknown>;
   if (typeof r.video_id !== "string" || !r.video_id) return null;
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  // Licence: `license` on trending / licence-check results, `licence`
+  // on live results (live.py spells it with a 'c'). Own videos are
+  // flagged by `is_own` on live results / the licence check.
+  const rawLicense = typeof r.license === "string" ? r.license : (typeof r.licence === "string" ? r.licence : "");
+  const isOwn = r.is_own === true;
+  const license = isOwn ? "own" : normalizeVideoLicense(rawLicense);
+  const licenseChecked = rawLicense.trim() !== "" || typeof r.can_clip === "boolean";
+  const verdict = deriveCanClip(license, typeof r.can_clip === "boolean" ? r.can_clip : null);
+  const reasonRaw = typeof r.reason === "string" && r.reason ? r.reason : (typeof r.clip_reason === "string" ? r.clip_reason : "");
   return {
     video_id: r.video_id,
     title: typeof r.title === "string" ? r.title : "",
@@ -1311,6 +1579,15 @@ export function normalizeTrendingVideo(raw: unknown): TrendingVideo | null {
     comment_count: num(r.comment_count),
     trend_score: num(r.trend_score),
     url: typeof r.url === "string" && r.url ? r.url : `https://www.youtube.com/watch?v=${r.video_id}`,
+    license,
+    license_key: rawLicense,
+    license_checked: licenseChecked,
+    license_url: typeof r.license_url === "string" && r.license_url ? r.license_url : null,
+    can_clip: verdict.canClip,
+    reason: reasonRaw || verdict.reason,
+    concurrent_viewers: typeof r.concurrent_viewers === "number" ? r.concurrent_viewers : (typeof r.viewers === "number" ? r.viewers : null),
+    started_at: typeof r.started_at === "string" ? r.started_at : null,
+    event_type: typeof r.event_type === "string" ? r.event_type : ("viewers" in r || "licence" in r ? "live" : "video"),
   };
 }
 
@@ -1380,9 +1657,15 @@ export async function apiGetResult(path: string): Promise<ApiResult> {
 }
 
 /** GET /api/trending/search — live YouTube results, or the plain-language
- * 422 (no connection / no key) as `error` so the page can show it. */
-export async function searchTrending(niche: string, maxResults = 10): Promise<{ result: TrendingSearchResult | null; error: string | null }> {
-  const res = await apiGetResult(`/api/trending/search?niche=${encodeURIComponent(niche)}&max_results=${maxResults}`);
+ * 422 (no connection / no key) as `error` so the page can show it.
+ * v0.7.0: `licensedOnly` adds `licensed_only=true` (CC / licensed videos
+ * only, licences verified per video). Without it the server does NOT
+ * verify licences (wire `license` is "" = not checked) — the page then
+ * offers a per-video licence check instead of guessing a verdict. */
+export async function searchTrending(niche: string, maxResults = 10, opts: { licensedOnly?: boolean } = {}): Promise<{ result: TrendingSearchResult | null; error: string | null }> {
+  const q = new URLSearchParams({ niche, max_results: String(maxResults) });
+  if (opts.licensedOnly) q.set("licensed_only", "true");
+  const res = await apiGetResult(`/api/trending/search?${q.toString()}`);
   if (!res.ok) return { result: null, error: res.error ?? "Trending search failed." };
   const r = (res.data ?? {}) as Record<string, unknown>;
   return {
@@ -1394,6 +1677,86 @@ export async function searchTrending(niche: string, maxResults = 10): Promise<{ 
     },
     error: null,
   };
+}
+
+/** GET /api/trending/live — live streams in a niche, right now (v0.7.0,
+ * separate endpoint, NOT event_type on search). Each result carries
+ * `viewers` (concurrent), `started_at`, `licence` and `can_clip` —
+ * true only for the user's own live streams and CC licensed ones. */
+export async function searchLive(niche: string, maxResults = 10, opts: { licensedOnly?: boolean } = {}): Promise<{ result: TrendingSearchResult | null; error: string | null }> {
+  const q = new URLSearchParams({ niche, max_results: String(maxResults) });
+  if (opts.licensedOnly) q.set("licensed_only", "true");
+  const res = await apiGetResult(`/api/trending/live?${q.toString()}`);
+  if (!res.ok) return { result: null, error: res.error ?? "Live search failed." };
+  const r = (res.data ?? {}) as Record<string, unknown>;
+  return {
+    result: {
+      results: normalizeTrendingVideos(r.results),
+      source: typeof r.source === "string" ? r.source : "",
+      account: typeof r.account === "string" ? r.account : "",
+      notice: typeof r.notice === "string" ? r.notice : "",
+    },
+    error: null,
+  };
+}
+
+/** Licence check for one pasted YouTube URL (v0.7.0).
+ * Contract (apps/api/clipforge_api/trending.py, videos_router):
+ * GET /api/videos/license?url=... -> {video_id, title, channel,
+ * channel_id, license, license_url, can_clip, reason}. `license` is the
+ * raw YouTube value ("creativeCommon" / "youtube" / ""); `can_clip` is
+ * true only for a CC video or the user's own video. Null when the
+ * endpoint has not landed yet (the page says so instead of inventing a
+ * verdict). */
+export interface LicenseCheck {
+  video_id: string; title: string; channel: string;
+  license: VideoLicense; license_key: string; license_url: string | null;
+  can_clip: boolean; reason: string; url: string;
+}
+
+export function normalizeLicenseCheck(raw: unknown, fallbackUrl = ""): LicenseCheck | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (typeof r.video_id !== "string" || !r.video_id) return null;
+  const rawLicense = typeof r.license === "string" ? r.license : (typeof r.licence === "string" ? r.licence : "");
+  // The licence check matches the video against the connected channel:
+  // a standard-licence video that IS the user's own still returns
+  // can_clip=true, so own-ness comes from the verdict + reason, not the
+  // licence value alone.
+  const isOwn = r.is_own === true || (typeof r.can_clip === "boolean" && r.can_clip === true && normalizeVideoLicense(rawLicense) === "standard" && typeof r.reason === "string" && /own video/i.test(r.reason));
+  const license = isOwn ? "own" : normalizeVideoLicense(rawLicense);
+  const verdict = deriveCanClip(license, typeof r.can_clip === "boolean" ? r.can_clip : null);
+  return {
+    video_id: r.video_id,
+    title: typeof r.title === "string" ? r.title : "",
+    channel: typeof r.channel === "string" ? r.channel : (typeof r.channel_title === "string" ? r.channel_title : ""),
+    license,
+    license_key: rawLicense,
+    license_url: typeof r.license_url === "string" && r.license_url ? r.license_url : null,
+    can_clip: verdict.canClip,
+    reason: typeof r.reason === "string" && r.reason ? r.reason : verdict.reason,
+    url: typeof r.url === "string" && r.url ? r.url : fallbackUrl,
+  };
+}
+
+export async function checkVideoLicense(url: string): Promise<{ check: LicenseCheck | null; error: string | null }> {
+  const res = await apiGetResult(`/api/videos/license?url=${encodeURIComponent(url)}`);
+  if (!res.ok) return { check: null, error: res.error ?? "Licence check failed." };
+  const check = normalizeLicenseCheck(res.data, url);
+  if (!check) return { check: null, error: "The licence check returned a video the app could not read." };
+  return { check, error: null };
+}
+
+/** Live capture (v0.7.0): start capturing a live stream so it can be
+ * clipped. Contract (apps/api/clipforge_api/trending.py):
+ * POST /api/trending/live/capture {video_id, duration_s} (202) ->
+ * {job_id, video_id, title, licence, is_own, duration_s, message,
+ * notice}. The licence is re-verified server-side; only the user's own
+ * live stream or a CC licensed one is captured. Returns the ApiResult
+ * so the page can show the job id + live progress, or the honest
+ * "not available in this build yet" state when the endpoint has not
+ * landed (404). `duration_s` is bounded 60–300s server-side. */
+export async function startLiveCapture(videoId: string, durationS: number): Promise<ApiResult> {
+  return apiPostJson("/api/trending/live/capture", { video_id: videoId, duration_s: durationS });
 }
 
 export interface TrendingMatch {

@@ -54,6 +54,7 @@ from clipforge.db import (
     RetentionPoint,
     SocialAccount,
 )
+from clipforge.licensing import merge_records, record_from_obj
 from clipforge.publishing.limits import DAILY_CAPS
 from clipforge.retention import adjust_candidate_scores, feedback_from_points
 from clipforge.scheduler import published_today_count
@@ -252,13 +253,31 @@ def _seo_keyword_for(session: Session, candidate: ClipCandidate) -> str:
     return ((job.title if job else "") or "").split(":")[0].strip() or "clip"
 
 
+def _attribution_for(session: Session, candidate: ClipCandidate) -> str:
+    """Credit block for a candidate (candidate record wins, job fills gaps)."""
+    job = session.get(Job, candidate.job_id)
+    record = merge_records(record_from_obj(candidate), record_from_obj(job) if job else {})
+    return record["attribution_text"] or ""
+
+
+def _licence_for_post(session: Session, candidate: ClipCandidate) -> dict:
+    """Licence record copied onto a Post (candidate wins, job fills gaps)."""
+    job = session.get(Job, candidate.job_id)
+    return merge_records(record_from_obj(candidate), record_from_obj(job) if job else {})
+
+
 def generate_seo_for_candidate(
     session: Session,
     candidate: ClipCandidate,
     platforms: list[str] | None = None,
     generated_by: str = "automation",
 ) -> dict[str, dict]:
-    """Generate + store SEO variants for a candidate. Returns platform → seo."""
+    """Generate + store SEO variants for a candidate. Returns platform → seo.
+
+    v0.7.0: a CC / public-domain source's credit block is built into
+    every variant (see :mod:`clipforge.seo`) — re-running this keeps
+    exactly one block, never two.
+    """
     platforms = platforms or list(PLATFORMS)
     keyword = _seo_keyword_for(session, candidate)
     variants = generate_all_seo(
@@ -266,6 +285,7 @@ def generate_seo_for_candidate(
         candidate.hook_line or "",
         candidate.hook_line or "",
         candidate.duration_s or 30.0,
+        attribution_text=_attribution_for(session, candidate),
     )
     stored: dict[str, dict] = {}
     for platform in platforms:
@@ -594,6 +614,7 @@ def auto_queue_candidate(
                 candidate.hook_line or "",
                 candidate.hook_line or "",
                 candidate.duration_s or 30.0,
+                attribution_text=_attribution_for(session, candidate),
             ).get(platform, {})
         # Staggered scheduling: when the rule is on, each platform's
         # post lands in its own best window (IG 11, FB 13, YT 15,
@@ -616,6 +637,7 @@ def auto_queue_candidate(
             status=PostStatus.PENDING_APPROVAL.value,
             seo_json=seo,
             video_path=candidate.file_path,
+            **_licence_for_post(session, candidate),
         )
         session.add(post)
         session.commit()

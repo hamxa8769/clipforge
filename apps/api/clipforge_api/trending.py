@@ -19,17 +19,54 @@ Endpoints:
   GET  /api/trending/jobs/{id}    (job record: trending topic + each
                                    post's platform + provider video id)
 
+Live clipping (v0.7.0, Worker C) — same router, ``/api/trending/live``:
+
+  GET  /api/trending/live              (live streams in a niche, right
+                                        now; ``licensed_only=true``
+                                        keeps Creative Commons only)
+  GET  /api/trending/live/mine         (the connected channel's own
+                                        live broadcasts)
+  POST /api/trending/live/capture      (record a bounded 60–300s
+                                        segment of an own / CC live
+                                        stream, then run the normal
+                                        pipeline on it — transcribe ->
+                                        score -> clip -> SEO -> approval
+                                        queue; 202, poll GET /jobs/{id})
+  POST /api/trending/live/{job_id}/cancel (stop a running live capture)
+
 Rights guardrail (applies to every string in this module): the agent
 clips ONLY the user's own videos or videos they have rights / a licence
 to use. Trending shows what topics are working — clips are made from
 YOUR videos. A trending video URL is refused as a clip source
 (422, plain language) by :func:`clipforge.trending.refuse_trending_source`
-and by the agent's own validation.
+and by the agent's own validation. Live clipping extends the same rule
+to live streams: only the user's OWN live streams and Creative Commons
+licensed live streams may be captured — the licence is re-verified
+against the YouTube API at capture time, never trusted from the client.
+
+Creative Commons discovery (v0.7.0, Worker A):
+
+  GET  /api/trending/search?licensed_only=true — trending search
+       restricted to CC-licensed videos (verified per video, see
+       ``clipforge.trending.search_trending``). Default false.
+  GET  /api/videos/license?url=<youtube-url> — licence check for one
+       video: {video_id, title, channel, channel_id, license,
+       license_url, can_clip, reason}. can_clip is true only for a
+       Creative Commons video or the user's own video.
+  POST /api/trending/run — the licence guardrail: when YouTube
+       credentials are available, a real (non-demo) video source is
+       verified live; a standard-licence third-party video is refused
+       (422), an unverifiable video is refused honestly. When no
+       credentials exist the server cannot verify, so the run proceeds
+       on the user's rights confirmation (v0.6.0 behaviour) — it never
+       invents a licence verdict. Demo-transcript runs skip the check
+       (they download nothing).
 """
 
 from __future__ import annotations
 
 import os
+import threading
 from pathlib import Path
 
 import httpx
@@ -40,23 +77,51 @@ from sqlalchemy.orm import Session
 from clipforge import agent as agent_mod
 from clipforge.auth.secrets import SecretStore
 from clipforge.auth.settings_store import SettingsStore
-from clipforge.db import ClipCandidate, Job, Post, session_factory
+from clipforge.db import ClipCandidate, Job, JobStatus, Post, WorkerRun, session_factory
+from clipforge.live import (
+    LIVE_DEFAULT_DURATION_S,
+    LIVE_MAX_DURATION_S,
+    LIVE_MIN_DURATION_S,
+    LIVE_NOTICE,
+    LiveError,
+    canonical_source_license,
+    clear_live_cancel,
+    list_own_live,
+    request_live_cancel,
+    resolve_own_channel_id,
+    search_live,
+    verify_live_video,
+)
 from clipforge.niches import PRESET_NAMES, niche_label
 from clipforge.trending import (
     TRENDING_NOTICE,
     TrendingError,
+    check_video_license,
     credentials_status,
+    extract_youtube_video_id,
     is_trending_source,
     match_own_video,
+    own_channel_id,
     resolve_credentials,
     save_youtube_api_key,
     search_trending,
     youtube_api_key_view,
 )
+from clipforge.worker import run_job as worker_run_job
 
 router = APIRouter(prefix="/api/trending", tags=["trending"])
 
+# Licence-check router (v0.7.0, Worker A): GET /api/videos/license.
+# A separate router so the path is /api/videos/*, not /api/trending/*.
+videos_router = APIRouter(prefix="/api/videos", tags=["videos"])
+
 _Session = session_factory()
+
+# Live capture jobs run in background threads (a capture records for
+# 60–300s, so the POST returns 202 and the UI polls GET /jobs/{id}).
+# The dict only holds the threads so cancel can tell a running capture
+# from a not-yet-started one; the job row is the source of truth.
+_LIVE_THREADS: dict[str, threading.Thread] = {}
 
 
 def _data_dir() -> Path:
@@ -128,6 +193,26 @@ class TrendingRunIn(BaseModel):
     demo_transcript_text: str | None = None
 
 
+class LiveCaptureIn(BaseModel):
+    """Start a live capture.
+
+    ``video_url`` (or ``video_id``) is the live stream to record. The
+    licence is NOT trusted from the client: the endpoint re-verifies
+    it against the YouTube API, and only the user's own live stream
+    or a Creative Commons licensed live stream is captured.
+    ``duration_s`` is the bounded recording length (60–300s).
+    """
+
+    video_url: str | None = None
+    video_id: str | None = None
+    duration_s: int = Field(
+        default=LIVE_DEFAULT_DURATION_S, ge=LIVE_MIN_DURATION_S, le=LIVE_MAX_DURATION_S
+    )
+    niche: str = "general"
+    top_n: int = Field(default=3, ge=1, le=10)
+    rights_confirmed: bool = False
+
+
 # ------------------------------------------------------------------ endpoints
 @router.get("/niches")
 def list_niches():
@@ -168,8 +253,14 @@ def save_api_key(payload: ApiKeyIn):
 
 
 @router.get("/search")
-def trending_search(niche: str = "general", max_results: int = 10):
+def trending_search(niche: str = "general", max_results: int = 10, licensed_only: bool = False):
     """Live trending videos for a niche, ranked by trend score.
+
+    ``licensed_only=true`` restricts the search to Creative Commons
+    licensed videos: ``videoLicense=creativeCommon`` on search.list
+    plus a per-video ``status.license`` verification (anything that
+    fails verification is dropped). Default false: the v0.6.0 search
+    over all trending videos.
 
     422 (plain language) when no YouTube connection / API key exists
     or YouTube rejects the call — the page shows that as its
@@ -185,18 +276,52 @@ def trending_search(niche: str = "general", max_results: int = 10):
                 niche,
                 credentials=credentials,
                 max_results=max(1, min(25, max_results)),
+                licensed_only=licensed_only,
                 client=client,
             )
     except TrendingError as exc:
         raise HTTPException(422, str(exc)) from exc
     return {
         "niche": niche,
+        "licensed_only": licensed_only,
         "results": [video.to_dict() for video in videos],
         "count": len(videos),
         "source": credentials.kind,
         "account": credentials.account_name,
         "notice": TRENDING_NOTICE,
     }
+
+
+@videos_router.get("/license")
+def check_license(url: str):
+    """Licence check for one YouTube video (v0.7.0, Worker A).
+
+    Returns ``{video_id, title, channel, channel_id, license,
+    license_url, can_clip, reason}``. ``can_clip`` is true only for a
+    Creative Commons licensed video or the user's own video (matched
+    against the connected YouTube channel id when one is connected).
+    A standard-licence video returns ``can_clip=false`` with the
+    plain-language reason — never a faked licence result.
+
+    422 (plain language) when no YouTube connection / API key exists,
+    the URL is not a YouTube video URL, YouTube has no such video, or
+    the API call fails.
+    """
+    try:
+        credentials = resolve_credentials(_secrets(), _settings_store())
+    except TrendingError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    try:
+        # No client passed: check_video_license extracts + validates
+        # the video id BEFORE opening any HTTP client, so a bad URL
+        # fails fast with a plain 422 instead of a client error.
+        return check_video_license(
+            url,
+            credentials=credentials,
+            own_channel_id=own_channel_id(_secrets()),
+        )
+    except TrendingError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @router.post("/match")
@@ -220,7 +345,10 @@ def start_trending_run(payload: TrendingRunIn):
     (tuned to the trend) -> approval queue -> schedule / publish.
 
     422 when rights are not confirmed, when the source IS the trending
-    video (guardrail), or when the channel cannot be matched. 409
+    video (guardrail), when the source is a standard-licence
+    third-party video or its licence cannot be verified (v0.7.0
+    licence guardrail, when YouTube credentials exist), or when the
+    channel cannot be matched. 409
     when the agent is already running. The run itself is async: poll
     GET /api/trending/status (or the pipeline) for progress.
     """
@@ -251,6 +379,42 @@ def start_trending_run(payload: TrendingRunIn):
             raise HTTPException(422, str(exc)) from exc
         source_url = matched["own_video_url"]
         source_type = "video"
+    if source_type == "video" and not payload.demo_transcript_text:
+        # Licence guardrail (v0.7.0, Worker A): verify the source
+        # video's licence live, when YouTube credentials exist. A
+        # standard-licence third-party video is refused (422, plain
+        # language); an unverifiable video is refused honestly. When
+        # no credentials exist the server cannot verify, so the run
+        # proceeds on the user's rights confirmation (v0.6.0
+        # behaviour) — it never invents a licence verdict. The one
+        # exception is a standard-licence video whose ownership
+        # cannot be established at all (API-key-only setup, no
+        # connected channel): the rights attestation stands, because
+        # refusing it would also refuse the user's own videos.
+        # Demo-transcript runs skip this (they download nothing) and
+        # channel-matched runs skip it (the match is an own video by
+        # construction).
+        try:
+            credentials = resolve_credentials(_secrets(), _settings_store())
+        except TrendingError:
+            credentials = None
+        if credentials is not None:
+            own_id = own_channel_id(_secrets())
+            try:
+                # No client passed: check_video_license validates the
+                # video id before opening any HTTP client.
+                licence = check_video_license(
+                    source_url,
+                    credentials=credentials,
+                    own_channel_id=own_id,
+                )
+            except TrendingError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            if not licence["can_clip"]:
+                if licence["license"] == "youtube" and not own_id:
+                    pass  # ownership unknowable; rights attestation stands
+                else:
+                    raise HTTPException(422, licence["reason"])
     config = agent_mod.AgentConfig(
         enabled=True,
         source_type=source_type,
@@ -336,4 +500,231 @@ def trending_job(job_id: str, db: Session = Depends(get_db)):
     }
 
 
-__all__ = ["router"]
+# ------------------------------------------------------------------ live (v0.7.0, Worker C)
+def _run_live_job_thread(job_id: str) -> None:
+    """Run one live job through the worker (own session, own thread)."""
+    session = _Session()
+    try:
+        worker_run_job(session, job_id, data_dir=_data_dir())
+    finally:
+        session.close()
+
+
+@router.get("/live")
+def list_live(niche: str = "general", licensed_only: bool = False, max_results: int = 10):
+    """Live streams in a niche, right now.
+
+    ``search.list`` with ``eventType=live`` (+ ``videoLicense=
+    creativeCommon`` when ``licensed_only``), licence verified per
+    video via ``videos.list``. Each result carries ``viewers``
+    (concurrent), ``started_at``, ``licence`` and ``can_clip`` — True
+    only for the user's own live streams and Creative Commons
+    licensed ones. 422 (plain language) when no YouTube connection /
+    API key exists or YouTube rejects the call. Never invented streams.
+    """
+    try:
+        credentials = resolve_credentials(_secrets(), _settings_store())
+    except TrendingError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            own_id = resolve_own_channel_id(_secrets(), credentials=credentials, client=client)
+            videos = search_live(
+                niche,
+                credentials=credentials,
+                licensed_only=licensed_only,
+                own_channel_id=own_id,
+                max_results=max(1, min(25, max_results)),
+                client=client,
+            )
+    except LiveError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {
+        "niche": niche,
+        "licensed_only": licensed_only,
+        "results": [video.to_dict() for video in videos],
+        "count": len(videos),
+        "source": credentials.kind,
+        "account": credentials.account_name,
+        "notice": LIVE_NOTICE,
+    }
+
+
+@router.get("/live/mine")
+def list_my_live():
+    """The connected channel's current live broadcasts.
+
+    ``liveBroadcasts.list`` (``mine=true``) when the OAuth token
+    allows it, else a channel search with ``eventType=live``. Every
+    result is the user's own: ``is_own`` and ``can_clip`` are True.
+    422 (plain language) when no channel is connected or YouTube
+    refuses the call.
+    """
+    try:
+        credentials = resolve_credentials(_secrets(), _settings_store())
+    except TrendingError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            own_id = resolve_own_channel_id(_secrets(), credentials=credentials, client=client)
+            videos = list_own_live(credentials=credentials, own_channel_id=own_id, client=client)
+    except LiveError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {
+        "results": [video.to_dict() for video in videos],
+        "count": len(videos),
+        "own_channel_id": own_id,
+        "notice": LIVE_NOTICE,
+    }
+
+
+@router.post("/live/capture", status_code=202)
+def start_live_capture(payload: LiveCaptureIn, db: Session = Depends(get_db)):
+    """Record a bounded segment of a live stream, then clip it.
+
+    The stream's licence is re-verified against the YouTube API
+    (never trusted from the request): only the user's own live stream
+    or a Creative Commons licensed live stream is captured — a
+    standard-licence third-party stream is refused with 422 and a
+    plain-language reason. The capture records ``duration_s`` seconds
+    (60–300s) with yt-dlp, then the job runs the NORMAL worker
+    pipeline on the recording (transcribe -> score -> clip -> SEO ->
+    approval queue). 202 with the job id; poll GET /jobs/{id} for
+    progress, and POST /api/trending/live/{job_id}/cancel to stop it.
+    """
+    if not payload.rights_confirmed:
+        raise HTTPException(
+            422,
+            "Please confirm the source is yours or licensed first — "
+            "live clipping only works on your own live streams and "
+            "Creative Commons licensed live streams.",
+        )
+    video_id = extract_youtube_video_id(payload.video_url) or (payload.video_id or "").strip()
+    if not video_id or len(video_id) != 11:
+        raise HTTPException(
+            422, "Give a YouTube live video URL (youtube.com/watch?v=… or youtu.be/…)."
+        )
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    try:
+        credentials = resolve_credentials(_secrets(), _settings_store())
+    except TrendingError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            own_id = resolve_own_channel_id(_secrets(), credentials=credentials, client=client)
+            verified = verify_live_video(
+                video_id, credentials=credentials, own_channel_id=own_id, client=client
+            )
+    except LiveError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    if not verified.can_clip:
+        raise HTTPException(422, verified.clip_reason)
+    job = Job(
+        source_type="live",
+        source_url=url,
+        title=verified.title or f"Live capture — {payload.niche}",
+        own_content=True,
+        status=JobStatus.PENDING.value,
+        # Licence record (Worker A vocabulary): feeds the worker's
+        # thumbnail + attribution step and the publish guardrail.
+        source_license=canonical_source_license(verified.licence, verified.is_own),
+        source_title=verified.title or None,
+        source_channel=verified.channel_title or None,
+        meta_json={
+            "live": True,
+            "live_video_id": video_id,
+            "live_title": verified.title,
+            "live_channel": verified.channel_title,
+            "live_licence": verified.licence,
+            "live_is_own": verified.is_own,
+            "live_duration_s": payload.duration_s,
+            "niche": payload.niche,
+            "top_n": payload.top_n,
+            "caption_style": "bold-pop",
+        },
+    )
+    db.add(job)
+    db.commit()
+    thread = threading.Thread(
+        target=_run_live_job_thread,
+        args=(job.id,),
+        daemon=True,
+        name=f"clipforge-live-{job.id}",
+    )
+    _LIVE_THREADS[job.id] = thread
+    thread.start()
+    return {
+        "ok": True,
+        "job_id": job.id,
+        "status": JobStatus.PENDING.value,
+        "video_id": video_id,
+        "title": verified.title,
+        "licence": verified.licence,
+        "is_own": verified.is_own,
+        "duration_s": payload.duration_s,
+        "message": (
+            f"Recording {payload.duration_s} seconds of the live stream — "
+            f"poll GET /jobs/{job.id} for progress. The recorded segment "
+            "then goes through the normal clip -> SEO -> approval flow."
+        ),
+        "notice": LIVE_NOTICE,
+    }
+
+
+@router.post("/live/{job_id}/cancel")
+def cancel_live_capture(job_id: str, db: Session = Depends(get_db)):
+    """Stop a live capture.
+
+    A running capture stops within a few seconds (the partial
+    recording is deleted, the job goes ``cancelled``) — poll
+    GET /jobs/{id} for the final status. A job that has not started
+    yet is cancelled outright. Finished jobs cannot be cancelled.
+    404 when the job does not exist, 409 when it is already finished
+    or is not a live job.
+    """
+    job = db.get(Job, job_id)
+    if job is None:
+        raise HTTPException(404, f"job {job_id} not found")
+    if job.source_type != "live":
+        raise HTTPException(
+            409,
+            "Only live capture jobs can be cancelled here — use "
+            f"POST /jobs/{job_id}/cancel for other jobs.",
+        )
+    if job.status in {
+        JobStatus.REVIEW.value,
+        JobStatus.READY.value,
+        JobStatus.FAILED.value,
+        JobStatus.BLOCKED.value,
+        JobStatus.CANCELLED.value,
+    }:
+        raise HTTPException(409, f"job is already '{job.status}' — cannot cancel it")
+    thread = _LIVE_THREADS.get(job.id)
+    if thread is not None and thread.is_alive():
+        request_live_cancel(job.id)
+        return {
+            "ok": True,
+            "job_id": job.id,
+            "status": job.status,
+            "message": (
+                "Cancel requested — the recording will stop within a few "
+                f"seconds and no clip will be made from it. Poll "
+                f"GET /jobs/{job.id} for the final status."
+            ),
+        }
+    job.status = JobStatus.CANCELLED.value
+    job.error = "Live capture cancelled before recording started."
+    db.query(WorkerRun).filter_by(job_id=job.id, status="running").update(
+        {"status": "cancelled", "outcome": "cancelled by user"}
+    )
+    db.commit()
+    clear_live_cancel(job.id)
+    return {
+        "ok": True,
+        "job_id": job.id,
+        "status": JobStatus.CANCELLED.value,
+        "message": "Live capture cancelled.",
+    }
+
+
+__all__ = ["router", "videos_router"]

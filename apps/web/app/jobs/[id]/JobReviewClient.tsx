@@ -13,7 +13,7 @@
 // old candidates are dropped and re-derived, stage history is kept.
 "use client";
 import { useEffect, useState } from "react";
-import { getJob, apiGet, normalizeJob, pipelineProgress, PROCESSING_STATUSES, retryJob, type Candidate, type Job } from "@/lib/api";
+import { getJob, apiGet, normalizeCandidates, normalizeJob, pipelineProgress, PROCESSING_STATUSES, retryJob, type Candidate, type Job } from "@/lib/api";
 import { demoCandidates, demoJobs } from "@/lib/mock";
 import { Card, ErrorBanner, PrimaryButton, ProgressBar, SecondaryButton } from "@/components/ui";
 import PipelineSteps from "@/components/PipelineSteps";
@@ -41,7 +41,7 @@ export default function JobReviewClient({ id }: { id: string }) {
       ]);
       if (cancelled) return;
       if (fetchedJob !== null) setJob(fetchedJob);
-      if (fetchedCandidates !== null) setCandidates(fetchedCandidates);
+      if (fetchedCandidates !== null) setCandidates(normalizeCandidates(fetchedCandidates));
       setLive(health !== null);
     })();
     return () => {
@@ -57,7 +57,7 @@ export default function JobReviewClient({ id }: { id: string }) {
         getJob(id), apiGet<Candidate[]>(`/jobs/${id}/candidates`),
       ]);
       if (fetchedJob !== null) setJob(fetchedJob);
-      if (fetchedCandidates !== null) setCandidates(fetchedCandidates);
+      if (fetchedCandidates !== null) setCandidates(normalizeCandidates(fetchedCandidates));
     }, 10000);
     return () => clearInterval(t);
   }, [live, job.status, id]);

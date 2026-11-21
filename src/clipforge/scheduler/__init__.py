@@ -28,12 +28,15 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from clipforge.db import (
+    ClipCandidate,
+    Job,
     Post,
     PostStatus,
     SchedulerRun,
     SocialAccount,
     init_db,
 )
+from clipforge.licensing import merge_records, publish_blocked_reason, record_from_obj
 from clipforge.publishing import meta as meta_adapter
 from clipforge.publishing import tiktok as tiktok_adapter
 from clipforge.publishing import youtube as youtube_adapter
@@ -181,6 +184,24 @@ def _publish_due(
     recording above stays readable)."""
     results: list[dict] = []
     for post in due_posts(session, now):
+        # v0.7.0 defence in depth: the scheduler is a second publish path,
+        # so it refuses Standard-licence sources too — the post stays
+        # scheduled with a plain-language note (never published, never
+        # retried into publication).
+        record = record_from_obj(post)
+        if not record["source_license"] and post.clip_candidate_id:
+            cand = session.get(ClipCandidate, post.clip_candidate_id)
+            if cand is not None:
+                job = session.get(Job, cand.job_id)
+                record = merge_records(record_from_obj(cand), record_from_obj(job) if job else {})
+        blocked = publish_blocked_reason(record["source_license"])
+        if blocked:
+            post.error = blocked
+            session.commit()
+            results.append(
+                {"post_id": post.id, "status": "skipped_licence", "message": blocked}
+            )
+            continue
         cap = daily_cap_for(session, post)
         done = published_today_count(session, post.account_id, post.platform, now)
         if done >= cap:

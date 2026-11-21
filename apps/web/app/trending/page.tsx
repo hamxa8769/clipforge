@@ -1,23 +1,43 @@
-// Trending page (v0.6.0, Worker B) — live niche trending search +
-// the full loop back into the Agent.
+// Trending page (v0.7.0) — live niche trending search + CC-licensed
+// discovery + live clipping, and the full loop back into the Agent.
 //
 //   - Pick a niche (presets + free text) -> live YouTube search for
 //     videos trending in that niche right now (search.list by niche
 //     keywords, then videos.list for views / likes / published date),
 //     ranked by trend score.
+//   - "Licensed only (CC)" toggle (DEFAULT ON, remembered in
+//     localStorage — the server has no settings field for it yet): when
+//     ON, only Creative Commons / licensed videos are shown and only
+//     those can be clipped. When OFF, all trending videos show — but
+//     every result says plainly whether it CAN be clipped ("Can clip —
+//     Creative Commons" / "Can clip — your video") or CANNOT ("Can't
+//     clip — standard licence" + reason), and the Clip buttons stay
+//     disabled for verified non-clippable videos. Videos whose licence
+//     the search did not verify show "Licence not checked" with a
+//     per-video check instead of a guessed verdict. The toggle is never
+//     forced on: the user's last choice is remembered.
+//   - "Check a video URL": paste a YouTube URL -> GET /api/videos/license
+//     -> licence + can_clip verdict + reason, with "Clip this video" only
+//     when clippable.
 //   - Pick a trending video as a TOPIC -> the agent matches it to YOUR
 //     OWN source video on that topic (own video URL, or a channel URL
 //     matched by title overlap) -> transcribe -> score -> clip -> SEO
-//     tuned to the trend -> approval queue -> schedule / publish.
+//     tuned to the trend -> approval queue -> schedule / publish. Or,
+//     for a clippable video, "Clip this video" creates a clip job from
+//     THAT video (POST /jobs with the licence — own video or Creative
+//     Commons, with attribution). /api/trending/run is NOT used for
+//     this: it refuses the trending video itself as a source.
+//   - "Live now" tab: live streams in the niche (GET /api/trending/live),
+//     with viewers + started time + licence badge + can_clip state, and
+//     "Capture & clip" (pick a capture duration, 60–300s) for clippable
+//     live videos (POST /api/trending/live/capture).
 //   - Live progress: polls GET /api/trending/status while the run is
 //     going, then links to the pipeline and the approval queue.
 //
-// Rights guardrail (stated on the page and enforced by the API): the
-// agent clips ONLY your own videos or videos you have rights / a
-// licence to use. Trending shows what topics are working — your clips
-// are made from YOUR videos. A trending video URL is refused as a
-// clip source (422) — never download and re-upload another creator's
-// video.
+// Rights guardrail (stated on the page and enforced by the API): clips
+// are made from YOUR videos or Creative Commons licensed videos — never
+// from standard-licence videos by other creators. A standard-licence
+// video URL is refused as a clip source (422).
 //
 // Until the endpoints land, the page says so plainly and the search
 // controls stay disabled — it never shows invented videos. With no
@@ -27,9 +47,10 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
-  getTrendingCredentials, getTrendingJob, getTrendingStatus, matchTrendingTopic,
-  saveYoutubeApiKey, searchTrending, startTrendingRun,
-  NICHE_PRESETS, type TrendingCredentials, type TrendingJob, type TrendingVideo,
+  checkVideoLicense, createYoutubeClipJob, getJob, getTrendingCredentials, getTrendingJob, getTrendingStatus,
+  jobSourceLicense, licenseBadgeLabel, matchTrendingTopic, saveYoutubeApiKey, searchLive, searchTrending,
+  startLiveCapture, startTrendingRun, NICHE_PRESETS, type LicenseCheck, type TrendingCredentials, type TrendingJob,
+  type TrendingVideo, type VideoLicense,
 } from "@/lib/api";
 import {
   Card, CardHeader, DemoBadge, EmptyState, ErrorBanner, PrimaryButton,
@@ -37,13 +58,25 @@ import {
 } from "@/components/ui";
 
 const GUARDRAIL =
-  "Trending shows what topics are working — your clips are made from YOUR videos. "
-  + "The agent never downloads or re-uploads another creator's video.";
+  "Clips are made from YOUR videos or Creative Commons licensed videos — never from standard-licence videos by other creators.";
+
+const LICENSED_ONLY_KEY = "clipforge:licensed-only";
 
 function fmtDate(iso: string): string {
   if (!iso) return "—";
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? "—" : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+function fmtStarted(iso: string | null): string {
+  if (!iso) return "started —";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "started —";
+  const mins = Math.max(0, Math.round((Date.now() - d.getTime()) / 60000));
+  if (mins < 1) return "started just now";
+  if (mins < 60) return `started ${mins} min ago`;
+  const hours = Math.floor(mins / 60);
+  return `started ${hours}h ${mins % 60}m ago`;
 }
 
 function scoreTone(score: number): string {
@@ -52,19 +85,71 @@ function scoreTone(score: number): string {
   return "bg-neutral-700/50 text-neutral-300";
 }
 
+function licenseTone(license: VideoLicense): string {
+  if (license === "cc") return "bg-emerald-500/15 text-emerald-300 border-emerald-500/40";
+  if (license === "own") return "bg-sky-500/15 text-sky-300 border-sky-500/40";
+  if (license === "standard") return "bg-neutral-700/50 text-neutral-300 border-neutral-600";
+  return "bg-neutral-700/50 text-neutral-400 border-neutral-700";
+}
+
+function LicenseBadge({ license }: { license: VideoLicense }) {
+  return (
+    <span className={`shrink-0 rounded-full border px-2 py-0.5 text-xs font-medium ${licenseTone(license)}`}>
+      {licenseBadgeLabel(license)}
+    </span>
+  );
+}
+
+function ClipVerdict({ video }: { video: TrendingVideo }) {
+  if (video.can_clip) {
+    return (
+      <p className="mt-1 text-xs font-medium text-emerald-300">
+        ✓ Can clip{video.license === "cc" ? " — Creative Commons — attribution is added automatically for CC sources." : video.license === "own" ? " — your video." : video.license === "public-domain" ? " — public domain." : video.license === "standard" ? ` — ${video.reason}` : "."}
+      </p>
+    );
+  }
+  if (!video.license_checked) {
+    return (
+      <p className="mt-1 text-xs text-amber-200">
+        Licence not checked yet — check it before clipping. The search only verifies licences when “Licensed only” is on.
+      </p>
+    );
+  }
+  return (
+    <p className="mt-1 text-xs text-neutral-400">
+      ✕ Can&apos;t clip — standard licence. {video.reason}
+    </p>
+  );
+}
+
+const CAPTURE_DURATIONS = [60, 120, 180, 300];
+
 export default function TrendingPage() {
-  const [creds, setCreds] = useState<TrendingCredentials | null>(null);
-  const [live, setLive] = useState(false);
+  const [creds, setCreds] = useState<TrendingCredentials | null>(null);  const [live, setLive] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
+  // "Licensed only (CC)" — DEFAULT ON, remembered in localStorage.
+  // (The server has no settings field for this yet, so localStorage is
+  // the store — the choice survives restarts on this device, and the
+  // toggle is never forced on.)
+  const [licensedOnly, setLicensedOnly] = useState(true);
+
   // Search state.
+  const [tab, setTab] = useState<"trending" | "live">("trending");
   const [niche, setNiche] = useState("");
   const [customNiche, setCustomNiche] = useState("");
   const [results, setResults] = useState<TrendingVideo[]>([]);
+  const [liveResults, setLiveResults] = useState<TrendingVideo[]>([]);
   const [searchSource, setSearchSource] = useState("");
   const [searchError, setSearchError] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
+
+  // Licence check (paste a URL).
+  const [checkUrl, setCheckUrl] = useState("");
+  const [checkResult, setCheckResult] = useState<LicenseCheck | null>(null);
+  const [checkError, setCheckError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
 
   // API-key form.
   const [apiKey, setApiKey] = useState("");
@@ -72,6 +157,9 @@ export default function TrendingPage() {
 
   // Trending -> agent flow.
   const [picked, setPicked] = useState<TrendingVideo | null>(null);
+  // When set, the clip is cut from THIS video (own video or CC) instead of
+  // from the user's own source video on the topic.
+  const [ccSource, setCcSource] = useState<TrendingVideo | null>(null);
   const [ownSourceType, setOwnSourceType] = useState<"video" | "channel">("video");
   const [ownSourceUrl, setOwnSourceUrl] = useState("");
   const [matched, setMatched] = useState<{ url: string; title: string; score: number } | null>(null);
@@ -81,6 +169,11 @@ export default function TrendingPage() {
   const [scheduledFor, setScheduledFor] = useState("");
   const [starting, setStarting] = useState(false);
 
+  // Live capture state.
+  const [captureDurations, setCaptureDurations] = useState<Record<string, number>>({});
+  const [capture, setCapture] = useState<{ videoId: string; title: string; jobId: string | null; status: string; progress: number; error: string | null } | null>(null);
+  const [capturing, setCapturing] = useState(false);
+
   // Live run progress.
   const [runState, setRunState] = useState<string>("");
   const [runProgress, setRunProgress] = useState(0);
@@ -88,6 +181,8 @@ export default function TrendingPage() {
   const [runJobId, setRunJobId] = useState<string | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const [runJob, setRunJob] = useState<TrendingJob | null>(null);
+  // Clip job created from a CC / own video (POST /jobs).
+  const [clipJobId, setClipJobId] = useState<string | null>(null);
 
   const nicheValue = niche === "__custom" ? customNiche.trim() : niche;
 
@@ -99,6 +194,20 @@ export default function TrendingPage() {
   }, []);
 
   useEffect(() => { loadCreds().catch(() => setLoaded(true)); }, [loadCreds]);
+
+  // Remembered "Licensed only" choice: localStorage (default ON).
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(LICENSED_ONLY_KEY);
+      if (stored === "false") setLicensedOnly(false);
+      // Default is ON: stored "true" or nothing both mean ON.
+    } catch { /* private mode — default ON stands */ }
+  }, []);
+
+  function onToggleLicensedOnly(value: boolean) {
+    setLicensedOnly(value);
+    try { window.localStorage.setItem(LICENSED_ONLY_KEY, String(value)); } catch { /* ignore */ }
+  }
 
   // Live status refresh while a trending run is going.
   const running = runState === "running";
@@ -116,27 +225,147 @@ export default function TrendingPage() {
     return () => window.clearInterval(t);
   }, [running]);
 
+  // Live capture progress: poll the capture job while it is running.
+  const captureRunning = capture !== null && capture.jobId !== null && (capture.status === "running" || capture.status === "capturing" || capture.status === "pending");
+  useEffect(() => {
+    if (!captureRunning || !capture?.jobId) return;
+    const t = window.setInterval(async () => {
+      const j = await getJob(capture.jobId as string).catch(() => null);
+      if (!j) return;
+      setCapture((c) => c ? { ...c, status: j.status, progress: j.progress_pct } : c);
+    }, 5000);
+    return () => window.clearInterval(t);
+  }, [captureRunning, capture?.jobId]);
+
   // Once the run finishes, load the job record (posts + provider ids).
   useEffect(() => {
     if (runState !== "done" || !runJobId) return;
     getTrendingJob(runJobId).then((j) => { if (j) setRunJob(j); }).catch(() => {});
   }, [runState, runJobId]);
 
-  async function onSearch() {
+  async function onSearch(eventType: "trending" | "live") {
     if (!nicheValue) { setSearchError("Pick a niche first."); return; }
     setSearching(true);
     setSearchError(null);
-    setResults([]);
+    if (eventType === "trending") setResults([]); else setLiveResults([]);
     setPicked(null);
-    const { result, error } = await searchTrending(nicheValue, 10);
+    setCcSource(null);
+    // Live streams come from their own endpoint (GET /api/trending/live),
+    // not event_type on search.
+    const { result, error } = eventType === "live"
+      ? await searchLive(nicheValue, 10, { licensedOnly })
+      : await searchTrending(nicheValue, 10, { licensedOnly });
     setSearching(false);
     if (error || !result) {
       setSearchError(error ?? "Trending search failed.");
       return;
     }
-    setResults(result.results);
+    // Defence in depth: if an older server ignored licensed_only, filter
+    // client-side so ON really means only clippable (CC / own) videos.
+    const shown = licensedOnly ? result.results.filter((v) => v.can_clip) : result.results;
+    if (eventType === "trending") setResults(shown); else setLiveResults(shown);
     setSearchSource(result.source === "oauth" ? `your connected YouTube channel${result.account ? ` (${result.account})` : ""}` : "your saved YouTube Data API key");
-    if (result.results.length === 0) setSearchError("No trending videos found in this niche in the last 7 days — try a broader niche.");
+    if (shown.length === 0) {
+      setSearchError(licensedOnly
+        ? "No Creative Commons licensed videos found trending in this niche in the last 7 days — try a broader niche, or turn “Licensed only” off to see all trending videos (standard-licence ones cannot be clipped)."
+        : "No trending videos found in this niche in the last 7 days — try a broader niche.");
+    }
+  }
+
+  async function onCheckUrl() {
+    const url = checkUrl.trim();
+    if (!url) { setCheckError("Paste a YouTube video URL first."); return; }
+    if (!/youtu\.?be/.test(url)) { setCheckError("That does not look like a YouTube URL — paste a youtube.com or youtu.be link."); return; }
+    setChecking(true);
+    setCheckError(null);
+    setCheckResult(null);
+    const { check, error } = await checkVideoLicense(url);
+    setChecking(false);
+    if (error || !check) {
+      setCheckError(error ?? "Licence check failed.");
+      return;
+    }
+    setCheckResult(check);
+  }
+
+  function clipVideoFromCheck(check: LicenseCheck): TrendingVideo {
+    return {
+      video_id: check.video_id, title: check.title, channel_title: check.channel, channel_id: "",
+      published_at: "", view_count: 0, like_count: 0, comment_count: 0, trend_score: 0,
+      url: check.url || `https://www.youtube.com/watch?v=${check.video_id}`,
+      license: check.license, license_key: check.license_key, license_checked: true,
+      license_url: check.license_url, can_clip: check.can_clip,
+      reason: check.reason, concurrent_viewers: null, started_at: null, event_type: "video",
+    };
+  }
+
+  // Per-result licence check (for videos the search did not verify):
+  // updates the result in place with the real verdict.
+  const [checkingVideo, setCheckingVideo] = useState<string | null>(null);
+  async function onCheckResultVideo(video: TrendingVideo) {
+    setCheckingVideo(video.video_id);
+    const { check, error } = await checkVideoLicense(video.url);
+    setCheckingVideo(null);
+    if (error || !check) {
+      setNotice(error ?? "Licence check failed.");
+      return;
+    }
+    const updated = clipVideoFromCheck(check);
+    const patch = (vs: TrendingVideo[]) => vs.map((v) => (v.video_id === video.video_id ? { ...v, ...updated } : v));
+    setResults(patch);
+    setLiveResults(patch);
+    if (picked?.video_id === video.video_id) setPicked(updated);
+    setNotice(check.can_clip
+      ? `“${check.title}” can be clipped — ${check.reason}`
+      : `“${check.title}” cannot be clipped — ${check.reason}`);
+  }
+
+  async function onClipVideo(video: TrendingVideo) {
+    // Unchecked video (search without licensed_only): verify the licence
+    // first — never clip on a guess.
+    if (!video.license_checked) {
+      setNotice("Checking this video's licence first…");
+      const { check, error } = await checkVideoLicense(video.url);
+      if (error || !check) {
+        setNotice(error ?? "Licence check failed — the clip was not started.");
+        return;
+      }
+      const updated = clipVideoFromCheck(check);
+      const patch = (vs: TrendingVideo[]) => vs.map((v) => (v.video_id === video.video_id ? { ...v, ...updated } : v));
+      setResults(patch);
+      setLiveResults(patch);
+      if (!check.can_clip) {
+        setNotice(`Cannot clip — ${check.reason}`);
+        return;
+      }
+      video = updated;
+    }
+    if (!video.can_clip) return;
+    setPicked(video);
+    setCcSource(video);
+    setMatched(null);
+    setRights(false);
+    setRunJob(null);
+    setRunState("");
+    setClipJobId(null);
+    setNotice(`Clipping from “${video.title}” (${licenseBadgeLabel(video.license)}). Attribution will be added to the description automatically for Creative Commons sources.`);
+  }
+
+  async function onCapture(video: TrendingVideo) {
+    if (!video.can_clip) return;
+    const durationS = captureDurations[video.video_id] ?? 120;
+    setCapturing(true);
+    setNotice(null);
+    const res = await startLiveCapture(video.video_id, durationS);
+    setCapturing(false);
+    if (!res.ok) {
+      setCapture({ videoId: video.video_id, title: video.title, jobId: null, status: "error", progress: 0, error: res.error ?? "Live capture is not available in this build yet." });
+      return;
+    }
+    const data = (res.data ?? {}) as Record<string, unknown>;
+    const jobId = typeof data.job_id === "string" ? data.job_id : (typeof data.id === "string" ? data.id : null);
+    setCapture({ videoId: video.video_id, title: video.title, jobId, status: typeof data.status === "string" ? data.status : "capturing", progress: 5, error: null });
+    setNotice(`Capturing “${video.title}” for ${durationS}s — the clip job will appear below and in the pipeline.`);
   }
 
   async function onSaveKey() {
@@ -164,9 +393,42 @@ export default function TrendingPage() {
 
   async function onStartRun() {
     if (!picked) return;
+    if (!rights) {
+      setNotice(ccSource
+        ? "Confirm the licence acknowledgement first — Creative Commons clips always carry attribution in the description."
+        : "Confirm the rights checkbox first — the agent only works with videos you own or have the rights to use.");
+      return;
+    }
+    // Clipping a CC / own video goes through POST /jobs (the v0.7.0 CC
+    // pipeline) — NOT /api/trending/run, which refuses the trending
+    // video itself as a source. The clips land in the approval queue.
+    if (ccSource) {
+      setStarting(true);
+      setNotice(null);
+      setClipJobId(null);
+      const res = await createYoutubeClipJob({
+        source_url: ccSource.url,
+        title: ccSource.title,
+        source_license: jobSourceLicense(ccSource),
+        source_title: ccSource.title,
+        source_channel: ccSource.channel_title,
+        own_content_declaration: ccSource.license === "own",
+      });
+      setStarting(false);
+      if (!res.ok) {
+        setNotice(res.error ?? "Could not start the clip job.");
+        return;
+      }
+      const data = (res.data ?? {}) as Record<string, unknown>;
+      const jobId = typeof data.id === "string" ? data.id : null;
+      setClipJobId(jobId);
+      setNotice(jobId
+        ? `Clip job ${jobId} started — cutting clips from the ${licenseBadgeLabel(ccSource.license)} video now (attribution included). Find the clips in the approval queue when they are ready.`
+        : "Clip job started — cutting clips from the video now (attribution included).");
+      return;
+    }
     const sourceUrl = ownSourceType === "channel" && matched ? matched.url : ownSourceUrl.trim();
     if (!sourceUrl) { setNotice("Add your own source video first (or match your channel to the topic)."); return; }
-    if (!rights) { setNotice("Confirm the rights checkbox first — the agent only works with videos you own or have the rights to use."); return; }
     setStarting(true);
     setNotice(null);
     setRunError(null);
@@ -200,13 +462,14 @@ export default function TrendingPage() {
   }
 
   const canSearch = live && (creds?.usable ?? false) && nicheValue.length > 0;
+  const shownResults = tab === "live" ? liveResults : results;
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Trending</h1>
         <p className="mt-1 text-sm text-neutral-400">
-          What is trending in your niche right now, live from YouTube — then the agent turns the topic into clips from your own videos.
+          What is trending in your niche right now, live from YouTube — then the agent turns the topic into clips from your own videos, or clips a Creative Commons video directly.
         </p>
       </div>
 
@@ -277,6 +540,35 @@ export default function TrendingPage() {
       <Card>
         <CardHeader title="Search trending in a niche" hint="Live from YouTube Data API v3 — last 7 days, most views first" />
         <div className="space-y-4">
+          <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-4">
+            <Toggle
+              checked={licensedOnly}
+              onChange={onToggleLicensedOnly}
+              label="Licensed only (CC)"
+              hint={licensedOnly
+                ? "ON — only Creative Commons / licensed videos are shown, and every result can be clipped. Turn it off any time to see all trending videos."
+                : "OFF — showing all trending videos. Every result says plainly whether it can be clipped; standard-licence videos by other creators cannot be clipped."}
+            />
+            <p className="mt-2 text-xs text-neutral-500">
+              Your choice is remembered on this device — the toggle is never forced on.
+            </p>
+          </div>
+
+          <div className="flex gap-1 border-b border-neutral-800" role="tablist" aria-label="Trending or live">
+            {(["trending", "live"] as const).map((t) => (
+              <button
+                key={t}
+                type="button"
+                role="tab"
+                aria-selected={tab === t}
+                onClick={() => setTab(t)}
+                className={`rounded-t-md px-3 py-2 text-sm ${tab === t ? "bg-neutral-800 font-medium text-white" : "text-neutral-400 hover:text-white"}`}
+              >
+                {t === "trending" ? "Trending videos" : "🔴 Live now"}
+              </button>
+            ))}
+          </div>
+
           <fieldset>
             <legend className="text-sm font-medium text-neutral-100">Niche</legend>
             <div className="mt-2 flex flex-wrap gap-2">
@@ -311,38 +603,96 @@ export default function TrendingPage() {
             )}
           </fieldset>
           <div className="flex flex-wrap gap-2">
-            <PrimaryButton onClick={onSearch} disabled={!live || searching || !canSearch}>
-              {searching ? "Searching YouTube…" : "Search trending"}
+            <PrimaryButton onClick={() => { void onSearch(tab); }} disabled={!live || searching || !canSearch}>
+              {searching ? "Searching YouTube…" : tab === "live" ? "Search live now" : "Search trending"}
             </PrimaryButton>
             {live && !creds?.usable && (
               <span className="self-center text-sm text-amber-200">Connect your YouTube channel or save an API key above to search.</span>
             )}
           </div>
           {searchError && <ErrorBanner message={searchError} />}
-          {results.length > 0 && (
+          {shownResults.length > 0 && (
             <div className="space-y-3">
               <p className="text-xs text-neutral-500">
-                Live results via {searchSource} · ranked by trend score (views/hour + engagement) · {results.length} video{results.length === 1 ? "" : "s"}
+                Live results via {searchSource} · {tab === "live" ? "live streams, by concurrent viewers" : "ranked by trend score (views/hour + engagement)"} · {shownResults.length} video{shownResults.length === 1 ? "" : "s"}
+                {licensedOnly && " · Licensed only (CC) — every result below can be clipped"}
               </p>
               <ul className="space-y-3">
-                {results.map((v) => (
+                {shownResults.map((v) => (
                   <li key={v.video_id} className={`rounded-lg border p-4 ${picked?.video_id === v.video_id ? "border-amber-400 bg-amber-400/5" : "border-neutral-800"}`}>
                     <div className="flex flex-wrap items-start gap-3">
                       <div className="min-w-0 flex-1">
-                        <p className="font-semibold text-neutral-50">{v.title}</p>
-                        <p className="mt-0.5 text-sm text-neutral-400">
-                          {v.channel_title} · {fmtCompact(v.view_count)} views · {fmtCompact(v.like_count)} likes · {fmtDate(v.published_at)}
+                        <p className="font-semibold text-neutral-50">
+                          {tab === "live" && <span className="mr-2 rounded bg-red-600 px-1.5 py-0.5 text-[11px] font-bold text-white">LIVE</span>}
+                          {v.title}
                         </p>
+                        <p className="mt-0.5 text-sm text-neutral-400">
+                          {v.channel_title} · {tab === "live" && v.concurrent_viewers !== null ? `${fmtCompact(v.concurrent_viewers)} watching now · ${fmtStarted(v.started_at)} · ` : `${fmtCompact(v.view_count)} views · ${fmtCompact(v.like_count)} likes · `}{fmtDate(v.published_at)}
+                        </p>
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          <LicenseBadge license={v.license} />
+                          {v.license_url && (
+                            <a className="text-xs text-sky-300 underline" href={v.license_url} target="_blank" rel="noreferrer">Licence details</a>
+                          )}
+                        </div>
+                        <ClipVerdict video={v} />
                       </div>
                       <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${scoreTone(v.trend_score)}`}>
                         Trend {v.trend_score}
                       </span>
                     </div>
-                    <div className="mt-3 flex flex-wrap gap-2">
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
                       <SecondaryButton href={v.url}>Watch on YouTube</SecondaryButton>
-                      <PrimaryButton onClick={() => { setPicked(v); setMatched(null); setRunJob(null); setRunState(""); }}>
-                        {picked?.video_id === v.video_id ? "Topic picked ✓" : "Use as topic"}
-                      </PrimaryButton>
+                      {tab === "live" ? (
+                        <>
+                          <label className="flex items-center gap-1 text-xs text-neutral-400">
+                            Capture
+                            <select
+                              className="rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm text-neutral-100"
+                              value={captureDurations[v.video_id] ?? 120}
+                              onChange={(e) => setCaptureDurations((d) => ({ ...d, [v.video_id]: Number(e.target.value) }))}
+                              aria-label={`Capture duration for ${v.title}`}
+                              disabled={!v.can_clip}
+                            >
+                              {CAPTURE_DURATIONS.map((s) => (
+                                <option key={s} value={s}>{s}s</option>
+                              ))}
+                            </select>
+                          </label>
+                          <PrimaryButton onClick={() => { void onCapture(v); }} disabled={!v.can_clip || capturing}>
+                            {capturing ? "Starting capture…" : "Capture & clip"}
+                          </PrimaryButton>
+                          {!v.can_clip && (
+                            <span className="text-xs text-neutral-500">Capture is disabled — {v.reason}</span>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <PrimaryButton onClick={() => { setPicked(v); setCcSource(null); setMatched(null); setRunJob(null); setRunState(""); setClipJobId(null); }}>
+                            {picked?.video_id === v.video_id && !ccSource ? "Topic picked ✓" : "Use as topic"}
+                          </PrimaryButton>
+                          {!v.license_checked && (
+                            <SecondaryButton onClick={() => { void onCheckResultVideo(v); }} disabled={checkingVideo === v.video_id}>
+                              {checkingVideo === v.video_id ? "Checking…" : "Check licence"}
+                            </SecondaryButton>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => { void onClipVideo(v); }}
+                            disabled={v.license_checked && !v.can_clip}
+                            title={v.can_clip ? "Cut clips from this video" : !v.license_checked ? "Check the licence first, then clip" : v.reason}
+                            className={`rounded-md px-4 py-2 text-sm font-medium ${v.license_checked && !v.can_clip ? "cursor-not-allowed bg-neutral-800 text-neutral-500" : "bg-emerald-600 text-white hover:bg-emerald-500"}`}
+                          >
+                            Clip this video
+                          </button>
+                          {v.license_checked && !v.can_clip && (
+                            <span className="text-xs text-neutral-500">Clipping is disabled — standard licence.</span>
+                          )}
+                          {!v.license_checked && (
+                            <span className="text-xs text-neutral-500">Licence not checked — “Clip this video” checks it first.</span>
+                          )}
+                        </>
+                      )}
                     </div>
                   </li>
                 ))}
@@ -352,76 +702,181 @@ export default function TrendingPage() {
         </div>
       </Card>
 
+      {capture && (
+        <Card>
+          <CardHeader title="Live capture" hint="Live progress" />
+          <div className="space-y-3">
+            <p className="text-sm text-neutral-300">
+              Capturing: <span className="font-medium text-neutral-100">{capture.title}</span>
+              {capture.jobId && <> · Job: <span className="font-mono text-sm">{capture.jobId}</span></>}
+            </p>
+            {capture.error ? (
+              <ErrorBanner message={capture.error} />
+            ) : (
+              <>
+                <ProgressBar value={capture.progress} />
+                <p className="text-xs text-neutral-400">
+                  Status: {capture.status} · {capture.progress}% — the captured clip appears in the pipeline and the approval queue when it is ready.
+                </p>
+                {capture.jobId && (
+                  <div className="flex flex-wrap gap-2">
+                    <SecondaryButton href={`/jobs/${encodeURIComponent(capture.jobId)}`}>Open the capture job</SecondaryButton>
+                    <SecondaryButton href="/queue">Approval queue</SecondaryButton>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </Card>
+      )}
+
+      <Card>
+        <CardHeader title="Check a video URL" hint="Licence check — can this video be clipped?" />
+        <div className="space-y-3">
+          <p className="text-sm text-neutral-400">
+            Paste any YouTube video URL to check its licence before clipping. Only your own videos and Creative Commons licensed videos can be clipped.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <input
+              className="min-w-64 flex-1 rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 font-mono text-sm"
+              value={checkUrl}
+              onChange={(e) => { setCheckUrl(e.target.value); setCheckResult(null); setCheckError(null); }}
+              placeholder="https://www.youtube.com/watch?v=…"
+              aria-label="YouTube video URL to check"
+            />
+            <PrimaryButton onClick={() => { void onCheckUrl(); }} disabled={checking}>
+              {checking ? "Checking…" : "Check licence"}
+            </PrimaryButton>
+          </div>
+          {checkError && <ErrorBanner message={checkError} />}
+          {checkResult && (
+            <div className={`rounded-lg border p-4 ${checkResult.can_clip ? "border-emerald-500/40 bg-emerald-500/5" : "border-neutral-700 bg-neutral-950"}`}>
+              <div className="flex flex-wrap items-start gap-3">
+                <div className="min-w-0 flex-1">
+                  <p className="font-semibold text-neutral-50">{checkResult.title || checkResult.video_id}</p>
+                  <p className="mt-0.5 text-sm text-neutral-400">{checkResult.channel}</p>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <LicenseBadge license={checkResult.license} />
+                    {checkResult.license_url && (
+                      <a className="text-xs text-sky-300 underline" href={checkResult.license_url} target="_blank" rel="noreferrer">Licence details</a>
+                    )}
+                  </div>
+                  <p className={`mt-2 text-sm ${checkResult.can_clip ? "font-medium text-emerald-300" : "text-neutral-300"}`}>
+                    {checkResult.can_clip ? "✓ Can clip" : "✕ Can't clip"} — {checkResult.reason}
+                  </p>
+                </div>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <SecondaryButton href={checkResult.url || `https://www.youtube.com/watch?v=${checkResult.video_id}`}>Watch on YouTube</SecondaryButton>
+                <button
+                  type="button"
+                  onClick={() => onClipVideo(clipVideoFromCheck(checkResult))}
+                  disabled={!checkResult.can_clip}
+                  title={checkResult.can_clip ? "Cut clips from this video" : checkResult.reason}
+                  className={`rounded-md px-4 py-2 text-sm font-medium ${checkResult.can_clip ? "bg-emerald-600 text-white hover:bg-emerald-500" : "cursor-not-allowed bg-neutral-800 text-neutral-500"}`}
+                >
+                  Clip this video
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </Card>
+
       {picked && (
         <Card>
-          <CardHeader title="Turn this topic into clips from YOUR video" hint="Approval-first by default" />
+          <CardHeader title={ccSource ? "Clip this video" : "Turn this topic into clips from YOUR video"} hint="Approval-first by default" />
           <div className="space-y-5">
             <p className="text-sm text-neutral-300">
-              Topic: <span className="font-medium text-neutral-100">{picked.title}</span>{" "}
-              <span className="text-neutral-400">({picked.channel_title} · {fmtCompact(picked.view_count)} views)</span>
+              {ccSource ? "Source: " : "Topic: "}<span className="font-medium text-neutral-100">{picked.title}</span>{" "}
+              <span className="text-neutral-400">({picked.channel_title}{picked.view_count ? ` · ${fmtCompact(picked.view_count)} views` : ""})</span>
             </p>
-            <fieldset>
-              <legend className="text-sm font-medium text-neutral-100">Your own source</legend>
-              <p className="mt-0.5 text-xs text-neutral-400">
-                The agent clips your own video on this topic — never the trending video itself.
-              </p>
-              <div className="mt-2 flex flex-wrap gap-2" role="radiogroup" aria-label="Own source type">
-                {(["video", "channel"] as const).map((t) => (
-                  <button
-                    key={t}
-                    type="button"
-                    role="radio"
-                    aria-checked={ownSourceType === t}
-                    onClick={() => { setOwnSourceType(t); setMatched(null); }}
-                    className={`rounded-md border px-3 py-1.5 text-sm ${ownSourceType === t ? "border-amber-400 bg-amber-400/10 text-neutral-100" : "border-neutral-700 bg-neutral-950 text-neutral-300 hover:border-neutral-500"}`}
-                  >
-                    {t === "video" ? "My own video URL" : "My own channel URL (match it)"}
-                  </button>
-                ))}
-              </div>
-              <input
-                className="mt-2 w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 font-mono text-sm"
-                value={ownSourceUrl}
-                onChange={(e) => { setOwnSourceUrl(e.target.value); setMatched(null); }}
-                placeholder={ownSourceType === "video" ? "https://www.youtube.com/watch?v=… (your own video)" : "https://www.youtube.com/@yourchannel"}
-                aria-label={ownSourceType === "video" ? "Your own video URL" : "Your own channel URL"}
-              />
-              {ownSourceType === "channel" && (
-                <div className="mt-2">
-                  <SecondaryButton onClick={() => { void onMatch(); }} disabled={matching}>
-                    {matching ? "Matching…" : "Find my video on this topic"}
-                  </SecondaryButton>
+            {ccSource && (
+              <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-3 text-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <LicenseBadge license={ccSource.license} />
+                  <span className="text-neutral-300">
+                    Clips are cut from this {ccSource.license === "cc" ? "Creative Commons" : "own"} video — not from a standard-licence video.
+                  </span>
                 </div>
-              )}
-              {matched && (
-                <p className="mt-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-100">
-                  Best match in your channel: <span className="font-medium">{matched.title}</span> (topic match {Math.round(matched.score * 100)}%).
-                  The run will clip this video, not the trending one.
+                <p className="mt-2 text-xs text-neutral-400">
+                  Attribution is added to the description automatically and cannot be removed for Creative Commons sources — see the attribution block in the clip review.
                 </p>
-              )}
-            </fieldset>
+              </div>
+            )}
+            {!ccSource && (
+              <fieldset>
+                <legend className="text-sm font-medium text-neutral-100">Your own source</legend>
+                <p className="mt-0.5 text-xs text-neutral-400">
+                  The agent clips your own video on this topic — never the trending video itself.
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2" role="radiogroup" aria-label="Own source type">
+                  {(["video", "channel"] as const).map((t) => (
+                    <button
+                      key={t}
+                      type="button"
+                      role="radio"
+                      aria-checked={ownSourceType === t}
+                      onClick={() => { setOwnSourceType(t); setMatched(null); }}
+                      className={`rounded-md border px-3 py-1.5 text-sm ${ownSourceType === t ? "border-amber-400 bg-amber-400/10 text-neutral-100" : "border-neutral-700 bg-neutral-950 text-neutral-300 hover:border-neutral-500"}`}
+                    >
+                      {t === "video" ? "My own video URL" : "My own channel URL (match it)"}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  className="mt-2 w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 font-mono text-sm"
+                  value={ownSourceUrl}
+                  onChange={(e) => { setOwnSourceUrl(e.target.value); setMatched(null); }}
+                  placeholder={ownSourceType === "video" ? "https://www.youtube.com/watch?v=… (your own video)" : "https://www.youtube.com/@yourchannel"}
+                  aria-label={ownSourceType === "video" ? "Your own video URL" : "Your own channel URL"}
+                />
+                {ownSourceType === "channel" && (
+                  <div className="mt-2">
+                    <SecondaryButton onClick={() => { void onMatch(); }} disabled={matching}>
+                      {matching ? "Matching…" : "Find my video on this topic"}
+                    </SecondaryButton>
+                  </div>
+                )}
+                {matched && (
+                  <p className="mt-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm text-emerald-100">
+                    Best match in your channel: <span className="font-medium">{matched.title}</span> (topic match {Math.round(matched.score * 100)}%).
+                    The run will clip this video, not the trending one.
+                  </p>
+                )}
+              </fieldset>
+            )}
 
-            <label className="block">
-              <span className="text-sm font-medium text-neutral-100">Schedule for (optional)</span>
-              <span className="mt-0.5 block text-xs text-neutral-400">When the clips should go out. Leave empty to schedule them from the approval queue later.</span>
-              <input
-                type="datetime-local"
-                className="mt-1 w-full max-w-xs rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm"
-                value={scheduledFor}
-                onChange={(e) => setScheduledFor(e.target.value)}
-                aria-label="Schedule for"
-              />
-            </label>
+            {!ccSource && (
+              <>
+                <label className="block">
+                  <span className="text-sm font-medium text-neutral-100">Schedule for (optional)</span>
+                  <span className="mt-0.5 block text-xs text-neutral-400">When the clips should go out. Leave empty to schedule them from the approval queue later.</span>
+                  <input
+                    type="datetime-local"
+                    className="mt-1 w-full max-w-xs rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm"
+                    value={scheduledFor}
+                    onChange={(e) => setScheduledFor(e.target.value)}
+                    aria-label="Schedule for"
+                  />
+                </label>
 
-            <Toggle
-              checked={autoPost}
-              onChange={(v) => setAutoPost(v)}
-              label="Auto-post (publish without review)"
-              hint="OFF by default. When on, clips publish straight to your channels with no review step. Approval-first is the safe default."
-            />
-            {autoPost && (
-              <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200" role="alert">
-                Warning: with auto-post on, the agent publishes clips without asking you. Only use it with a source and niche you trust.
+                <Toggle
+                  checked={autoPost}
+                  onChange={(v) => setAutoPost(v)}
+                  label="Auto-post (publish without review)"
+                  hint="OFF by default. When on, clips publish straight to your channels with no review step. Approval-first is the safe default."
+                />
+                {autoPost && (
+                  <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200" role="alert">
+                    Warning: with auto-post on, the agent publishes clips without asking you. Only use it with a source and niche you trust.
+                  </p>
+                )}
+              </>
+            )}
+            {ccSource && (
+              <p className="text-sm text-neutral-400">
+                The clip job goes through the normal pipeline — clips land in the approval queue first, where you review them and set the schedule. Nothing publishes without approval.
               </p>
             )}
 
@@ -433,20 +888,38 @@ export default function TrendingPage() {
                 onChange={(e) => setRights(e.target.checked)}
               />
               <span>
-                <span className="font-medium text-neutral-100">Rights acknowledgement (required)</span>
+                <span className="font-medium text-neutral-100">{ccSource ? "Licence acknowledgement (required)" : "Rights acknowledgement (required)"}</span>
                 <span className="mt-0.5 block text-xs text-neutral-400">
-                  This source is my own video/channel or I have a licence/rights to use it. The trending video itself is never clipped.
+                  {ccSource
+                    ? "This video is Creative Commons licensed (or my own). Attribution will be included in the description and must stay there."
+                    : "This source is my own video/channel or I have a licence/rights to use it. The trending video itself is never clipped."}
                 </span>
               </span>
             </label>
 
             <div className="flex flex-wrap gap-2">
               <PrimaryButton onClick={onStartRun} disabled={starting || running}>
-                {starting ? "Starting…" : running ? "Run in progress…" : "Start agent run on my video"}
+                {starting ? "Starting…" : running ? "Run in progress…" : ccSource ? "Start clipping this video" : "Start agent run on my video"}
               </PrimaryButton>
               {runJobId && (
                 <SecondaryButton href="/pipeline">See the pipeline</SecondaryButton>
               )}
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {clipJobId && (
+        <Card>
+          <CardHeader title="Clip job started" hint="CC / own video" />
+          <div className="space-y-3">
+            <p className="text-sm text-neutral-300">
+              Job: <span className="font-mono text-sm">{clipJobId}</span> — the clips appear in the pipeline and the approval queue when they are ready.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <SecondaryButton href={`/jobs/${encodeURIComponent(clipJobId)}`}>Open the clip job</SecondaryButton>
+              <SecondaryButton href="/pipeline">See the pipeline</SecondaryButton>
+              <SecondaryButton href="/queue">Approval queue</SecondaryButton>
             </div>
           </div>
         </Card>

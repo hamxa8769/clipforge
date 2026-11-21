@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import type { Candidate, Job } from "@/lib/api";
-import { approveCandidate, rejectCandidate } from "@/lib/api";
+import { approveCandidate, attributionForClip, licenseBadgeLabel, regenerateThumbnail, rejectCandidate, selectThumbnailVariant } from "@/lib/api";
 import { Card, StatusPill } from "@/components/ui";
 import ClipPlayer from "@/components/ClipPlayer";
 
@@ -14,6 +14,68 @@ function CandidateCard({ c, job, demo }: { c: Candidate; job: Job; demo: boolean
   const [status, setStatus] = useState(c.status);
   const [note, setNote] = useState("");
   const seo = c.seo[platform];
+  // Thumbnail step (v0.7.0): the generated thumbnail, with Regenerate and
+  // a variant picker when the API offers variants.
+  const variants = c.thumbnail_variants.length > 0 ? c.thumbnail_variants : (c.thumbnail_url ? [c.thumbnail_url] : []);
+  const [thumbIdx, setThumbIdx] = useState(0);
+  const [thumbUrl, setThumbUrl] = useState<string | null>(c.thumbnail_url);
+  const [thumbNote, setThumbNote] = useState("");
+  const [regenerating, setRegenerating] = useState(false);
+  // Attribution: the candidate's licence record wins; the job's record
+  // fills the gaps (the API merges them the same way server-side).
+  const attribution = attributionForClip(c)
+    ?? attributionForClip({
+      source_license: job.source_license, source_title: job.source_title,
+      source_channel: job.source_channel, source_url: job.source,
+      attribution_text: job.attribution_text,
+    });
+  const sourceLicense = c.source_license !== "unknown" ? c.source_license : job.source_license;
+
+  async function onSelectVariant(i: number) {
+    const variantNo = c.thumbnails[i]?.variant || i + 1;
+    setThumbIdx(i);
+    setThumbUrl(variants[i]);
+    setThumbNote("");
+    if (demo) return; // Demo mode: local selection only, no API to call.
+    const res = await selectThumbnailVariant(c.id, variantNo);
+    if (!res.ok) {
+      setThumbNote(`Could not save the thumbnail choice: ${res.error ?? "request failed"}. The preview above is what you picked, but the server still has the old one.`);
+    }
+  }
+
+  async function onRegenerateThumb() {
+    setRegenerating(true);
+    setThumbNote("");
+    if (demo) {
+      // Demo mode: cycle the built-in variants locally — no API to call.
+      const next = variants.length > 1 ? (thumbIdx + 1) % variants.length : thumbIdx;
+      setThumbIdx(next);
+      setThumbUrl(variants[next] ?? thumbUrl);
+      setThumbNote("Thumbnail regenerated locally (demo mode: API unreachable). A live regenerate asks the server for a fresh thumbnail.");
+      setRegenerating(false);
+      return;
+    }
+    // Real endpoint: POST /clips/{candidate_id}/thumbnail (v0.7.0).
+    const res = await regenerateThumbnail(c.id);
+    setRegenerating(false);
+    if (!res.ok) {
+      setThumbNote(`Could not regenerate the thumbnail: ${res.error ?? "the thumbnail endpoint is not available in this build yet"}. The current thumbnail stays in place.`);
+      return;
+    }
+    const data = (res.data ?? {}) as Record<string, unknown>;
+    const fresh = typeof data.thumbnail_url === "string" ? data.thumbnail_url : null;
+    const thumbs = Array.isArray(data.thumbnails) ? data.thumbnails : [];
+    const urls = thumbs.map((t) => (t as Record<string, unknown>).url).filter((u): u is string => typeof u === "string" && !!u);
+    if (fresh) {
+      setThumbUrl(fresh);
+      setThumbNote("Thumbnail regenerated.");
+    } else if (urls.length > 0) {
+      setThumbUrl(urls[0]);
+      setThumbNote("Thumbnail regenerated.");
+    } else {
+      setThumbNote("Thumbnail regeneration was accepted — the new thumbnail appears once the server finishes it.");
+    }
+  }
 
   async function act(action: "approve" | "reject") {
     // Real endpoint: POST /jobs/{jobId}/candidates/{n}/{approve|reject} (docs/api.md).
@@ -47,6 +109,62 @@ function CandidateCard({ c, job, demo }: { c: Candidate; job: Job; demo: boolean
 
       <ClipPlayer candidate={c} job={job} demo={demo} />
 
+      {/* Thumbnail step (v0.7.0) */}
+      <div className="mt-5 rounded-lg border border-neutral-800 p-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <h3 className="text-sm font-semibold text-neutral-100">Thumbnail</h3>
+          {sourceLicense !== "unknown" && (
+            <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${sourceLicense === "cc" ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300" : sourceLicense === "own" ? "border-sky-500/40 bg-sky-500/15 text-sky-300" : "border-neutral-600 bg-neutral-700/50 text-neutral-300"}`}>
+              Source: {licenseBadgeLabel(sourceLicense)}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => { void onRegenerateThumb(); }}
+            disabled={regenerating}
+            className="ml-auto rounded-md bg-neutral-800 px-3 py-1.5 text-sm font-medium text-neutral-100 hover:bg-neutral-700 disabled:opacity-60"
+          >
+            {regenerating ? "Regenerating…" : "Regenerate thumbnail"}
+          </button>
+        </div>
+        <div className="mt-3 flex flex-wrap items-start gap-4">
+          {thumbUrl ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={thumbUrl} alt={`Generated thumbnail for clip “${c.hook_line}”`} className="h-48 w-auto rounded-lg border border-neutral-800 object-cover" />
+          ) : (
+            <div className="flex h-48 w-[108px] flex-col items-center justify-center rounded-lg border border-dashed border-neutral-700 bg-neutral-950 p-2 text-center">
+              <span className="text-xs text-neutral-400">No thumbnail generated yet — it appears here once the clip renders.</span>
+            </div>
+          )}
+          <div className="min-w-0 flex-1">
+            <p className="text-sm text-neutral-400">
+              This is the thumbnail that ships with the clip. Regenerate makes a fresh one from the best frame; pick a variant below when the server offers more than one.
+            </p>
+            {variants.length > 1 && (
+              <div className="mt-3">
+                <p className="text-xs font-medium text-neutral-300">Variants</p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {variants.map((v, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => { void onSelectVariant(i); }}
+                      aria-label={`Use thumbnail variant ${i + 1}`}
+                      aria-pressed={thumbUrl === v}
+                      className={`overflow-hidden rounded-md border-2 ${thumbUrl === v ? "border-amber-400" : "border-neutral-700 hover:border-neutral-500"}`}
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={v} alt={`Thumbnail variant ${i + 1}`} className="h-20 w-auto object-cover" />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {thumbNote && <p className="mt-3 text-sm text-neutral-400">{thumbNote}</p>}
+          </div>
+        </div>
+      </div>
+
       <div className="mt-4 flex flex-wrap items-center gap-4">
         <span className="text-sm text-neutral-400">Clip span: {c.start_s}s – {c.end_s}s</span>
         <label className="ml-auto flex items-center gap-2 text-sm">
@@ -66,6 +184,15 @@ function CandidateCard({ c, job, demo }: { c: Candidate; job: Job; demo: boolean
           <div className="space-y-2 rounded-b-lg bg-neutral-950 p-4 text-sm">
             <p><strong>Title:</strong> {seo.title} <span className="text-neutral-500">({seo.title.length} chars)</span></p>
             <p><strong>Description:</strong> {seo.description}</p>
+            {attribution && (
+              <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-3">
+                <p className="text-xs font-semibold text-emerald-300">Attribution — always included for Creative Commons / public-domain sources (read-only)</p>
+                <p className="mt-1 text-sm text-neutral-200">{attribution}</p>
+                <p className="mt-1 text-xs text-neutral-500">
+                  Source: {c.source_title || job.source_title || "Creative Commons video"}{(c.source_channel || job.source_channel) ? ` by ${c.source_channel || job.source_channel}` : ""}{(c.source_url || job.source) ? <> · <a className="text-sky-300 underline" href={c.source_url || job.source} target="_blank" rel="noreferrer">source video</a></> : ""}. This credit stays in the published description.
+                </p>
+              </div>
+            )}
             <p><strong>Hashtags:</strong> {seo.hashtags.join(" ")}</p>
             <p className="text-xs text-neutral-500">
               {platform === "youtube" && "YouTube: keyword front-loaded, 2–3 hashtags, links in Shorts descriptions are not clickable."}

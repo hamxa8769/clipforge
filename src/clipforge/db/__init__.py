@@ -101,6 +101,12 @@ class Job(Base):
     source_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str] = mapped_column(String(300), default="")
     own_content: Mapped[bool] = mapped_column(Boolean, default=False)
+    # v0.7.0 lawful CC pipeline (see clipforge.licensing): canonical
+    # licence key + original-video facts. None = not recorded (local
+    # own-content jobs never record one).
+    source_license: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    source_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_channel: Mapped[str | None] = mapped_column(String(200), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default=JobStatus.PENDING.value)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     meta_json: Mapped[dict] = mapped_column("meta", JSON, default=dict)
@@ -130,6 +136,17 @@ class ClipCandidate(Base):
     trim_start_s: Mapped[float | None] = mapped_column(Float, nullable=True)
     trim_end_s: Mapped[float | None] = mapped_column(Float, nullable=True)
     file_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # v0.7.0 lawful CC pipeline: licence record copied from the job at
+    # render time (see clipforge.licensing.SOURCE_LICENSE_FIELDS), plus
+    # the generated thumbnails (thumbnail_json = [{variant, filename,
+    # frame_second, title_text, path}] — variant 1 is thumbnail.jpg).
+    source_license: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_channel: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    attribution_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    thumbnail_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    thumbnail_json: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     job: Mapped[Job] = relationship("Job", back_populates="candidates")
 
@@ -288,6 +305,14 @@ class Post(Base):
     seo_json: Mapped[dict] = mapped_column("seo", JSON, default=dict)
     video_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     video_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # v0.7.0: licence record copied from the clip at creation, so the
+    # approval queue can display it and the publish path can refuse a
+    # Standard-licence source even if earlier checks were bypassed.
+    source_license: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_channel: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    attribution_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     title_variant_id: Mapped[str | None] = mapped_column(
         String(32), ForeignKey("title_variants.id"), nullable=True
     )
@@ -508,10 +533,61 @@ def make_engine(url: str | None = None):
     return create_engine(url, **kwargs)
 
 
+def _ensure_columns(engine) -> None:
+    """Add columns that ``create_all`` cannot add to existing tables.
+
+    Fresh databases get every column from the models; a database
+    created by an older release only gains the new columns through
+    this step (v0.7.0 licence + thumbnail columns). Best-effort and
+    silent: a failure here must never stop the server from starting
+    (the columns are nullable, so old rows simply read as ``None``).
+    """
+    # table -> {column: SQL type}
+    missing: dict[str, dict[str, str]] = {
+        "jobs": {
+            "source_license": "VARCHAR(60)",
+            "source_title": "TEXT",
+            "source_channel": "VARCHAR(200)",
+        },
+        "clip_candidates": {
+            "source_license": "VARCHAR(60)",
+            "source_url": "TEXT",
+            "source_title": "TEXT",
+            "source_channel": "VARCHAR(200)",
+            "attribution_text": "TEXT",
+            "thumbnail_path": "TEXT",
+            "thumbnail_json": "JSON",
+        },
+        "posts": {
+            "source_license": "VARCHAR(60)",
+            "source_url": "TEXT",
+            "source_title": "TEXT",
+            "source_channel": "VARCHAR(200)",
+            "attribution_text": "TEXT",
+        },
+    }
+    try:
+        from sqlalchemy import inspect, text
+
+        inspector = inspect(engine)
+        existing_tables = set(inspector.get_table_names())
+        with engine.begin() as conn:
+            for table, columns in missing.items():
+                if table not in existing_tables:
+                    continue
+                present = {c["name"] for c in inspector.get_columns(table)}
+                for column, sql_type in columns.items():
+                    if column not in present:
+                        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}"))
+    except Exception:
+        pass  # nullable columns only — old rows read as None without them
+
+
 def init_db(url: str | None = None):
     """Create all tables (idempotent). Returns the engine."""
     engine = make_engine(url)
     Base.metadata.create_all(engine)
+    _ensure_columns(engine)
     return engine
 
 

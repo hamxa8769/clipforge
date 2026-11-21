@@ -56,10 +56,21 @@ from clipforge.db import (
 )
 from clipforge.highlights import Candidate, find_candidates
 from clipforge.ingest import IngestError, ingest_local, ingest_youtube
+from clipforge.licensing import build_attribution_text, merge_records, record_from_obj
+from clipforge.live import (
+    LIVE_DEFAULT_DURATION_S,
+    LiveCaptureCancelled,
+    LiveCaptureError,
+    capture_live_stream,
+    check_can_clip,
+    clear_live_cancel,
+    live_cancel_event,
+)
 from clipforge.reframe import compute_crop_path
 from clipforge.render import RenderError, render_clip
 from clipforge.retention import adjust_candidate_scores, feedback_from_points
 from clipforge.seo import generate_all as generate_all_seo
+from clipforge.thumbnails import ThumbnailError, generate_thumbnails
 from clipforge.transcribe import Transcript, transcribe
 from clipforge.workflow import (
     FFMPEG_DOWNLOAD_URL,
@@ -220,6 +231,29 @@ def run_job(session: Session, job_id: str, data_dir: str | Path | None = None) -
             transcript_text,
             summary,
         )
+    except LiveCaptureCancelled as exc:
+        # The user cancelled a live capture mid-recording: the run is
+        # cancelled (not failed) and the partial recording was deleted.
+        _close_run(session, run, "cancelled", str(exc), started)
+        summary.update(
+            {
+                "status": JobStatus.CANCELLED.value,
+                "error": str(exc),
+            }
+        )
+        return summary
+    except LiveCaptureError as exc:
+        # Already recorded as failed on the job with the plain message
+        # by _run_stages — keep the message plain (no exception type
+        # prefix) and close the run the same way.
+        _close_run(session, run, "failed", str(exc), started)
+        summary.update(
+            {
+                "status": JobStatus.FAILED.value,
+                "error": str(exc),
+            }
+        )
+        return summary
     except MissingDependencyError as exc:
         # Already recorded as blocked on the job + stage by _run_stages.
         _close_run(session, run, "blocked", str(exc), started)
@@ -287,6 +321,64 @@ def _run_stages(
                 own_content=bool(job.own_content),
                 out_dir=data / "uploads",
             )
+        elif job.source_type == "live":
+            # Live capture (v0.7.0): record a bounded segment of the
+            # live stream, then the normal stages run on the recording.
+            # The licence was verified by the capture endpoint, but the
+            # worker re-checks the stored meta — a standard-licence
+            # third-party stream is never captured, whatever the job
+            # row claims.
+            require_tool(
+                "yt-dlp",
+                "yt-dlp records the live stream",
+                "Install yt-dlp (pip install yt-dlp) or use a local file upload.",
+            )
+            live_meta = dict(job.meta_json or {})
+            try:
+                check_can_clip(
+                    str(live_meta.get("live_licence") or "unknown"),
+                    bool(live_meta.get("live_is_own")),
+                )
+            except LiveCaptureError as exc:
+                tracker.fail("ingest", str(exc), error_code="live_not_clippable")
+                job.status = JobStatus.FAILED.value
+                job.error = str(exc)
+                session.commit()
+                raise
+            duration = int(live_meta.get("live_duration_s") or LIVE_DEFAULT_DURATION_S)
+            last_pct = {"value": -1.0}
+
+            def _capture_progress(frac: float) -> None:
+                # Ingest is 10% of the job: report capture progress
+                # inside it, throttled to whole-percent changes so a
+                # 300s capture does not commit hundreds of times.
+                pct = round(frac * 10.0, 1)
+                if pct - last_pct["value"] >= 1.0:
+                    last_pct["value"] = pct
+                    _set_job_meta(session, job, progress_pct=pct)
+
+            try:
+                source = capture_live_stream(
+                    job.source_url or "",
+                    out_dir=data / "uploads",
+                    duration_s=duration,
+                    cancel_event=live_cancel_event(job.id),
+                    on_progress=_capture_progress,
+                )
+            except LiveCaptureCancelled as exc:
+                tracker.fail("ingest", str(exc), error_code="live_cancelled")
+                job.status = JobStatus.CANCELLED.value
+                job.error = str(exc)
+                session.commit()
+                raise
+            except LiveCaptureError as exc:
+                tracker.fail("ingest", str(exc), error_code="live_capture_failed")
+                job.status = JobStatus.FAILED.value
+                job.error = str(exc)
+                session.commit()
+                raise
+            finally:
+                clear_live_cancel(job.id)
         else:
             require_tool(
                 "ffprobe",
@@ -613,13 +705,57 @@ def _run_stages(
         detail={"clips": render_detail},
     )
 
+    # ------------------------------------------- 4b. licence + thumbnails
+    # v0.7.0: every rendered clip inherits the job's licence record, and
+    # gets two deterministic thumbnails (25% / 75% frames, title overlaid)
+    # next to the clip file. A thumbnail failure never fails the job —
+    # the clip is still reviewable, the detail says why there is no
+    # thumbnail, and POST /clips/<id>/thumbnail can regenerate it.
+    job_licence = record_from_obj(job)
+    thumb_detail: list[dict] = []
+    for row in stored_rows:
+        record = merge_records(record_from_obj(row), job_licence)
+        row.source_license = record["source_license"]
+        row.source_url = record["source_url"]
+        row.source_title = record["source_title"]
+        row.source_channel = record["source_channel"]
+        row.attribution_text = record["attribution_text"]
+        if row.file_path:
+            try:
+                variants = generate_thumbnails(
+                    row.file_path,
+                    out_dir,
+                    title=job.title or row.hook_line or "",
+                    start_s=row.start_s,
+                    end_s=row.end_s,
+                )
+                row.thumbnail_json = variants
+                row.thumbnail_path = variants[0]["path"] if variants else None
+                thumb_detail.append({"n": row.n, "status": "ok", "variants": len(variants)})
+            except ThumbnailError as exc:
+                thumb_detail.append({"n": row.n, "status": "failed", "error": str(exc)})
+        else:
+            thumb_detail.append({"n": row.n, "status": "skipped", "error": "clip not rendered"})
+    session.commit()
+    summary["thumbnails"] = thumb_detail
+
     # ------------------------------------------------------------ 5. seo
     tracker.begin("seo", "generate per-platform SEO variants")
     seo_count = 0
     keyword = (job.title or "").split(":")[0].strip() or "clip"
     for row in stored_rows:
+        attribution = build_attribution_text(
+            row.source_title or job.title,
+            row.source_channel,
+            row.source_url or job.source_url,
+            row.source_license,
+        )
         variants = generate_all_seo(
-            keyword, row.hook_line or "", row.hook_line or "", row.duration_s or 30.0
+            keyword,
+            row.hook_line or "",
+            row.hook_line or "",
+            row.duration_s or 30.0,
+            attribution_text=attribution,
         )
         for platform, variant in variants.items():
             existing = (

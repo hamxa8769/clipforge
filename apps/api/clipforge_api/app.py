@@ -14,6 +14,9 @@ approved Post record, explicit credentials, and ``dry_run=false``):
                                       ETA, retry/cancel)
   POST /jobs/{id}/candidates/{n}/approve | reject | trim
   GET  /clips/{candidate_id}/seo     (stored per-platform SEO variants)
+  GET  /clips/{candidate_id}/thumbnail | POST (regenerate variants)
+                                     | POST /thumbnail/select (pick variant)
+  GET  /media/thumbnails/{job_id}/{filename} (serve generated thumbnails)
   GET  /media/clips/{job_id}/{filename} | /media/uploads/{filename}
                                      (serve rendered clips / source uploads
                                       for the web player's <video> tag)
@@ -148,6 +151,15 @@ from clipforge.db import (
     session_factory,
 )
 from clipforge.ffmpeg_install import FfmpegInstaller, ensure_bundled_on_path
+from clipforge.licensing import (
+    append_attribution,
+    build_attribution_text,
+    is_lawful_source,
+    merge_records,
+    normalize_license,
+    publish_blocked_reason,
+    record_from_obj,
+)
 from clipforge.llm import (
     GEMINI_DEFAULT_MODEL,
     GEMINI_MODELS,
@@ -170,6 +182,11 @@ from clipforge.retention import (
 )
 from clipforge.scheduler import due_posts, run_due_posts
 from clipforge.seo import generate_all as generate_all_seo
+from clipforge.thumbnails import (
+    ThumbnailError,
+    generate_thumbnails,
+    regenerate_thumbnail,
+)
 from clipforge.worker import RUNNABLE_STATUSES, queue_summary, run_job, run_next_queued
 from clipforge.workflow import (
     check_dependencies,
@@ -188,6 +205,14 @@ class JobCreate(BaseModel):
     title: str = ""
     own_content: bool | None = None
     own_content_declaration: bool | None = None
+    # v0.7.0 lawful CC pipeline (see clipforge.licensing): the source
+    # video's licence + original-video facts. A YouTube job may skip
+    # the own-content declaration when it carries a lawful licence
+    # (own / public-domain / any Creative Commons); a Standard-licence
+    # source is refused outright.
+    source_license: str | None = None
+    source_title: str | None = None
+    source_channel: str | None = None
     # Worker options (stored on job.meta_json; see clipforge.worker).
     transcript_text: str | None = None  # deterministic fallback transcript
     top_n: int = Field(default=3, ge=1, le=10)
@@ -200,6 +225,27 @@ class JobCreate(BaseModel):
 class CandidateTrim(BaseModel):
     start_s: float = Field(ge=0)
     end_s: float = Field(gt=0)
+
+
+class ThumbnailRegenerate(BaseModel):
+    """Regenerate thumbnail variant(s) for a clip.
+
+    ``text`` overrides the overlaid title (default: the job title /
+    hook line); ``frame_second`` picks the frame for the regenerated
+    variant (default: the variant's deterministic frame — 25% for
+    variant 1, 75% for variant 2). ``variant`` regenerates one variant
+    only; omitted, both variants are regenerated.
+    """
+
+    text: str | None = None
+    frame_second: float | None = Field(default=None, ge=0)
+    variant: int | None = Field(default=None, ge=1, le=2)
+
+
+class ThumbnailSelect(BaseModel):
+    """Pick which generated variant is the clip's thumbnail."""
+
+    variant: int = Field(ge=1, le=2)
 
 
 class PostCreate(BaseModel):
@@ -375,9 +421,12 @@ app.include_router(setup_router)
 # so /api/trending/* and /growth/* are never swallowed by static serving.
 from clipforge_api.growth import router as growth_router  # noqa: E402
 from clipforge_api.trending import router as trending_router  # noqa: E402
+from clipforge_api.trending import videos_router  # noqa: E402
 
 app.include_router(growth_router)
 app.include_router(trending_router)
+# v0.7.0 (Worker A): GET /api/videos/license (licence check).
+app.include_router(videos_router)
 
 
 def _job_out(job: Job, db: Session, detail: bool = False) -> dict:
@@ -392,6 +441,17 @@ def _job_out(job: Job, db: Session, detail: bool = False) -> dict:
         "status": job.status,
         "own_content": job.own_content,
         "error": job.error,
+        # v0.7.0 licence record (clipforge.licensing field names).
+        "source_license": getattr(job, "source_license", None),
+        "source_title": getattr(job, "source_title", None),
+        "source_channel": getattr(job, "source_channel", None),
+        "attribution_text": build_attribution_text(
+            getattr(job, "source_title", None) or job.title,
+            getattr(job, "source_channel", None),
+            job.source_url,
+            getattr(job, "source_license", None),
+        )
+        or None,
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "candidates": db.query(ClipCandidate).filter_by(job_id=job.id).count(),
         # Live workflow fields (v0.3.0) — always present, null/0 when idle.
@@ -449,10 +509,44 @@ def _job_out(job: Job, db: Session, detail: bool = False) -> dict:
     return out
 
 
-def _candidate_out(c: ClipCandidate, keyword: str) -> dict:
+def _thumbnail_url(job_id: str, filename: str) -> str:
+    return f"/media/thumbnails/{job_id}/{filename}"
+
+
+def _thumbnails_out(c: ClipCandidate) -> list[dict]:
+    """Stored thumbnail variants with URLs (variant 1 = thumbnail.jpg)."""
+    variants = list(getattr(c, "thumbnail_json", None) or [])
+    return [
+        {
+            "variant": v.get("variant"),
+            "filename": v.get("filename"),
+            "frame_second": v.get("frame_second"),
+            "title_text": v.get("title_text"),
+            "url": _thumbnail_url(c.job_id, v["filename"]) if v.get("filename") else None,
+        }
+        for v in variants
+    ]
+
+
+def _licence_out(candidate: ClipCandidate | None, job: Job | None) -> dict:
+    """Licence record for a clip: candidate wins, job fills the gaps."""
+    primary = record_from_obj(candidate) if candidate is not None else {}
+    fallback = record_from_obj(job) if job is not None else {}
+    return merge_records(primary, fallback)
+
+
+def _candidate_out(
+    c: ClipCandidate, keyword: str, job: Job | None = None, db: Session | None = None
+) -> dict:
+    record = _licence_out(c, job)
     seo = generate_all_seo(
-        keyword or c.hook_line or "clip", c.hook_line or "", c.hook_line or "", c.duration_s or 30.0
+        keyword or c.hook_line or "clip",
+        c.hook_line or "",
+        c.hook_line or "",
+        c.duration_s or 30.0,
+        attribution_text=record["attribution_text"],
     )
+    thumbnails = _thumbnails_out(c)
     return {
         "id": c.id,
         "job_id": c.job_id,
@@ -471,6 +565,15 @@ def _candidate_out(c: ClipCandidate, keyword: str) -> dict:
         "orig_end_s": c.end_s,
         "status": c.status,
         "file_path": c.file_path,
+        # v0.7.0 licence record + thumbnails.
+        "source_license": record["source_license"],
+        "source_url": record["source_url"],
+        "source_title": record["source_title"],
+        "source_channel": record["source_channel"],
+        "attribution_text": record["attribution_text"],
+        "thumbnail_url": thumbnails[0]["url"] if thumbnails else None,
+        "thumbnail_path": getattr(c, "thumbnail_path", None),
+        "thumbnails": thumbnails,
         "seo": {
             p: {"title": v["title"], "description": v["description"], "hashtags": v["hashtags"]}
             for p, v in seo.items()
@@ -480,6 +583,7 @@ def _candidate_out(c: ClipCandidate, keyword: str) -> dict:
 
 def _post_out(p: Post) -> dict:
     seo = p.seo_json or {}
+    record = record_from_obj(p)
     return {
         "id": p.id,
         "clip_id": p.clip_candidate_id,
@@ -497,6 +601,12 @@ def _post_out(p: Post) -> dict:
         "publish_result": p.publish_result_json,
         "title_variant_id": p.title_variant_id,
         "brand_kit_id": p.brand_kit_id,
+        # v0.7.0 licence record — the approval queue displays this.
+        "source_license": record["source_license"],
+        "source_url": record["source_url"],
+        "source_title": record["source_title"],
+        "source_channel": record["source_channel"],
+        "attribution_text": record["attribution_text"],
         "created_at": p.created_at.isoformat() if p.created_at else None,
     }
 
@@ -610,6 +720,9 @@ def get_dependencies():
 # so existence is not leaked either way.
 _MEDIA_EXTS = {".mp4", ".webm", ".mov"}
 _MEDIA_TYPES = {".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime"}
+# v0.7.0 thumbnails served from the same clips dir (GET /media/thumbnails/...).
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
+_IMAGE_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
 
 
 def _data_dir() -> Path:
@@ -618,12 +731,13 @@ def _data_dir() -> Path:
     return Path(os.environ.get("CLIPFORGE_DATA_DIR") or settings.data_dir)
 
 
-def _media_file(subdir: str, *parts: str) -> Path:
+def _media_file(subdir: str, *parts: str, allowed_exts: set[str] | None = None) -> Path:
     root = (_data_dir() / subdir).resolve()
     target = (root.joinpath(*parts)).resolve()
     if not target.is_relative_to(root):
         raise HTTPException(404, "file not found")
-    if target.suffix.lower() not in _MEDIA_EXTS or not target.is_file():
+    exts = allowed_exts if allowed_exts is not None else _MEDIA_EXTS
+    if target.suffix.lower() not in exts or not target.is_file():
         raise HTTPException(404, "file not found")
     return target
 
@@ -632,6 +746,17 @@ def _media_file(subdir: str, *parts: str) -> Path:
 def media_clip(job_id: str, filename: str):
     path = _media_file("clips", job_id, filename)
     return FileResponse(path, media_type=_MEDIA_TYPES[path.suffix.lower()])
+
+
+@app.get("/media/thumbnails/{job_id}/{filename}")
+def media_thumbnail(job_id: str, filename: str):
+    """Serve a generated clip thumbnail (v0.7.0).
+
+    Same traversal guard as the video route; only .jpg/.png under
+    data/clips/<job_id>/ are reachable.
+    """
+    path = _media_file("clips", job_id, filename, allowed_exts=_IMAGE_EXTS)
+    return FileResponse(path, media_type=_IMAGE_TYPES[path.suffix.lower()])
 
 
 @app.get("/media/uploads/{filename}")
@@ -643,12 +768,27 @@ def media_upload(filename: str):
 # ------------------------------------------------------------------ jobs
 @app.post("/jobs", status_code=201)
 def create_job(payload: JobCreate, db: Session = Depends(get_db)):
-    if payload.source_type == "youtube" and not payload.declared():
-        raise HTTPException(
-            422,
-            "YouTube ingest requires own_content_declaration=true: "
-            "ClipForge only processes content you own or hold the rights to.",
-        )
+    # v0.7.0 lawful-source gate: a YouTube job needs either the
+    # own-content declaration or a lawful licence (own / public-domain /
+    # any Creative Commons). A Standard-licence source is refused here
+    # — and again at publish time — because re-uploading it would
+    # infringe the original creator's copyright.
+    licence = normalize_license(payload.source_license)
+    if payload.source_type == "youtube":
+        if licence == "standard":
+            raise HTTPException(
+                422,
+                "This video is under the YouTube Standard licence, so "
+                "ClipForge cannot clip or post it. Only your own videos, "
+                "public-domain videos, or Creative Commons videos are allowed.",
+            )
+        if not payload.declared() and not is_lawful_source(licence):
+            raise HTTPException(
+                422,
+                "YouTube ingest requires own_content_declaration=true or a "
+                "Creative Commons / public-domain source_license: ClipForge "
+                "only processes content you own or hold the rights to.",
+            )
     if (
         payload.source_type == "local"
         and payload.source_path is None
@@ -663,7 +803,10 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)):
         source_url=payload.source_url,
         source_path=payload.source_path,
         title=payload.title,
-        own_content=payload.declared(),
+        own_content=payload.declared() or licence == "own",
+        source_license=licence,
+        source_title=payload.source_title,
+        source_channel=payload.source_channel,
         status=JobStatus.PENDING.value,
         meta_json=meta,
     )
@@ -857,7 +1000,7 @@ def list_candidates(job_id: str, db: Session = Depends(get_db)):
     job = _get_or_404(db, Job, job_id, "job")
     keyword = (job.title or "").split(":")[0].strip() or "clip"
     cands = db.query(ClipCandidate).filter_by(job_id=job_id).order_by(ClipCandidate.n.asc()).all()
-    return [_candidate_out(c, keyword) for c in cands]
+    return [_candidate_out(c, keyword, job=job) for c in cands]
 
 
 def _candidate_by_n(db: Session, job_id: str, n: int) -> ClipCandidate:
@@ -913,6 +1056,139 @@ def get_candidate_seo(candidate_id: str, db: Session = Depends(get_db)):
     }
 
 
+# ------------------------------------------------------------------ thumbnails (v0.7.0)
+def _clip_thumbnail_out(cand: ClipCandidate) -> dict:
+    thumbnails = _thumbnails_out(cand)
+    selected = getattr(cand, "thumbnail_path", None)
+    selected_url = None
+    if selected:
+        selected_url = _thumbnail_url(cand.job_id, Path(selected).name)
+    elif thumbnails:
+        selected_url = thumbnails[0]["url"]
+    return {
+        "clip_candidate_id": cand.id,
+        "job_id": cand.job_id,
+        "thumbnail_url": selected_url,
+        "thumbnail_path": selected,
+        "thumbnails": thumbnails,
+    }
+
+
+def _store_thumbnails(db: Session, cand: ClipCandidate, new_variants: list[dict]) -> None:
+    """Merge regenerated variants into the stored list (by variant number).
+
+    The currently selected thumbnail stays selected — regeneration
+    never silently switches the user to another variant.
+    """
+    stored = {v.get("variant"): dict(v) for v in (getattr(cand, "thumbnail_json", None) or [])}
+    for variant in new_variants:
+        stored[variant["variant"]] = dict(variant)
+    merged = [stored[k] for k in sorted(stored)]
+    cand.thumbnail_json = merged
+    selected = getattr(cand, "thumbnail_path", None)
+    if selected and any(v["path"] == selected for v in merged):
+        cand.thumbnail_path = selected
+    elif merged:
+        cand.thumbnail_path = merged[0]["path"]
+    db.commit()
+
+
+@app.get("/clips/{candidate_id}/thumbnail")
+def get_clip_thumbnail(candidate_id: str, db: Session = Depends(get_db)):
+    """Generated thumbnails for a clip (variant 1 = default thumbnail)."""
+    cand = _get_or_404(db, ClipCandidate, candidate_id, "clip candidate")
+    return _clip_thumbnail_out(cand)
+
+
+@app.post("/clips/{candidate_id}/thumbnail")
+def regenerate_clip_thumbnail(
+    candidate_id: str, payload: ThumbnailRegenerate, db: Session = Depends(get_db)
+):
+    """Regenerate a clip's thumbnail(s) from the rendered clip file.
+
+    Extracts a fresh frame with ffmpeg and overlays the title text.
+    ``variant`` regenerates one variant; omitted, both variants are
+    regenerated (``frame_second`` then applies to variant 1, variant 2
+    keeps its previous frame). Returns the updated variant list with
+    ``thumbnail_url``s — the URLs are stable across regenerations.
+    """
+    from pathlib import Path as _Path
+
+    cand = _get_or_404(db, ClipCandidate, candidate_id, "clip candidate")
+    if not cand.file_path or not _Path(cand.file_path).is_file():
+        raise HTTPException(
+            409,
+            "This clip has no rendered video yet — run the job first, "
+            "then regenerate the thumbnail.",
+        )
+    job = db.get(Job, cand.job_id)
+    title = (
+        payload.text
+        if payload.text is not None
+        else (job.title if job else "") or cand.hook_line or ""
+    )
+    out_dir = _Path(cand.file_path).parent
+    stored = {v.get("variant"): v for v in (getattr(cand, "thumbnail_json", None) or [])}
+    try:
+        if payload.variant is not None:
+            updated = [
+                regenerate_thumbnail(
+                    cand.file_path,
+                    out_dir,
+                    title,
+                    variant=payload.variant,
+                    frame_second=payload.frame_second,
+                    start_s=cand.start_s,
+                    end_s=cand.end_s,
+                )
+            ]
+        else:
+            # Both variants, in order. An explicit frame_second re-frames
+            # variant 1; each variant otherwise keeps its previous frame
+            # (or its deterministic default: 25% / 75% of the clip).
+            span = max(0.0, cand.end_s - cand.start_s)
+            defaults = [cand.start_s + 0.25 * span, cand.start_s + 0.75 * span]
+            frame_seconds = [
+                payload.frame_second
+                if payload.frame_second is not None
+                else stored.get(1, {}).get("frame_second") or defaults[0],
+                stored.get(2, {}).get("frame_second") or defaults[1],
+            ]
+            updated = generate_thumbnails(
+                cand.file_path,
+                out_dir,
+                title,
+                start_s=cand.start_s,
+                end_s=cand.end_s,
+                frame_seconds=frame_seconds,
+            )
+    except ThumbnailError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    _store_thumbnails(db, cand, updated)
+    return _clip_thumbnail_out(cand)
+
+
+@app.post("/clips/{candidate_id}/thumbnail/select")
+def select_clip_thumbnail(
+    candidate_id: str, payload: ThumbnailSelect, db: Session = Depends(get_db)
+):
+    """Pick which generated variant is the clip's thumbnail."""
+    from pathlib import Path as _Path
+
+    cand = _get_or_404(db, ClipCandidate, candidate_id, "clip candidate")
+    variants = {v.get("variant"): v for v in (getattr(cand, "thumbnail_json", None) or [])}
+    chosen = variants.get(payload.variant)
+    if chosen is None or not _Path(chosen["path"]).is_file():
+        raise HTTPException(
+            404,
+            f"thumbnail variant {payload.variant} does not exist for this "
+            "clip — generate thumbnails first.",
+        )
+    cand.thumbnail_path = chosen["path"]
+    db.commit()
+    return _clip_thumbnail_out(cand)
+
+
 @app.post("/jobs/{job_id}/candidates/{n}/reject")
 def reject_candidate(job_id: str, n: int, db: Session = Depends(get_db)):
     cand = _candidate_by_n(db, job_id, n)
@@ -951,15 +1227,33 @@ def create_post(payload: PostCreate, db: Session = Depends(get_db)):
         )
     if payload.account_id:
         _get_or_404(db, SocialAccount, payload.account_id, "account")
+    # v0.7.0 licence record: the clip's licence travels onto the post,
+    # and a Standard-licence third-party source is refused here as well
+    # as at publish time — creating the post must never be a way around
+    # the publish refusal.
+    job = db.get(Job, cand.job_id)
+    record = _licence_out(cand, job)
+    blocked = publish_blocked_reason(
+        record["source_license"], own_content=bool(job.own_content) if job else False
+    )
+    if blocked:
+        raise HTTPException(409, blocked)
     seo = payload.seo
     if seo is None:
-        job = db.get(Job, cand.job_id)
         keyword = ((job.title if job else "") or "").split(":")[0].strip() or "clip"
         seo = generate_all_seo(
-            keyword, cand.hook_line or "", cand.hook_line or "", cand.duration_s or 30.0
+            keyword,
+            cand.hook_line or "",
+            cand.hook_line or "",
+            cand.duration_s or 30.0,
+            attribution_text=record["attribution_text"],
         ).get(payload.platform, {})
     else:
         seo = dict(seo)
+        if record["attribution_text"]:
+            seo["description"] = append_attribution(
+                seo.get("description") or "", record["attribution_text"]
+            )
     # Brand kit: styles the SEO copy (intro/outro + kit metadata) and
     # records the caption style the renderer should use.
     kit = _kit_spec(db, payload.brand_kit_id)
@@ -993,6 +1287,11 @@ def create_post(payload: PostCreate, db: Session = Depends(get_db)):
         video_url=payload.video_url,
         brand_kit_id=payload.brand_kit_id,
         title_variant_id=variant_id,
+        source_license=record["source_license"],
+        source_url=record["source_url"],
+        source_title=record["source_title"],
+        source_channel=record["source_channel"],
+        attribution_text=record["attribution_text"],
     )
     db.add(post)
     db.commit()
@@ -1038,6 +1337,20 @@ def _publish_post(post: Post, dry_run: bool, db: Session) -> dict:
         raise HTTPException(409, f"post is '{post.status}' — approve it before publishing")
     if post.status in {PostStatus.DRAFT.value, PostStatus.PENDING_APPROVAL.value}:
         raise HTTPException(409, "Approval-first: approve this post before publishing it")
+    # v0.7.0 defence in depth: even if the job-creation and post-creation
+    # checks were bypassed (e.g. a post seeded before the licence was
+    # recorded), a Standard-licence third-party source is never published.
+    record = record_from_obj(post)
+    if not record["source_license"] and post.clip_candidate_id:
+        cand = db.get(ClipCandidate, post.clip_candidate_id)
+        if cand is not None:
+            job = db.get(Job, cand.job_id)
+            record = merge_records(record_from_obj(cand), record_from_obj(job) if job else {})
+    blocked = publish_blocked_reason(record["source_license"])
+    if blocked:
+        post.error = blocked
+        db.commit()
+        raise HTTPException(409, blocked)
     if not dry_run and _effective_dry_run():
         raise HTTPException(
             409,

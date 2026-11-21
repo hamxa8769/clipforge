@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import re
 
+from clipforge.licensing import append_attribution
 from clipforge.publishing.limits import PLATFORM_LIMITS
 
 YOUTUBE = "youtube"
@@ -201,6 +202,7 @@ def generate_seo(
     duration_s: float = 30.0,
     extra_hashtags: list[str] | None = None,
     llm_polish: bool = False,
+    attribution_text: str | None = None,
 ) -> dict:
     """Generate one platform's SEO variant + validation warnings.
 
@@ -208,6 +210,13 @@ def generate_seo(
     without it the deterministic template is returned unchanged. The LLM
     path is a stub in v0.1.0 — it must never be wired to send video/audio,
     only the keyword/hook text, and only on explicit opt-in.
+
+    ``attribution_text`` (v0.7.0) is the CC credit block for the source
+    video. It is appended to the description — and to the caption on
+    platforms where the caption *is* the description — via
+    :func:`clipforge.licensing.append_attribution`, which strips any
+    previously appended block first, so re-running SEO never duplicates
+    the credit. YouTube titles are never touched by attribution.
     """
     platform = platform.lower()
     if platform not in _GENERATORS:
@@ -222,6 +231,13 @@ def generate_seo(
             if key in variant and variant[key]:
                 variant[key] = re.sub(r"( #[a-z0-9]+)+$", "", variant[key]).rstrip()
                 variant[key] = variant[key] + "\n" + " ".join(f"#{t}" for t in merged)
+    if attribution_text:
+        before = variant.get("description") or ""
+        variant["description"] = append_attribution(before, attribution_text)
+        # TikTok / Instagram / Facebook captions carry the description
+        # text — keep them in sync so the credit is never lost there.
+        if (variant.get("caption") or "") == before:
+            variant["caption"] = variant["description"]
     if llm_polish and os.environ.get("CLIPFORGE_LLM_API_KEY"):
         variant["warnings_llm"] = (
             "LLM polish requested but not wired in v0.1.0 — deterministic "
@@ -233,10 +249,21 @@ def generate_seo(
 
 
 def generate_all(
-    keyword: str, hook: str, title_hint: str = "", duration_s: float = 30.0
+    keyword: str,
+    hook: str,
+    title_hint: str = "",
+    duration_s: float = 30.0,
+    attribution_text: str | None = None,
 ) -> dict[str, dict]:
-    """All four platform variants from one master clip (each different)."""
-    return {p: generate_seo(p, keyword, hook, title_hint, duration_s) for p in PLATFORMS}
+    """All four platform variants from one master clip (each different).
+
+    ``attribution_text`` is the CC credit block — appended to every
+    platform's description (see :func:`generate_seo`).
+    """
+    return {
+        p: generate_seo(p, keyword, hook, title_hint, duration_s, attribution_text=attribution_text)
+        for p in PLATFORMS
+    }
 
 
 def validate(platform: str, variant: dict) -> list[str]:

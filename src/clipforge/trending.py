@@ -29,6 +29,12 @@ videos or videos they have rights / a licence to use. It must NOT
 download and re-upload other creators' videos. :func:`is_trending_source`
 refuses a trending video URL as a clip source, and the router + agent
 both enforce it.
+
+Creative Commons discovery (v0.7.0, Worker A): ``search_trending``
+takes ``licensed_only=True`` (``videoLicense=creativeCommon`` + a
+``status.license`` verification pass), and :func:`check_video_license`
+answers whether one video may be clipped — CC or the user's own video
+only, never a standard-licence third-party video, never a guess.
 """
 
 from __future__ import annotations
@@ -74,6 +80,35 @@ RIGHTS_NOTICE = (
     "rights / licence to use. It is not a tool to re-upload other "
     "creators' videos."
 )
+
+# Creative Commons discovery (v0.7.0, Worker A). YouTube's
+# ``creativeCommon`` licence is CC BY 3.0 — the licence page below is
+# what the API reports for such videos. The only other licence value
+# the YouTube Data API returns is ``youtube`` (the standard licence).
+CC_LICENSE = "creativeCommon"
+STANDARD_LICENSE = "youtube"
+CC_LICENSE_URL = "https://creativecommons.org/licenses/by/3.0/"
+
+# Plain-language refusal for a standard-licence third-party video.
+# Shown verbatim by the licence-check endpoint and the /run guardrail.
+STANDARD_LICENSE_REASON = (
+    "This video uses YouTube's standard licence — it cannot be "
+    "re-uploaded. Only Creative Commons, public-domain, or your own "
+    "videos can be clipped."
+)
+
+UNVERIFIABLE_LICENSE_REASON = (
+    "Could not verify this video's licence — YouTube did not report "
+    "one, so ClipForge cannot confirm it is safe to clip. Only "
+    "Creative Commons, public-domain, or your own videos can be clipped."
+)
+
+
+def license_url_for(license_value: str | None) -> str:
+    """The licence page for a YouTube licence value ("" when there is
+    none — a standard-licence video has no licence page)."""
+    return CC_LICENSE_URL if license_value == CC_LICENSE else ""
+
 
 _URL_RE = re.compile(r"^https?://\S+$")
 _YT_VIDEO_RE = re.compile(
@@ -377,6 +412,10 @@ class TrendingVideo:
     like_count: int = 0
     comment_count: int = 0
     trend_score: float = 0.0
+    # Licence (v0.7.0): only populated when the search verified it
+    # (licensed_only=True) — "" means "not checked", never a guess.
+    license: str = ""
+    license_url: str = ""
 
     @property
     def url(self) -> str:
@@ -411,6 +450,7 @@ def search_trending(
     *,
     credentials: TrendingCredentials,
     max_results: int = 10,
+    licensed_only: bool = False,
     client: httpx.Client | None = None,
 ) -> list[TrendingVideo]:
     """Live trending search for a niche. Two YouTube Data API v3 calls:
@@ -418,6 +458,16 @@ def search_trending(
     1. ``search.list`` — recent videos in the niche, most views first.
     2. ``videos.list`` — statistics for those ids (views / likes /
        comments / published date).
+
+    With ``licensed_only=True`` (v0.7.0, Creative Commons discovery)
+    the search also passes ``videoLicense=creativeCommon`` to
+    search.list, asks videos.list for the ``status`` part, and VERIFIES
+    each result: only videos whose ``status.license`` is
+    ``creativeCommon`` are kept, each carrying ``license`` +
+    ``license_url``. Anything else is dropped — the search never
+    claims a video is CC-licensed on the search filter alone.
+    With ``licensed_only=False`` (the default) the search behaves
+    exactly as in v0.6.0: all trending videos, no licence filtering.
 
     Results are ranked by :func:`trend_score` (velocity + engagement),
     highest first. Raises :class:`TrendingError` (plain language) when
@@ -428,17 +478,20 @@ def search_trending(
     http = client or httpx.Client(timeout=30.0)
     try:
         published_after = (datetime.now(UTC) - timedelta(days=TRENDING_WINDOW_DAYS)).isoformat()
+        search_params: dict = {
+            "part": "snippet",
+            "q": niche_search_query(niche),
+            "type": "video",
+            "order": "viewCount",
+            "publishedAfter": published_after,
+            "maxResults": min(max(1, max_results), SEARCH_MAX_RESULTS),
+            **credentials.auth_params(),
+        }
+        if licensed_only:
+            search_params["videoLicense"] = CC_LICENSE
         search_resp = http.get(
             f"{YOUTUBE_API_BASE}/search",
-            params={
-                "part": "snippet",
-                "q": niche_search_query(niche),
-                "type": "video",
-                "order": "viewCount",
-                "publishedAfter": published_after,
-                "maxResults": min(max(1, max_results), SEARCH_MAX_RESULTS),
-                **credentials.auth_params(),
-            },
+            params=search_params,
             headers=credentials.auth_headers(),
         )
         if search_resp.status_code != 200:
@@ -456,7 +509,7 @@ def search_trending(
         stats_resp = http.get(
             f"{YOUTUBE_API_BASE}/videos",
             params={
-                "part": "snippet,statistics",
+                "part": "snippet,statistics,status" if licensed_only else "snippet,statistics",
                 "id": ",".join(ids),
                 **credentials.auth_params(),
             },
@@ -473,6 +526,13 @@ def search_trending(
                 continue
             snippet = item.get("snippet") or {}
             stats = item.get("statistics") or {}
+            status = item.get("status") or {}
+            # Licence verification (licensed_only): the search filter
+            # alone is not proof — drop anything YouTube does not
+            # confirm as Creative Commons.
+            license_value = str(status.get("license") or "")
+            if licensed_only and license_value != CC_LICENSE:
+                continue
             published = _parse_published(snippet.get("publishedAt"))
             video = TrendingVideo(
                 video_id=str(item.get("id") or ""),
@@ -483,6 +543,8 @@ def search_trending(
                 view_count=int(stats.get("viewCount") or 0),
                 like_count=int(stats.get("likeCount") or 0),
                 comment_count=int(stats.get("commentCount") or 0),
+                license=license_value if licensed_only else "",
+                license_url=license_url_for(license_value) if licensed_only else "",
             )
             video.trend_score = trend_score(
                 video.view_count, video.like_count, video.comment_count, published, now=now
@@ -508,6 +570,118 @@ def _safe_json(response: httpx.Response) -> dict:
     except ValueError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+# ------------------------------------------------------------------ licence check
+def own_channel_id(secrets: SecretStore) -> str:
+    """The connected YouTube channel's id (``account_ref`` from the
+    OAuth token, set from channels.list ``mine=true`` at connect
+    time). "" when no channel is connected — ownership then cannot be
+    established and the caller must say so honestly."""
+    record = TokenStore(secrets).load("youtube")
+    return (record.account_ref or "") if record is not None else ""
+
+
+def check_video_license(
+    url: str,
+    *,
+    credentials: TrendingCredentials,
+    own_channel_id: str = "",
+    client: httpx.Client | None = None,
+) -> dict:
+    """Check whether one YouTube video may be clipped, live from the
+    YouTube Data API (``videos.list`` ``part=status,snippet,
+    contentDetails``).
+
+    Returns ``{video_id, title, channel, channel_id, license,
+    license_url, can_clip, reason}``. ``can_clip`` is True ONLY when
+    the video is Creative Commons licensed OR it is the user's own
+    video (its channel id matches ``own_channel_id``). A standard
+    licence (``youtube``) is refused with
+    :data:`STANDARD_LICENSE_REASON`. A video whose licence cannot be
+    verified at all (no ``status.license`` in the response) is also
+    refused — the licence is never guessed or faked.
+
+    Raises :class:`TrendingError` (plain language) when the URL is not
+    a YouTube video URL, YouTube has no such video, or the API call
+    fails — the caller turns that into the honest error state.
+    """
+    video_id = extract_youtube_video_id(url)
+    if not video_id:
+        raise TrendingError(
+            "That doesn't look like a YouTube video URL — paste a "
+            "youtube.com/watch, youtu.be, or Shorts link."
+        )
+    own_client = client is None
+    http = client or httpx.Client(timeout=30.0)
+    try:
+        resp = http.get(
+            f"{YOUTUBE_API_BASE}/videos",
+            params={
+                "part": "status,snippet,contentDetails",
+                "id": video_id,
+                **credentials.auth_params(),
+            },
+            headers=credentials.auth_headers(),
+        )
+        if resp.status_code != 200:
+            raise TrendingError(_youtube_error_message(_safe_json(resp), resp.status_code))
+        items = _safe_json(resp).get("items") or []
+        if not items or not isinstance(items[0], dict):
+            raise TrendingError(
+                "YouTube could not find that video — it may be private, "
+                "deleted, or the link is wrong. Check the URL and try again."
+            )
+        item = items[0]
+        snippet = item.get("snippet") or {}
+        status = item.get("status") or {}
+        license_value = str(status.get("license") or "")
+        channel_id = str(snippet.get("channelId") or "")
+        is_own = bool(own_channel_id) and channel_id == own_channel_id
+        if license_value == CC_LICENSE:
+            can_clip, reason = (
+                True,
+                (
+                    "This video is licensed under Creative Commons (CC BY) — "
+                    "it can be clipped and re-uploaded with attribution to "
+                    "the original creator."
+                ),
+            )
+        elif is_own:
+            can_clip, reason = True, ("This is your own video — you can clip it.")
+        elif license_value == STANDARD_LICENSE:
+            can_clip, reason = False, STANDARD_LICENSE_REASON
+        elif not license_value:
+            can_clip, reason = False, UNVERIFIABLE_LICENSE_REASON
+        else:
+            can_clip, reason = (
+                False,
+                (
+                    f"This video's licence ({license_value}) is not one "
+                    "ClipForge can clip. Only Creative Commons, "
+                    "public-domain, or your own videos can be clipped."
+                ),
+            )
+        return {
+            "video_id": video_id,
+            "title": str(snippet.get("title") or ""),
+            "channel": str(snippet.get("channelTitle") or ""),
+            "channel_id": channel_id,
+            "license": license_value,
+            "license_url": license_url_for(license_value),
+            "can_clip": can_clip,
+            "reason": reason,
+        }
+    except TrendingError:
+        raise
+    except httpx.HTTPError as exc:
+        raise TrendingError(
+            "Could not reach the YouTube API — check your internet "
+            f"connection and try again. ({exc})"
+        ) from exc
+    finally:
+        if own_client:
+            http.close()
 
 
 # ------------------------------------------------------------------ topic match
@@ -590,21 +764,29 @@ def match_own_video(channel_url: str, trending_title: str, *, playlist_end: int 
 
 
 __all__ = [
+    "CC_LICENSE",
+    "CC_LICENSE_URL",
     "SEARCH_MAX_RESULTS",
+    "STANDARD_LICENSE",
+    "STANDARD_LICENSE_REASON",
     "TRENDING_NOTICE",
     "TRENDING_WINDOW_DAYS",
     "TrendingCredentials",
     "TrendingError",
     "TrendingVideo",
+    "UNVERIFIABLE_LICENSE_REASON",
     "YOUTUBE_API_BASE",
     "YOUTUBE_API_KEY_ENV",
     "YOUTUBE_API_KEY_SECRET",
+    "check_video_license",
     "credentials_status",
     "extract_youtube_video_id",
     "is_trending_source",
+    "license_url_for",
     "load_youtube_api_key",
     "match_own_video",
     "niche_search_query",
+    "own_channel_id",
     "refuse_trending_source",
     "resolve_credentials",
     "save_youtube_api_key",

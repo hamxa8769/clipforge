@@ -38,6 +38,15 @@ import {
   normalizeTrendingJob,
   normalizeTrendingVideo,
   normalizeTrendingVideos,
+  normalizeVideoLicense,
+  normalizeLicenseCheck,
+  normalizeCandidate,
+  normalizeCandidates,
+  normalizeThumbnailVariants,
+  jobSourceLicense,
+  licenseBadgeLabel,
+  deriveCanClip,
+  attributionForClip,
   normalizeWorkerQueue,
   pipelineStageStates,
   resolveApiUrl,
@@ -542,4 +551,208 @@ test("normalizeTrendingJob keeps the trending topic and per-post video ids", () 
   assert.equal(job?.posts[0].platform, "youtube");
   assert.equal(job?.posts[0].provider_post_id, "ZZZZZZZZZZZ");
   assert.equal(normalizeTrendingJob({}), null);
+});
+
+// --- v0.7.0: licences, CC clipping guardrail, thumbnails, attribution ---
+
+test("normalizeVideoLicense maps YouTube and API licence spellings", () => {
+  // YouTube's raw status.license values (trending / live / licence check).
+  assert.equal(normalizeVideoLicense("creativeCommon"), "cc");
+  assert.equal(normalizeVideoLicense("creativeCommons"), "cc");
+  assert.equal(normalizeVideoLicense("youtube"), "standard");
+  // Canonical keys from clip/job records (clipforge.licensing).
+  assert.equal(normalizeVideoLicense("cc-by-4.0"), "cc");
+  assert.equal(normalizeVideoLicense("cc-by-nc-4.0"), "cc");
+  assert.equal(normalizeVideoLicense("cc-by-sa-3.0"), "cc");
+  assert.equal(normalizeVideoLicense("cc0"), "cc");
+  assert.equal(normalizeVideoLicense("CC-BY"), "cc");
+  assert.equal(normalizeVideoLicense("cc"), "cc");
+  assert.equal(normalizeVideoLicense("public-domain"), "public-domain");
+  assert.equal(normalizeVideoLicense("standard"), "standard");
+  assert.equal(normalizeVideoLicense("own"), "own");
+  assert.equal(normalizeVideoLicense("bogus"), "unknown");
+  assert.equal(normalizeVideoLicense(""), "unknown");
+  assert.equal(normalizeVideoLicense(null), "unknown");
+  assert.equal(normalizeVideoLicense(42), "unknown");
+});
+
+test("licenseBadgeLabel names each licence in plain language", () => {
+  assert.equal(licenseBadgeLabel("cc"), "Creative Commons");
+  assert.equal(licenseBadgeLabel("own"), "Your video");
+  assert.equal(licenseBadgeLabel("standard"), "Standard licence");
+  assert.equal(licenseBadgeLabel("unknown"), "Licence unknown");
+});
+
+test("deriveCanClip allows own + CC and fails closed otherwise", () => {
+  assert.equal(deriveCanClip("cc", null).canClip, true);
+  assert.equal(deriveCanClip("own", null).canClip, true);
+  assert.equal(deriveCanClip("standard", null).canClip, false);
+  assert.equal(deriveCanClip("unknown", null).canClip, false);
+  // The API verdict wins over the derived one.
+  assert.equal(deriveCanClip("cc", false).canClip, false);
+  assert.equal(deriveCanClip("standard", true).canClip, true);
+  assert.match(deriveCanClip("standard", null).reason, /Standard YouTube licence/);
+  assert.match(deriveCanClip("unknown", null).reason, /No licence information/);
+});
+
+test("normalizeTrendingVideo carries licence, verdict and live fields", () => {
+  const cc = normalizeTrendingVideo({
+    video_id: "cc1", title: "CC talk", channel_title: "Open Chan",
+    license: "creativeCommons", license_url: "https://creativecommons.org/licenses/by/4.0/",
+    can_clip: true, reason: "CC BY",
+  });
+  assert.equal(cc?.license, "cc");
+  assert.equal(cc?.can_clip, true);
+  assert.equal(cc?.license_url, "https://creativecommons.org/licenses/by/4.0/");
+
+  const std = normalizeTrendingVideo({ video_id: "std1", title: "Hit song", license: "youtube" });
+  assert.equal(std?.license, "standard");
+  assert.equal(std?.can_clip, false);
+  assert.match(std?.reason ?? "", /Standard YouTube licence/);
+
+  // No licence at all: fail closed.
+  const unknown = normalizeTrendingVideo({ video_id: "u1", title: "Mystery" });
+  assert.equal(unknown?.license, "unknown");
+  assert.equal(unknown?.can_clip, false);
+
+  // Trending search without licensed_only does NOT verify licences:
+  // license "" means "not checked", never a guessed verdict.
+  const unchecked = normalizeTrendingVideo({ video_id: "u2", title: "Unverified", license: "" });
+  assert.equal(unchecked?.license_checked, false);
+  assert.equal(unchecked?.can_clip, false);
+  const checked = normalizeTrendingVideo({ video_id: "u3", title: "Verified CC", license: "creativeCommon" });
+  assert.equal(checked?.license_checked, true);
+  assert.equal(checked?.license_key, "creativeCommon");
+
+  // Live results use the live.py field names: viewers, licence,
+  // clip_reason, is_own (no event_type / concurrent_viewers keys).
+  const live = normalizeTrendingVideo({
+    video_id: "live1", title: "Live now",
+    viewers: 1234, started_at: "2026-11-22T00:00:00Z",
+    licence: "creativeCommon", can_clip: true, clip_reason: "Creative Commons licensed live stream — you can clip it.",
+  });
+  assert.equal(live?.event_type, "live");
+  assert.equal(live?.concurrent_viewers, 1234);
+  assert.equal(live?.started_at, "2026-11-22T00:00:00Z");
+  assert.equal(live?.license, "cc");
+  assert.equal(live?.can_clip, true);
+  const ownLive = normalizeTrendingVideo({
+    video_id: "live2", title: "My stream", viewers: 12, started_at: "2026-11-22T00:00:00Z",
+    licence: "youtube", is_own: true, can_clip: true, clip_reason: "Your own live stream — you can clip it.",
+  });
+  assert.equal(ownLive?.license, "own");
+  assert.equal(ownLive?.can_clip, true);
+});
+
+test("normalizeLicenseCheck normalises the /videos/license contract", () => {
+  const check = normalizeLicenseCheck({
+    video_id: "abc12345678", title: "Open tutorial", channel: "Open Chan",
+    license: "creativeCommons", license_url: "https://creativecommons.org/licenses/by/4.0/",
+    can_clip: true, reason: "CC BY 4.0",
+  });
+  assert.equal(check?.video_id, "abc12345678");
+  assert.equal(check?.license, "cc");
+  assert.equal(check?.can_clip, true);
+  assert.equal(check?.channel, "Open Chan");
+  const std = normalizeLicenseCheck({ video_id: "xyz", license: "youtube", can_clip: false });
+  assert.equal(std?.license, "standard");
+  assert.equal(std?.can_clip, false);
+  assert.equal(std?.license_key, "youtube");
+  // The licence check returns the raw YouTube value even for CC videos.
+  assert.equal(check?.license_key, "creativeCommons");
+  // A standard-licence video that is the user's own still returns
+  // can_clip=true with an "own video" reason — the UI treats it as own.
+  const own = normalizeLicenseCheck({
+    video_id: "own1", license: "youtube", can_clip: true,
+    reason: "This is your own video — you can clip it.",
+  });
+  assert.equal(own?.license, "own");
+  assert.equal(own?.can_clip, true);
+  assert.equal(normalizeLicenseCheck({ title: "no id" }), null);
+  assert.equal(normalizeLicenseCheck(null), null);
+});
+
+test("normalizeCandidate carries thumbnail, variants, source licence and attribution", () => {
+  const c = normalizeCandidate({
+    id: "cand-1", job_id: "job-1", n: 1, score: 80, hook_rating: 8, hook_line: "Hook",
+    reason: "r", transcript_excerpt: "t", start_s: 10, end_s: 40, status: "pending",
+    file_path: null, seo: { youtube: { title: "T", description: "D", hashtags: ["#x"] } },
+    thumbnail_url: "https://example.test/thumb.jpg",
+    thumbnail_variants: ["https://example.test/t1.jpg", "https://example.test/t2.jpg"],
+    thumbnails: [
+      { variant: 1, filename: "thumbnail.jpg", url: "https://example.test/thumb.jpg" },
+      { variant: 2, filename: "thumbnail_2.jpg", url: "https://example.test/t2.jpg" },
+    ],
+    source_license: "creativeCommons", source_url: "https://www.youtube.com/watch?v=abc12345678",
+    source_title: "Open tutorial", source_channel: "Open Chan",
+    attribution_text: "Source: \"Open tutorial\" by Open Chan — CC BY.",
+  });
+  assert.equal(c.thumbnail_url, "https://example.test/thumb.jpg");
+  assert.deepEqual(c.thumbnail_variants, ["https://example.test/thumb.jpg", "https://example.test/t2.jpg"]);
+  assert.deepEqual(c.thumbnails.map((t) => t.variant), [1, 2]);
+  assert.equal(c.thumbnails[0].filename, "thumbnail.jpg");
+  assert.equal(c.source_license, "cc");
+  assert.equal(c.attribution_text, "Source: \"Open tutorial\" by Open Chan — CC BY.");
+  // Missing v0.7.0 fields degrade to empty, never crash.
+  const bare = normalizeCandidate({ id: "cand-2", job_id: "job-1", n: 2, seo: {} });
+  assert.equal(bare.thumbnail_url, null);
+  assert.deepEqual(bare.thumbnail_variants, []);
+  assert.deepEqual(bare.thumbnails, []);
+  assert.equal(bare.source_license, "unknown");
+  assert.equal(bare.attribution_text, null);
+  assert.equal(normalizeCandidates([{ id: "a" }, null]).length, 2);
+  assert.deepEqual(normalizeCandidates(null), []);
+});
+
+test("normalizeThumbnailVariants accepts API objects and plain URL strings", () => {
+  assert.deepEqual(
+    normalizeThumbnailVariants([{ variant: 1, filename: "thumbnail.jpg", url: "https://example.test/t1.jpg" }, { variant: 2, url: "https://example.test/t2.jpg" }]).map((t) => t.url),
+    ["https://example.test/t1.jpg", "https://example.test/t2.jpg"],
+  );
+  assert.deepEqual(normalizeThumbnailVariants(["https://example.test/a.jpg"]).map((t) => t.url), ["https://example.test/a.jpg"]);
+  assert.deepEqual(normalizeThumbnailVariants(null), []);
+  assert.deepEqual(normalizeThumbnailVariants([{ variant: 1 }]), []);
+});
+
+test("normalizeJob carries the v0.7.0 licence record", () => {
+  const job = normalizeJob({
+    id: "job-9", title: "CC job", status: "review",
+    source_license: "cc-by-3.0", source_title: "Open tutorial", source_channel: "Open Chan",
+    attribution_text: "Source: \"Open tutorial\" by Open Chan — Licensed under Creative Commons Attribution 3.0",
+  });
+  assert.equal(job.source_license, "cc");
+  assert.equal(job.source_title, "Open tutorial");
+  assert.equal(job.source_channel, "Open Chan");
+  assert.match(job.attribution_text ?? "", /Open tutorial/);
+  const bare = normalizeJob({ id: "job-10", status: "pending" });
+  assert.equal(bare.source_license, "unknown");
+  assert.equal(bare.attribution_text, null);
+});
+
+test("jobSourceLicense sends the server a canonical key for a clip job", () => {
+  // YouTube's raw CC licence is CC BY: the server's own tests use cc-by-3.0.
+  assert.equal(jobSourceLicense({ license: "cc", license_key: "creativeCommon" }), "cc-by-3.0");
+  assert.equal(jobSourceLicense({ license: "cc", license_key: "" }), "cc-by-3.0");
+  // A canonical key passes through unchanged.
+  assert.equal(jobSourceLicense({ license: "cc", license_key: "cc-by-sa-4.0" }), "cc-by-sa-4.0");
+  assert.equal(jobSourceLicense({ license: "own", license_key: "own" }), "own");
+  assert.equal(jobSourceLicense({ license: "public-domain", license_key: "public-domain" }), "public-domain");
+  assert.equal(jobSourceLicense({ license: "standard", license_key: "youtube" }), "standard");
+});
+
+test("attributionForClip returns the credit for CC sources only", () => {
+  const cc = {
+    source_license: "cc" as const, source_title: "Open tutorial", source_channel: "Open Chan",
+    source_url: "https://www.youtube.com/watch?v=abc12345678", attribution_text: null,
+  };
+  const text = attributionForClip(cc);
+  assert.match(text ?? "", /Open tutorial/);
+  assert.match(text ?? "", /Open Chan/);
+  assert.match(text ?? "", /Creative Commons/);
+  assert.equal(attributionForClip({ ...cc, attribution_text: "Custom credit." }), "Custom credit.");
+  assert.equal(attributionForClip({ ...cc, source_license: "own" }), null);
+  assert.equal(attributionForClip({ ...cc, source_license: "standard" }), null);
+  const pd = attributionForClip({ ...cc, source_license: "public-domain" });
+  assert.match(pd ?? "", /public domain/);
+  assert.match(pd ?? "", /Open tutorial/);
 });
