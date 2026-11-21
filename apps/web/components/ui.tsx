@@ -1,4 +1,5 @@
-// Shared design-system primitives for the ClipForge web UI (v0.3.0).
+"use client";
+// Shared design-system primitives for the ClipForge web UI (v0.5.0).
 //
 // Design tokens (dark, high-fi — one system, every screen):
 // - Surface: neutral-950 page, neutral-900 cards, neutral-800 borders/controls.
@@ -6,9 +7,13 @@
 // - Accent: amber-400 (brand / primary actions), emerald (success/done),
 //   sky (info/active), red (error/failed), violet (rendering).
 // - Radius: rounded-xl cards, rounded-lg inner panels, rounded-full pills.
+// - Type scale: page title text-2xl/700, section text-lg/600, body text-sm.
 // - Every screen shows loading / empty / error states — never a blank page
 //   and never demo numbers presented as live channel stats.
+// - Navigation is always Next <Link>: a plain <a> forces a full-page load
+//   (see PrimaryButton note below). External links keep <a target="_blank">.
 import type { ReactNode } from "react";
+import { useEffect } from "react";
 import Link from "next/link";
 import { openExternal } from "@/lib/tauri";
 
@@ -135,6 +140,95 @@ export function SecondaryButton({ children, href, onClick, disabled }: { childre
   const cls = "inline-flex items-center justify-center rounded-md bg-neutral-800 px-3 py-1.5 text-sm font-medium text-neutral-200 hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-50";
   if (href) return <Link href={href} onClick={onClick} className={cls}>{children}</Link>;
   return <button onClick={onClick} disabled={disabled} className={cls}>{children}</button>;
+}
+
+/** Danger button (red) — destructive actions only: disconnect, delete, reject. */
+export function DangerButton({ children, href, onClick, disabled }: { children: ReactNode; href?: string; onClick?: () => void; disabled?: boolean }) {
+  const cls = "inline-flex items-center justify-center rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-50";
+  if (href) return <Link href={href} onClick={onClick} className={cls}>{children}</Link>;
+  return <button onClick={onClick} disabled={disabled} className={cls}>{children}</button>;
+}
+
+/** Small tone pill — success / warning / danger / info / neutral.
+ *  Plain words only, never a raw status code or JSON value. */
+export type BadgeTone = "success" | "warning" | "danger" | "info" | "neutral";
+const BADGE_TONES: Record<BadgeTone, string> = {
+  success: "bg-emerald-500/15 text-emerald-300",
+  warning: "bg-amber-500/15 text-amber-300",
+  danger: "bg-red-500/15 text-red-300",
+  info: "bg-sky-500/15 text-sky-300",
+  neutral: "bg-neutral-700/50 text-neutral-300",
+};
+export function Badge({ tone = "neutral", children }: { tone?: BadgeTone; children: ReactNode }) {
+  return <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${BADGE_TONES[tone]}`}>{children}</span>;
+}
+
+/** Two-letter initials from a display name / handle ("@clipforge-demo" -> "CL"). */
+export function initialsFor(name: string): string {
+  const clean = name.replace(/^@/, "").trim();
+  if (!clean) return "?";
+  const parts = clean.split(/[\s._-]+/).filter(Boolean);
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[1][0]).toUpperCase();
+}
+
+/** Account avatar: the platform photo when the API returns one, else
+ *  initials on the platform colour. Never a broken-image icon. */
+export function Avatar({ name, src, platform, size = "md" }: { name: string; src?: string; platform?: string; size?: "sm" | "md" | "lg" }) {
+  const dims = size === "lg" ? "h-12 w-12 text-base" : size === "sm" ? "h-7 w-7 text-[11px]" : "h-10 w-10 text-sm";
+  const bg = PLATFORM_COLORS[(platform ?? "").toLowerCase()] ?? "bg-neutral-600";
+  if (src) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img src={src} alt="" className={`${dims} shrink-0 rounded-full object-cover`} onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+    );
+  }
+  return (
+    <span aria-hidden="true" className={`${dims} inline-flex shrink-0 items-center justify-center rounded-full ${bg} font-semibold text-white`}>
+      {initialsFor(name)}
+    </span>
+  );
+}
+
+/** Page header — every screen opens the same way: title, one-line
+ *  explanation of what this screen is for, actions on the right. */
+export function PageHeader({ title, intro, actions }: { title: string; intro?: string; actions?: ReactNode }) {
+  return (
+    <div className="mb-5 flex flex-wrap items-start gap-3">
+      <div className="min-w-0 flex-1">
+        <h1 className="text-2xl font-bold tracking-tight text-neutral-50">{title}</h1>
+        {intro && <p className="mt-1 max-w-2xl text-sm text-neutral-400">{intro}</p>}
+      </div>
+      {actions && <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>}
+    </div>
+  );
+}
+
+/** Big-number stat card (dashboard): label, value, supporting line. */
+export function StatCard({ label, value, sub }: { label: string; value: string; sub: string }) {
+  return (
+    <Card>
+      <p className="text-sm text-neutral-400">{label}</p>
+      <p className="mt-1 text-3xl font-bold tracking-tight text-neutral-50">{value}</p>
+      <p className="mt-1 text-xs leading-relaxed text-neutral-500">{sub}</p>
+    </Card>
+  );
+}
+
+/** Toast — one short message bottom-right, auto-dismisses. Plain
+ *  language only; used for confirmations ("FFmpeg installed") and
+ *  non-blocking errors ("Could not refresh — showing the last data"). */
+export function Toast({ message, tone = "info", onClose }: { message: string; tone?: BadgeTone; onClose: () => void }) {
+  useEffect(() => {
+    const t = setTimeout(onClose, 5000);
+    return () => clearTimeout(t);
+  }, [onClose]);
+  return (
+    <div className={`fixed bottom-12 right-4 z-50 flex max-w-sm items-start gap-3 rounded-lg border px-4 py-3 shadow-lg ${tone === "success" ? "border-emerald-500/40 bg-emerald-950" : tone === "danger" ? "border-red-500/40 bg-red-950" : "border-neutral-700 bg-neutral-900"}`} role="status">
+      <p className="flex-1 text-sm text-neutral-100">{message}</p>
+      <button onClick={onClose} aria-label="Dismiss" className="text-neutral-400 hover:text-neutral-100">✕</button>
+    </div>
+  );
 }
 
 /**

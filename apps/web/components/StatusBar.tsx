@@ -54,8 +54,8 @@ export default function StatusBar() {
 
   return (
     <>
-      <div className="border-b border-neutral-800 bg-neutral-950">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-2 px-4 py-2">
+      <div className="shrink-0 border-t border-neutral-800 bg-neutral-900">
+        <div className="flex flex-wrap items-center gap-2 px-4 py-2">
           {health === undefined ? (
             <span className="text-xs text-neutral-500">Checking server status…</span>
           ) : (

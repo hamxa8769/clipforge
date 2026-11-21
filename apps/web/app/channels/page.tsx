@@ -19,7 +19,7 @@ import {
 } from "@/lib/api";
 import { demoAnalytics } from "@/lib/mock";
 import { openExternal } from "@/lib/tauri";
-import { Card, DemoBadge, EmptyState, fmtCompact, fmtNum, PlatformDot, platformLabel, PrimaryButton, SecondaryButton, Skeleton } from "@/components/ui";
+import { Card, DemoBadge, EmptyState, fmtCompact, fmtNum, Avatar, Badge, PageHeader, PlatformDot, platformLabel, PrimaryButton, SecondaryButton, Skeleton } from "@/components/ui";
 
 const PLATFORMS = ["youtube", "instagram", "facebook", "tiktok"] as const;
 
@@ -41,18 +41,6 @@ const DEMO_CHANNELS: ChannelStatus[] = (["youtube", "instagram", "facebook", "ti
   fallback: "Manual-post pack: download the clip + SEO copy and post it yourself.",
   can_refresh: false,
 }));
-
-function statusPill(status: ChannelStatus["status"]): string {
-  if (status === "connected") return "bg-emerald-500/15 text-emerald-300";
-  if (status === "expired") return "bg-red-500/15 text-red-300";
-  return "bg-amber-500/15 text-amber-300";
-}
-
-function statusLabel(status: ChannelStatus["status"]): string {
-  if (status === "connected") return "Connected";
-  if (status === "expired") return "Expired — reconnect";
-  return "Not connected";
-}
 
 export default function ChannelsPage() {
   const [channels, setChannels] = useState<ChannelStatus[] | null>(null);
@@ -121,11 +109,16 @@ export default function ChannelsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-2xl font-bold tracking-tight">Channels</h1>
-        {!live && !loading && <DemoBadge />}
-        <span className="ml-auto text-sm text-neutral-400">{live ? "Live channel status from the API" : loading ? "Checking the API…" : "API unreachable — demo data"}</span>
-      </div>
+      <PageHeader
+        title="Channels"
+        intro="Connect your YouTube, Instagram, Facebook and TikTok accounts. ClipForge never sees your password — sign-in happens on the platform's own page."
+        actions={
+          <>
+            {!live && !loading && <DemoBadge />}
+            <span className="text-sm text-neutral-400">{live ? "Live channel status from the API" : loading ? "Checking the API…" : "API unreachable — demo data"}</span>
+          </>
+        }
+      />
 
       {notice && (
         <div className="rounded-xl border border-sky-500/40 bg-sky-500/10 p-4 text-sm text-sky-100">{notice}</div>
@@ -144,17 +137,17 @@ export default function ChannelsPage() {
             const connected = card.status === "connected";
             return (
               <Card key={p}>
-                <div className="flex items-center gap-2">
-                  {card.avatar_url ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={card.avatar_url} alt="" className="h-6 w-6 rounded-full" />
-                  ) : (
-                    <PlatformDot platform={p} />
-                  )}
-                  <h2 className="text-lg font-semibold">{card.display_name}</h2>
-                  <span className={`ml-auto rounded-full px-2 py-0.5 text-xs font-medium ${statusPill(card.status)}`}>
-                    {statusLabel(card.status)}
-                  </span>
+                <div className="flex items-center gap-3">
+                  <Avatar name={card.account_name || card.display_name} src={card.avatar_url} platform={p} />
+                  <div className="min-w-0 flex-1">
+                    <h2 className="flex items-center gap-2 text-lg font-semibold text-neutral-50">
+                      <PlatformDot platform={p} /> {card.display_name}
+                    </h2>
+                    <p className="truncate text-sm text-neutral-400">{card.account_name || card.account_ref || "Not connected yet"}</p>
+                  </div>
+                  {card.status === "connected" ? <Badge tone="success">● Connected</Badge>
+                    : card.status === "expired" ? <Badge tone="danger">● Expired — reconnect</Badge>
+                    : <Badge tone="warning">○ Not connected</Badge>}
                 </div>
 
                 <dl className="mt-3 space-y-1 text-sm">

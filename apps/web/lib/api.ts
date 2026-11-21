@@ -278,6 +278,52 @@ export async function getPosts(): Promise<Post[] | null> {
   return raw === null ? null : normalizePosts(raw);
 }
 
+// ---------------------------------------------------------------------------
+// Worker queue (v0.5.0): GET /worker/queue — what the worker is doing,
+// what is queued, what ran last. The dashboard's activity feed is built
+// from this + jobs + posts; no new server endpoint was needed.
+export interface QueuedJobSummary { id: string; title: string; source_type: string; status: string; created_at: string | null; }
+export interface WorkerRunSummary extends WorkerRun { job_id: string; }
+export interface WorkerQueueSummary {
+  running: WorkerRunSummary[];
+  queued: QueuedJobSummary[];
+  next: { id: string; title: string } | null;
+  recent_runs: WorkerRunSummary[];
+}
+
+export function normalizeWorkerRunSummary(raw: unknown): WorkerRunSummary {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  return { ...normalizeWorkerRun(raw), job_id: String(r.job_id ?? "") };
+}
+
+export function normalizeWorkerQueue(raw: unknown): WorkerQueueSummary | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (!Array.isArray(r.running) && !Array.isArray(r.queued) && !Array.isArray(r.recent_runs)) return null;
+  const queued = (Array.isArray(r.queued) ? r.queued : []).map((q) => {
+    const j = (q ?? {}) as Record<string, unknown>;
+    return {
+      id: String(j.id ?? ""),
+      title: String(j.title ?? ""),
+      source_type: String(j.source_type ?? ""),
+      status: String(j.status ?? ""),
+      created_at: typeof j.created_at === "string" ? j.created_at : null,
+    } satisfies QueuedJobSummary;
+  });
+  const next = (r.next ?? null) as Record<string, unknown> | null;
+  return {
+    running: (Array.isArray(r.running) ? r.running : []).map(normalizeWorkerRunSummary),
+    queued,
+    next: next ? { id: String(next.id ?? ""), title: String(next.title ?? "") } : null,
+    recent_runs: (Array.isArray(r.recent_runs) ? r.recent_runs : []).map(normalizeWorkerRunSummary),
+  };
+}
+
+/** GET /worker/queue — running + queued jobs and recent runs. */
+export async function getWorkerQueue(): Promise<WorkerQueueSummary | null> {
+  const raw = await apiGet<unknown>("/worker/queue");
+  return raw === null ? null : normalizeWorkerQueue(raw);
+}
+
 /** Normalise one raw account payload (GET /accounts) into a SocialAccount. */
 export function normalizeAccount(raw: unknown): SocialAccount {
   const r = (raw ?? {}) as Record<string, unknown>;

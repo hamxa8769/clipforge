@@ -29,6 +29,7 @@ import {
   normalizePostStatus,
   normalizeSettings,
   pipelineProgress,
+  normalizeWorkerQueue,
   pipelineStageStates,
   resolveApiUrl,
   RUNNING_STATUSES,
@@ -415,4 +416,21 @@ test("normalizeSettings keeps the ffmpeg version when present", () => {
   });
   assert.equal(s?.ffmpeg.found, true);
   assert.equal(s?.ffmpeg.version, "ffmpeg version 9.1");
+});
+
+test("normalizeWorkerQueue maps GET /worker/queue (v0.5.0 dashboard feed)", () => {
+  const q = normalizeWorkerQueue({
+    running: [{ id: "run-1", job_id: "job-001", status: "running", outcome: "", error: null, duration_s: null, started_at: "2026-11-21T10:00:00Z", finished_at: null }],
+    queued: [{ id: "job-002", title: "Launch walkthrough", source_type: "local", status: "pending", created_at: "2026-11-21T11:30:00Z" }],
+    next: { id: "job-002", title: "Launch walkthrough" },
+    recent_runs: [{ id: "run-0", job_id: "job-001", status: "finished", outcome: "success", error: null, duration_s: 42, started_at: "2026-11-21T09:00:00Z", finished_at: "2026-11-21T09:00:42Z" }],
+  });
+  assert.equal(q?.running.length, 1);
+  assert.equal(q?.running[0].job_id, "job-001");
+  assert.equal(q?.queued[0].title, "Launch walkthrough");
+  assert.equal(q?.next?.id, "job-002");
+  assert.equal(q?.recent_runs[0].duration_s, 42);
+  assert.equal(normalizeWorkerQueue(null), null);
+  assert.equal(normalizeWorkerQueue({}), null);
+  assert.equal(normalizeWorkerQueue({ queued: [] })?.running.length, 0);
 });

@@ -1,4 +1,4 @@
-import type { AnalyticsSnapshot, Candidate, Job, Monetization, Post, SocialAccount } from "./api";
+import type { AnalyticsSnapshot, Candidate, ChannelStatus, Job, Monetization, Post, SocialAccount } from "./api";
 
 // Demo data only — shown with a "Demo data" badge whenever the live API is unreachable.
 export const demoJobs: Job[] = [
@@ -80,6 +80,26 @@ export const demoAccounts: SocialAccount[] = [
   { id: "acct-fb", provider: "facebook", label: "ClipForge Page", account_ref: "10220000000000001", scopes: "pages_manage_posts, pages_read_engagement", token_env_var: "META_ACCESS_TOKEN", status: "active", daily_cap_override: null, token_configured: false },
   { id: "acct-tt", provider: "tiktok", label: "@clipforge.demo", account_ref: "open-id-demo", scopes: "video.upload", token_env_var: "TIKTOK_ACCESS_TOKEN", status: "pending_audit", daily_cap_override: null, token_configured: false },
 ];
+
+/** Demo channel cards — same shape as GET /channels, shown only when the
+ *  API is unreachable. Labelled demo everywhere they are shown. */
+export const demoChannels: ChannelStatus[] = (["youtube", "instagram", "facebook", "tiktok"] as const).map((p) => ({
+  platform: p,
+  display_name: p === "youtube" ? "YouTube" : p === "instagram" ? "Instagram" : p === "facebook" ? "Facebook" : "TikTok",
+  status: p === "youtube" ? "connected" : "not_connected",
+  account_name: p === "youtube" ? "@clipforge-demo" : "",
+  avatar_url: "",
+  account_ref: "",
+  scopes: [],
+  daily_cap: p === "youtube" ? 6 : p === "instagram" ? 100 : p === "facebook" ? 30 : 5,
+  expires_at: null,
+  source: p === "youtube" ? "oauth" : "none",
+  review_notice: p === "tiktok"
+    ? "TikTok Content Posting API audit is pending: unaudited apps can only create private / inbox drafts."
+    : "",
+  fallback: "Manual-post pack: download the clip + SEO copy and post it yourself.",
+  can_refresh: false,
+}));
 
 /** Demo analytics snapshots — numbers match demoMonetization so the dashboard stays consistent. Labelled demo everywhere they are shown. */
 export const demoAnalytics: AnalyticsSnapshot[] = [
