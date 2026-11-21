@@ -602,6 +602,66 @@ export function sourceVideoUrl(job: Pick<Job, "source">): string | null {
 
 export async function getHealth(): Promise<Health | null> { return apiGet<Health>("/health"); }
 
+/** One-click FFmpeg install state, exactly as GET /ffmpeg/status returns it. */
+export type FfmpegInstallState =
+  | "idle" | "downloading" | "verifying" | "extracting" | "installing"
+  | "done" | "error" | "unsupported";
+export interface FfmpegInstallStatus {
+  state: FfmpegInstallState;
+  progress_pct: number;
+  downloaded_bytes: number;
+  total_bytes: number | null;
+  message: string;
+  error: string;
+  version: string;
+  path: string;
+  found: boolean;
+  download_url: string;
+  platform: string;
+  path_added: boolean | null;
+  checksum_verified: boolean | null;
+}
+
+const FFMPEG_INSTALL_STATES: FfmpegInstallState[] = [
+  "idle", "downloading", "verifying", "extracting", "installing", "done", "error", "unsupported",
+];
+
+export function normalizeFfmpegInstallStatus(raw: unknown): FfmpegInstallStatus | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (typeof r.state !== "string" || !(FFMPEG_INSTALL_STATES as string[]).includes(r.state)) return null;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  return {
+    state: r.state as FfmpegInstallState,
+    progress_pct: num(r.progress_pct),
+    downloaded_bytes: num(r.downloaded_bytes),
+    total_bytes: typeof r.total_bytes === "number" ? r.total_bytes : null,
+    message: typeof r.message === "string" ? r.message : "",
+    error: typeof r.error === "string" ? r.error : "",
+    version: typeof r.version === "string" ? r.version : "",
+    path: typeof r.path === "string" ? r.path : "",
+    found: r.found === true,
+    download_url: typeof r.download_url === "string" ? r.download_url : "",
+    platform: typeof r.platform === "string" ? r.platform : "",
+    path_added: typeof r.path_added === "boolean" ? r.path_added : null,
+    checksum_verified: typeof r.checksum_verified === "boolean" ? r.checksum_verified : null,
+  };
+}
+
+/** GET /ffmpeg/status — pollable install progress (returns null when the API is unreachable). */
+export async function getFfmpegInstallStatus(): Promise<FfmpegInstallStatus | null> {
+  return normalizeFfmpegInstallStatus(await apiGet<unknown>("/ffmpeg/status"));
+}
+
+/** POST /ffmpeg/install — start the one-click install (returns immediately; poll the status). */
+export async function installFfmpeg(force = false): Promise<ApiResult> {
+  return apiPostJson(`/ffmpeg/install?force=${force ? "true" : "false"}`);
+}
+
+/** True while an install run is in progress (download / verify / extract / install). */
+export function ffmpegInstallRunning(status: FfmpegInstallStatus | null): boolean {
+  return status !== null && ["downloading", "verifying", "extracting", "installing"].includes(status.state);
+}
+
 /** Channel status, exactly as GET /channels returns it (clipforge.auth.channels). */
 export type ChannelStatusValue = "connected" | "expired" | "not_connected";
 export interface ChannelStatus {
@@ -749,7 +809,7 @@ export interface AppSettingsView {
   llm: { provider: string; base_url: string; model: string; api_key: MaskedCredential };
   credentials: Record<string, { client_id: MaskedCredential; client_secret: MaskedCredential }>;
   data_dir: string; secret_backend: string;
-  ffmpeg: { found: boolean; path: string; install_url: string };
+  ffmpeg: { found: boolean; path: string; version: string; install_url: string };
   monetization_thresholds: { platform: string; program: string; threshold: Record<string, number>; note: string }[];
 }
 
@@ -791,6 +851,7 @@ export function normalizeSettings(raw: unknown): AppSettingsView | null {
     ffmpeg: {
       found: ffmpeg.found === true,
       path: String(ffmpeg.path ?? ""),
+      version: String(ffmpeg.version ?? ""),
       install_url: String(ffmpeg.install_url ?? ""),
     },
     monetization_thresholds: Array.isArray(r.monetization_thresholds)

@@ -84,10 +84,15 @@ def ffmpeg_missing_message(tool: str = "ffmpeg") -> str:
     """
     if tool == "ffprobe":
         return (
-            "ffprobe is missing — it ships with FFmpeg. Install FFmpeg from "
-            f"{FFMPEG_DOWNLOAD_URL} and make sure it is on PATH."
+            "ffprobe is missing — it ships with FFmpeg. Press 'Install FFmpeg' "
+            "in ClipForge (welcome screen or Settings) to install it automatically, "
+            f"or get it from {FFMPEG_DOWNLOAD_URL} and make sure it is on PATH."
         )
-    return f"FFmpeg is missing — install it from {FFMPEG_DOWNLOAD_URL} and make sure it is on PATH."
+    return (
+        "FFmpeg is missing — press 'Install FFmpeg' in ClipForge (welcome screen "
+        "or Settings) to install it automatically, or install it from "
+        f"{FFMPEG_DOWNLOAD_URL} and make sure it is on PATH."
+    )
 
 
 class MissingDependencyError(ValueError):
@@ -153,7 +158,22 @@ def check_dependencies() -> list[Dependency]:
     out: list[Dependency] = []
 
     def _tool(name: str, detail: str) -> Dependency:
+        # ffmpeg/ffprobe also count when the one-click installer put them
+        # in <data_dir>/ffmpeg/bin (no PATH edit / restart needed there).
         found = shutil.which(name) is not None
+        if not found and name in ("ffmpeg", "ffprobe"):
+            from clipforge.ffmpeg_install import (  # noqa: PLC0415
+                bundled_ffmpeg_path,
+                bundled_ffprobe_path,
+            )
+
+            data_dir = os.environ.get("CLIPFORGE_DATA_DIR") or "./data"
+            bundled = (
+                bundled_ffmpeg_path(data_dir)
+                if name == "ffmpeg"
+                else bundled_ffprobe_path(data_dir)
+            )
+            found = bundled.is_file()
         return Dependency(
             name=name,
             kind="tool",
@@ -207,7 +227,19 @@ def check_dependencies() -> list[Dependency]:
 
 
 def require_tool(name: str, detail: str, required_action: str) -> None:
-    if shutil.which(name) is None:
+    found = shutil.which(name) is not None
+    if not found and name in ("ffmpeg", "ffprobe"):
+        from clipforge.ffmpeg_install import (  # noqa: PLC0415
+            bundled_ffmpeg_path,
+            bundled_ffprobe_path,
+        )
+
+        data_dir = os.environ.get("CLIPFORGE_DATA_DIR") or "./data"
+        bundled = (
+            bundled_ffmpeg_path(data_dir) if name == "ffmpeg" else bundled_ffprobe_path(data_dir)
+        )
+        found = bundled.is_file()
+    if not found:
         raise MissingDependencyError(
             code=f"{name.replace('-', '_')}_missing",
             dependency=name,

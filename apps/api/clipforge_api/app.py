@@ -1,4 +1,4 @@
-"""ClipForge API v0.4.0 — FastAPI app.
+"""ClipForge API v0.4.1 — FastAPI app.
 
 Endpoints (all dry-run by default; nothing publishes live without an
 approved Post record, explicit credentials, and ``dry_run=false``):
@@ -31,6 +31,10 @@ approved Post record, explicit credentials, and ``dry_run=false``):
   POST /channels/{platform}/disconnect
   GET  /settings | PUT /settings     (masked credentials + preferences)
   POST /settings/test-connection/{service}  (live auth check per service)
+  GET  /ffmpeg/status | POST /ffmpeg/install
+                                     (one-click FFmpeg install: official
+                                      build into <data_dir>/ffmpeg, progress
+                                      pollable, PATH updated on Windows)
   GET  /monetization                 (tracker; ?platform=&subs=&...)
   GET  /analytics | GET /analytics/{account_id}
   POST /scheduler/run                (run due posts; dry-run default)
@@ -142,6 +146,7 @@ from clipforge.db import (
     init_db,
     session_factory,
 )
+from clipforge.ffmpeg_install import FfmpegInstaller, ensure_bundled_on_path
 from clipforge.monetization import progress as monetization_progress
 from clipforge.publishing import meta as meta_adapter
 from clipforge.publishing import tiktok as tiktok_adapter
@@ -1414,6 +1419,54 @@ def test_connection(service: str):
     return result
 
 
+# ------------------------------------------------- one-click FFmpeg install
+# One installer per data dir (tests point CLIPFORGE_DATA_DIR at a temp
+# dir); the installer owns the background thread + pollable state file.
+_INSTALLERS: dict[str, FfmpegInstaller] = {}
+
+
+def _ffmpeg_installer() -> FfmpegInstaller:
+    key = str(_data_dir())
+    installer = _INSTALLERS.get(key)
+    if installer is None:
+        installer = FfmpegInstaller(
+            _data_dir(),
+            on_installed=lambda path: _settings_store().set_ffmpeg_path(path),
+        )
+        _INSTALLERS[key] = installer
+    return installer
+
+
+@app.get("/ffmpeg/status")
+def ffmpeg_status():
+    """Pollable FFmpeg install state + live detection.
+
+    ``state`` is one of idle / downloading / verifying / extracting /
+    installing / done / error / unsupported; ``progress_pct`` moves
+    0 → 100 through a run; ``error`` is a plain-language message (or
+    ""), never a traceback. ``found`` / ``path`` / ``version`` say
+    whether FFmpeg is usable right now, whatever installed it.
+    """
+    return _ffmpeg_installer().status()
+
+
+@app.post("/ffmpeg/install", status_code=202)
+def ffmpeg_install(force: bool = Query(default=False)):
+    """Start the one-click FFmpeg install (returns immediately).
+
+    Downloads the official build for this platform into
+    ``<data_dir>/ffmpeg/``, verifies it, and adds it to the user PATH
+    on Windows. Poll ``GET /ffmpeg/status`` for progress. A second
+    call while a run is active returns the live status instead of
+    starting a duplicate download; ``force=true`` re-installs over an
+    existing FFmpeg. macOS answers 422 (not auto-installed yet).
+    """
+    result = _ffmpeg_installer().start_install(force=force)
+    if result["state"] == "unsupported":
+        raise HTTPException(422, result["error"] or result["message"])
+    return result
+
+
 # ------------------------------------------------- monetization / analytics / scheduler
 @app.get("/monetization")
 def get_monetization(
@@ -2018,6 +2071,12 @@ def get_analytics(account_id: str, db: Session = Depends(get_db)):
             for s in snaps
         ],
     }
+
+
+# A previous one-click install already put FFmpeg in
+# <data_dir>/ffmpeg/bin: prefer it from the first request, with no
+# restart and no PATH edit (see clipforge.ffmpeg_install).
+ensure_bundled_on_path(_data_dir())
 
 
 __all__ = ["app"]

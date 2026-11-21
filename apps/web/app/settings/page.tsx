@@ -22,7 +22,9 @@ import {
   type AppSettingsView,
 } from "@/lib/api";
 import { UpdateSection } from "@/components/Updater";
+import { FfmpegInstallSection } from "@/components/FfmpegInstaller";
 import { REPLAY_EVENT } from "@/components/Onboarding";
+import Link from "next/link";
 import { Card, DemoBadge, PrimaryButton, SecondaryButton, Skeleton, Toggle } from "@/components/ui";
 
 const PLATFORMS = ["youtube", "instagram", "facebook", "tiktok"] as const;
@@ -186,7 +188,7 @@ export default function SettingsPage() {
             <h2 className="mb-1 text-lg font-semibold">Channels</h2>
             <p className="mb-4 text-sm text-neutral-400">
               Connect each platform once with the guided wizard — it shows you where to create the developer app and where to paste the keys.
-              Connection status lives on the <a className="text-sky-400 underline" href="/channels">Channels page</a>.
+              Connection status lives on the <Link className="text-sky-400 underline" href="/channels">Channels page</Link>.
             </p>
             <ul className="space-y-3">
               {PLATFORMS.map((p) => {
@@ -272,10 +274,11 @@ export default function SettingsPage() {
               <div className="flex justify-between gap-2"><dt className="text-neutral-400">Secret storage</dt><dd>{view.secret_backend === "os-keyring" ? "OS keyring" : "Encrypted file (no OS keyring found — see docs)"}</dd></div>
               <div className="flex justify-between gap-2">
                 <dt className="text-neutral-400">FFmpeg</dt>
-                <dd>
-                  {view.ffmpeg.found ? `Found (${view.ffmpeg.path})` : "Not found — clipping needs it. "}
-                  {!view.ffmpeg.found && (
-                    <a className="text-sky-400 underline" href={view.ffmpeg.install_url} target="_blank" rel="noreferrer">Install FFmpeg</a>
+                <dd className="min-w-0 flex-1">
+                  {view.ffmpeg.found ? (
+                    <>Found ({view.ffmpeg.path}{view.ffmpeg.version ? ` — ${view.ffmpeg.version}` : ""})</>
+                  ) : (
+                    <FfmpegInstallSection onInstalled={() => { load().catch(() => {}); }} />
                   )}
                 </dd>
               </div>

@@ -28,6 +28,7 @@ import httpx
 
 from clipforge.auth.providers import PLATFORMS, get_provider
 from clipforge.auth.secrets import SecretStore, mask_secret
+from clipforge.ffmpeg_install import resolve_ffmpeg_path
 from clipforge.monetization import THRESHOLDS
 from clipforge.workflow import FFMPEG_DOWNLOAD_URL
 
@@ -86,14 +87,23 @@ def normalize_onboarding(data: object) -> dict[str, object]:
     return out
 
 
-def ffmpeg_info() -> dict:
-    """Honest FFmpeg report: found on PATH, where, and which version.
+def ffmpeg_info(data_dir: str | Path | None = None, stored_path: str | None = None) -> dict:
+    """Honest FFmpeg report: found, where, and which version.
 
-    ``version`` is the first line of ``ffmpeg -version`` (e.g.
-    ``ffmpeg version 6.1.1``) when the binary runs, else "" — never a
-    guessed version, never a crash when the binary is absent.
+    Resolution order: the path saved by the one-click install, then
+    the installer-managed ``<data_dir>/ffmpeg/bin/`` binary, then
+    whatever is on PATH. ``version`` is the first line of
+    ``ffmpeg -version`` (e.g. ``ffmpeg version 6.1.1``) when the binary
+    runs, else "" — never a guessed version, never a crash when the
+    binary is absent.
     """
-    path = shutil.which("ffmpeg")
+    path: str | None = None
+    if data_dir is not None:
+        path = resolve_ffmpeg_path(data_dir, stored_path)
+    else:
+        path = stored_path if stored_path and Path(stored_path).is_file() else None
+        if path is None:
+            path = shutil.which("ffmpeg")
     info = {
         "found": bool(path),
         "path": path or "",
@@ -121,6 +131,10 @@ class AppSettings:
     llm_provider: str = "openai-compatible"
     llm_base_url: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4o-mini"
+    # Path of the FFmpeg binary installed by the one-click installer
+    # ("" = none installed; detection then falls back to the bundled
+    # location and PATH). Saved by the installer, never typed by hand.
+    ffmpeg_path: str = ""
     # First-run onboarding progress (see DEFAULT_ONBOARDING).
     onboarding: dict[str, object] = field(default_factory=lambda: dict(DEFAULT_ONBOARDING))
 
@@ -192,6 +206,12 @@ class SettingsStore:
         current.onboarding = normalize_onboarding({**self.get_onboarding(), **patch})
         self.save(current)
         return dict(current.onboarding)
+
+    def set_ffmpeg_path(self, ffmpeg_path: str) -> None:
+        """Remember an installed FFmpeg binary (one-click installer)."""
+        current = self.load()
+        current.ffmpeg_path = ffmpeg_path
+        self.save(current)
 
     # ------------------------------------------------------------ secrets
     def get_credential(self, service: str, kind: str) -> str | None:
@@ -266,7 +286,7 @@ class SettingsStore:
             },
             "data_dir": str(self.data_dir.resolve()),
             "secret_backend": self.secrets.backend,
-            "ffmpeg": ffmpeg_info(),
+            "ffmpeg": ffmpeg_info(self.data_dir, stored_path=settings.ffmpeg_path),
             "monetization_thresholds": [
                 {
                     "platform": platform,

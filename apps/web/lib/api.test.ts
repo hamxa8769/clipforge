@@ -18,8 +18,10 @@ import {
   normalizeAnalytics,
   normalizeAnalyticsSnapshot,
   normalizeAutomationRule,
+  ffmpegInstallRunning,
   normalizeChannelStatus,
   normalizeChannels,
+  normalizeFfmpegInstallStatus,
   normalizeJob,
   normalizeJobs,
   normalizeJobStatus,
@@ -347,4 +349,47 @@ test("normalizeOnboarding fills defaults and rejects bad llm values", () => {
   assert.equal(done.llm, "skipped");
   const bad = normalizeOnboarding({ llm: "bogus" });
   assert.equal(bad.llm, "");
+});
+
+test("normalizeFfmpegInstallStatus passes a full status through", () => {
+  const s = normalizeFfmpegInstallStatus({
+    state: "downloading", progress_pct: 42.5, downloaded_bytes: 42000000, total_bytes: 100000000,
+    message: "Downloading FFmpeg…", error: "", version: "", path: "",
+    found: false, download_url: "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+    platform: "Windows", path_added: null, checksum_verified: null,
+  });
+  assert.ok(s);
+  assert.equal(s?.state, "downloading");
+  assert.equal(s?.progress_pct, 42.5);
+  assert.equal(s?.total_bytes, 100000000);
+  assert.equal(s?.download_url, "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip");
+});
+
+test("normalizeFfmpegInstallStatus rejects unknown states and non-objects", () => {
+  assert.equal(normalizeFfmpegInstallStatus({ state: "flying" }), null);
+  assert.equal(normalizeFfmpegInstallStatus(null), null);
+  assert.equal(normalizeFfmpegInstallStatus("done"), null);
+});
+
+test("ffmpegInstallRunning is true only while a run is active", () => {
+  const base = { progress_pct: 0, downloaded_bytes: 0, total_bytes: null, message: "", error: "", version: "", path: "", found: false, download_url: "", platform: "Linux", path_added: null, checksum_verified: null };
+  for (const state of ["downloading", "verifying", "extracting", "installing"] as const) {
+    assert.equal(ffmpegInstallRunning({ ...base, state }), true);
+  }
+  for (const state of ["idle", "done", "error", "unsupported"] as const) {
+    assert.equal(ffmpegInstallRunning({ ...base, state }), false);
+  }
+  assert.equal(ffmpegInstallRunning(null), false);
+});
+
+test("normalizeSettings keeps the ffmpeg version when present", () => {
+  const s = normalizeSettings({
+    dry_run: true, dry_run_source: "env", default_privacy: {}, default_platforms: [],
+    llm: { provider: "openai-compatible", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini", api_key: { configured: false, last4: "", masked: "", source: "none" } },
+    credentials: {}, data_dir: "/tmp", secret_backend: "file",
+    ffmpeg: { found: true, path: "/tmp/ffmpeg/bin/ffmpeg", version: "ffmpeg version 9.1", install_url: "https://ffmpeg.org/download.html" },
+    monetization_thresholds: [],
+  });
+  assert.equal(s?.ffmpeg.found, true);
+  assert.equal(s?.ffmpeg.version, "ffmpeg version 9.1");
 });

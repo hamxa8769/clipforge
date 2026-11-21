@@ -13,6 +13,7 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import { getChannels, getOnboarding, getSettings, saveSettings, updateOnboarding, type AppSettingsView, type ChannelStatus } from "@/lib/api";
+import { FfmpegInstallSection } from "./FfmpegInstaller";
 import { Card, PrimaryButton, SecondaryButton, Skeleton } from "./ui";
 
 const DONE_KEY = "clipforge-onboarding-done";
@@ -91,7 +92,6 @@ export default function Onboarding() {
 
   if (!visible) return null;
 
-  const ffmpeg = settings?.ffmpeg;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" role="dialog" aria-label="Welcome to ClipForge">
       <Card className="w-full max-w-lg">
@@ -115,18 +115,8 @@ export default function Onboarding() {
               <h3 className="font-semibold">1. Check FFmpeg</h3>
               {!settings ? (
                 <Skeleton className="h-6 w-64" />
-              ) : ffmpeg?.found ? (
-                <p className="text-sm text-neutral-300">FFmpeg is installed and ready — clipping will work. <span className="text-neutral-500">({ffmpeg.path})</span></p>
               ) : (
-                <>
-                  <p className="text-sm text-neutral-300">FFmpeg is <strong>missing</strong> — ClipForge needs it to cut video clips. It takes two minutes to install:</p>
-                  <ol className="list-decimal space-y-1 pl-5 text-sm text-neutral-300">
-                    <li>Open the FFmpeg download page and get the Windows build (gpl, full): <a className="text-sky-400 underline" href="https://ffmpeg.org/download.html" target="_blank" rel="noreferrer">ffmpeg.org/download.html</a></li>
-                    <li>Unzip it somewhere permanent, e.g. <code className="rounded bg-neutral-800 px-1 font-mono text-xs">C:\ffmpeg</code>.</li>
-                    <li>Add <code className="rounded bg-neutral-800 px-1 font-mono text-xs">C:\ffmpeg\bin</code> to your PATH (search “Edit the system environment variables” → Environment Variables → Path → New), then restart ClipForge.</li>
-                  </ol>
-                  <p className="text-xs text-neutral-500">On Mac: <code className="rounded bg-neutral-800 px-1 font-mono text-xs">brew install ffmpeg</code>. On Linux: <code className="rounded bg-neutral-800 px-1 font-mono text-xs">sudo apt install ffmpeg</code>.</p>
-                </>
+                <FfmpegInstallSection onInstalled={() => { getSettings().then((s) => { if (s) setSettings(s); }).catch(() => {}); }} />
               )}
             </div>
           )}

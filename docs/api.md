@@ -180,6 +180,30 @@ Live auth check for `youtube` | `instagram` | `facebook` | `tiktok` |
 on success; `502` with the exact provider error otherwise (e.g. token
 expired, key rejected 401, network failure) — never a bare 500.
 
+### `GET /ffmpeg/status` · `POST /ffmpeg/install` (v0.4.1)
+
+One-click FFmpeg install. `POST /ffmpeg/install` (202) starts the
+install in the background and returns immediately; `GET /ffmpeg/status`
+is polled for progress (`state`: idle / downloading / verifying /
+extracting / installing / done / error / unsupported, `progress_pct`
+0–100, `downloaded_bytes` / `total_bytes`, plain-language `error`).
+The server downloads the official build for the platform — Windows:
+`ffmpeg-release-essentials.zip` from gyan.dev (the build provider
+linked on https://ffmpeg.org/download.html), Linux: the static build
+from johnvansickle.com (also linked from ffmpeg.org) — verifies the
+published SHA-256 checksum when one is published, extracts to
+`<data_dir>/ffmpeg/`, verifies `ffmpeg -version` runs, and saves the
+path in settings. On Windows the `bin` folder is also added to the
+user PATH (registry `HKCU\Environment`, so new terminals find it too);
+inside ClipForge clipping works immediately with no restart, because
+the app always prefers the installed binary. A failed install leaves
+no half-extracted files behind. `POST /ffmpeg/install?force=true`
+re-installs over an existing FFmpeg; without it, an already-installed
+FFmpeg answers `done` at once. macOS answers `422` (not auto-installed
+yet — `brew install ffmpeg` is the one-command route). The same
+installer is available from the command line:
+`python scripts/install-ffmpeg.py [--data-dir ./data] [--force]`.
+
 ### `GET /analytics` · `GET /analytics/{account_id}`
 
 Retention / viewed-vs-swiped signals feeding the next clip picks.

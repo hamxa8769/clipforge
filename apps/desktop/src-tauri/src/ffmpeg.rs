@@ -37,6 +37,16 @@ fn run_version(path: &str) -> Option<String> {
 #[cfg(windows)]
 fn windows_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
+    // One-click install (v0.4.1): <data_dir>/ffmpeg/bin/ffmpeg.exe, where
+    // the data dir is %APPDATA%/com.clipforge.app. Checked first so the
+    // install the app itself performed is found even before a logoff
+    // (the user-PATH edit only reaches new processes).
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        out.push(
+            PathBuf::from(appdata)
+                .join("com.clipforge.app/ffmpeg/bin/ffmpeg.exe"),
+        );
+    }
     if let Ok(pf) = std::env::var("ProgramFiles") {
         out.push(PathBuf::from(&pf).join("ffmpeg/bin/ffmpeg.exe"));
         out.push(PathBuf::from(pf).join("Gyan/FFmpeg/bin/ffmpeg.exe"));
