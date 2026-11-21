@@ -125,11 +125,16 @@ def _build_app(base: Path):
         # loaded via Next's full-page fallback, but noisily). This
         # middleware serves a path only when its last segment has a
         # file extension (index.txt, index.html, favicon.ico, _next
-        # assets) and the file really exists under web_out; everything
-        # else passes through untouched, so GET /channels still returns
-        # the API's JSON list and /channels/ still reaches the mount
-        # below. The mount stays: it serves directory indexes
-        # (/channels/ → index.html) and the UI root.
+        # assets) and the file really exists under web_out. It ALSO
+        # serves the exported page for a real browser navigation
+        # (Accept: text/html) to an extensionless UI route such as
+        # /channels/connect — otherwise that full-page load hits
+        # GET /channels/{platform} and the user sees raw JSON
+        # ({"detail": "unknown platform: connect"}). API fetches
+        # (Accept: */*) are unaffected, so GET /channels still
+        # returns the API's JSON list and /channels/ still reaches
+        # the mount below. The mount stays: it serves directory
+        # indexes (/channels/ → index.html) and the UI root.
         from urllib.parse import unquote
 
         from starlette.responses import FileResponse
@@ -153,6 +158,39 @@ def _build_app(base: Path):
                         if candidate is not None and candidate.is_file():
                             await FileResponse(candidate)(scope, receive, send)
                             return
+                    elif scope.get("method", "GET") == "GET":
+                        # Browser navigation to a UI route (v0.4.1): a
+                        # full-page load of /channels, /channels/connect,
+                        # /settings, /jobs, /monetization, /jobs/view, ...
+                        # used to fall through to the API routes, because
+                        # FastAPI matches /channels/{platform} (and
+                        # /channels, /settings, /jobs, /monetization,
+                        # /jobs/{job_id}) before the StaticFiles mount
+                        # below. The user then saw raw JSON — e.g.
+                        # {"detail": "unknown platform: connect"} — for
+                        # clicking "Connect a channel" (a plain <a>, so a
+                        # full navigation, not a client-side one). Serve
+                        # the exported page instead, but ONLY for real
+                        # browser navigations: those send
+                        # Accept: text/html, while the web UI's own
+                        # fetch() calls (and curl / API clients) send
+                        # Accept: */* and must keep getting JSON. A path
+                        # with no exported directory (e.g.
+                        # /channels/bogus-platform) still falls through
+                        # to the API, which 404s it as before.
+                        headers = dict(scope.get("headers", []))
+                        accept = headers.get(b"accept", b"").decode("latin-1")
+                        if "text/html" in accept:
+                            candidate = (web_root / raw_path.lstrip("/")).resolve()
+                            try:
+                                candidate.relative_to(web_root)
+                            except ValueError:
+                                candidate = None  # path traversal: let the API answer
+                            if candidate is not None and candidate.is_dir():
+                                index = candidate / "index.html"
+                                if index.is_file():
+                                    await FileResponse(index)(scope, receive, send)
+                                    return
                 await self.app(scope, receive, send)
 
         # Starlette refuses add_middleware once the app has served a

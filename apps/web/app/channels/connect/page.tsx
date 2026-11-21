@@ -56,7 +56,14 @@ function CopyButton({ text, label }: { text: string; label: string }) {
 function WizardInner() {
   const search = useSearchParams();
   const initial = search.get("platform");
-  const initialStep = Math.min(5, Math.max(1, Number(search.get("step") ?? "") || 0));
+  // ?step=N deep-links straight to that step (e.g. ?step=5 for the test
+  // step). With no ?step=, a preselected ?platform=… starts at step 2
+  // ("Create the app") — the old code clamped a missing step to 1, so
+  // the per-platform Connect buttons on the Channels page
+  // (/channels/connect?platform=youtube) landed on step 1 and made the
+  // user pick the platform a second time (v0.4.1 fix).
+  const stepParam = search.get("step");
+  const initialStep = stepParam ? Math.min(5, Math.max(1, Number(stepParam) || 1)) : 0;
   const [platform, setPlatform] = useState<string>(PLATFORMS.includes(initial as (typeof PLATFORMS)[number]) ? (initial as string) : "");
   const [step, setStep] = useState<number>(platform && initialStep ? initialStep : platform ? 2 : 1);
   const [guide, setGuide] = useState<PlatformGuide | null>(null);

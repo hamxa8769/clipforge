@@ -9,6 +9,7 @@
 // - Every screen shows loading / empty / error states — never a blank page
 //   and never demo numbers presented as live channel stats.
 import type { ReactNode } from "react";
+import Link from "next/link";
 
 export function DemoBadge() {
   return <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-xs font-medium text-sky-300">Demo data — API unreachable</span>;
@@ -110,16 +111,28 @@ export function ErrorBanner({ message, onRetry }: { message: string; onRetry?: (
   );
 }
 
-/** Primary (amber) and secondary (neutral) action buttons — one primary per screen. */
+/** Primary (amber) and secondary (neutral) action buttons — one primary per screen.
+ *
+ * With `href` this is a Next.js <Link>, not a plain <a>: in-app navigation
+ * is client-side, like the header nav. A plain <a> forces a full-page
+ * load, which used to land on raw API JSON — e.g. "Connect a channel"
+ * navigated to /channels/connect and the server answered
+ * {"detail": "unknown platform: connect"} because GET /channels/{platform}
+ * claims that path before the static export (v0.4.1 server fix in
+ * clipforge_api/__main__.py now serves the page for browser navigations
+ * too, so a full load works as well — this is the second layer).
+ * `onClick` is passed through: the old plain-<a> branch silently dropped
+ * it, so the Onboarding wizard's dismiss-on-navigate never ran.
+ */
 export function PrimaryButton({ children, href, onClick, disabled }: { children: ReactNode; href?: string; onClick?: () => void; disabled?: boolean }) {
   const cls = "inline-flex items-center justify-center rounded-md bg-amber-400 px-4 py-2 text-sm font-semibold text-neutral-950 hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-50";
-  if (href) return <a href={href} className={cls}>{children}</a>;
+  if (href) return <Link href={href} onClick={onClick} className={cls}>{children}</Link>;
   return <button onClick={onClick} disabled={disabled} className={cls}>{children}</button>;
 }
 
 export function SecondaryButton({ children, href, onClick, disabled }: { children: ReactNode; href?: string; onClick?: () => void; disabled?: boolean }) {
   const cls = "inline-flex items-center justify-center rounded-md bg-neutral-800 px-3 py-1.5 text-sm font-medium text-neutral-200 hover:bg-neutral-700 disabled:cursor-not-allowed disabled:opacity-50";
-  if (href) return <a href={href} className={cls}>{children}</a>;
+  if (href) return <Link href={href} onClick={onClick} className={cls}>{children}</Link>;
   return <button onClick={onClick} disabled={disabled} className={cls}>{children}</button>;
 }
 
