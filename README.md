@@ -8,18 +8,66 @@ captions, writes a different title / description / hashtag set for each
 platform, and publishes **only after a human approves** — through the
 platforms' official APIs, and nothing else.
 
-> **Status: v0.3.0 — early alpha.** The clipping pipeline, review UI, and
-> publishing adapters are under active development. Nothing in this repo
-> posts to any platform automatically, and `DRY_RUN=true` is the default.
-> v0.3.0 makes the app one live, fully working flow: a visible
-> ingest → transcribe → score → render → SEO → review → approve →
-> schedule → publish pipeline with per-stage logs and retry, server-side
-> automation rules, real channel connections (OAuth, encrypted tokens)
-> and API settings. v0.2.1 fixes the desktop app showing as a plain
-> unstyled page in v0.2.0 (the stylesheet was never bundled) — the app
-> now shows its real dark theme. v0.2.0 added the single double-click
-> desktop app (Windows installer) with the server built in — no terminal,
-> no Node, no separate server window.
+> **Status: v0.4.0 — production-level single-window app.** The clipping
+> pipeline, review UI, and publishing adapters are under active
+> development. Nothing in this repo posts to any platform automatically,
+> and `DRY_RUN=true` is the default. v0.4.0 adds the guided Connect
+> wizard (no raw JSON anywhere — step-by-step per platform, with the
+> exact developer-console steps, a copyable redirect URI, masked keys,
+> and a real Test Connection), a first-run onboarding wizard, the
+> in-app updater (check for updates in the app — no more manual
+> downloads; your clips, settings and keys are kept), and one window
+> only (server status + logs live in the main window's status bar and
+> log drawer — the separate server-status window is gone). v0.3.0 made
+> the app one live, fully working flow: a visible ingest → transcribe
+> → score → render → SEO → review → approve → schedule → publish
+> pipeline with per-stage logs and retry, server-side automation
+> rules, real channel connections (OAuth, encrypted tokens) and API
+> settings. v0.2.1 fixes the desktop app showing as a plain unstyled
+> page in v0.2.0 (the stylesheet was never bundled) — the app now
+> shows its real dark theme. v0.2.0 added the single double-click
+> desktop app (Windows installer) with the server built in — no
+> terminal, no Node, no separate server window.
+
+## Connecting a channel (guided — no JSON needed)
+
+Open the app → **Channels → Connect a channel**. The wizard walks you
+through it in five steps, about five minutes per platform:
+
+1. **Pick a platform** — YouTube, Instagram, Facebook, or TikTok.
+2. **Create the app** — the wizard shows the exact developer-console
+   link and click-by-click steps (create a project, enable the API,
+   create an OAuth client, add yourself as a test user). The redirect
+   URI is shown with a Copy button — paste it exactly as shown.
+3. **Paste the keys** — Client ID and Client Secret go into masked
+   fields. They are stored encrypted on your machine (OS keyring first,
+   encrypted file fallback) and never shown back in full.
+4. **Connect** — one big button opens the platform's own sign-in page
+   in your browser. ClipForge never asks for your platform password.
+5. **Test** — Test Connection actually calls the platform and shows
+   your connected account name, or the exact error in plain words
+   with what to do next.
+
+Until a channel is connected, the dashboard honestly says "No channel
+connected yet" — no fake stats. Notes: YouTube needs Google verification
+for public use (test users work meanwhile); Meta needs App Review +
+Business Verification; TikTok needs a Content Posting API audit and
+stays in inbox-draft mode until it passes.
+
+**First run:** a 4-step onboarding wizard checks FFmpeg (with install
+help if it is missing — clipping cannot work without it), offers an
+optional LLM key, connects your first channel, and runs a first clip.
+It appears once; replay it from Settings → Replay onboarding.
+
+## Updating the app (in-app — no manual downloads)
+
+In the desktop app, **Settings → Updates** (or the "Update available"
+banner) checks GitHub for the latest release. When a newer version
+exists it shows the version and size; press **Download & install** and
+the app downloads it, verifies the size, installs it, and restarts.
+Your clips, settings, and keys are kept — the update never wipes your
+data folder. Every release gets a version bump, a tag, and a release
+on GitHub; this is the rule from v0.4.0 onward.
 
 ---
 
@@ -163,6 +211,31 @@ Things to know:
 
 Building the exe yourself: `python scripts/build_exe.py --with-web`
 (see `clipforge-server.spec`).
+
+## What's new in v0.4.0
+
+- **Guided Connect wizard** — Channels → Connect a channel walks
+  through five steps per platform (pick → create the developer app
+  with exact links and click-by-click steps → paste masked keys →
+  Connect → Test Connection with the account name or a plain-language
+  error). The raw settings JSON is no longer the default view anywhere;
+  it lives behind an "Advanced" toggle on the Settings page.
+- **First-run onboarding** — a 4-step wizard (FFmpeg check with
+  install help, optional LLM key, first channel, first clip) that
+  appears once and is replayable from Settings.
+- **In-app updater** — Settings → Updates (or the "Update available"
+  banner) checks GitHub, downloads and installs the new version, and
+  restarts. Clips, settings, and keys are kept. No more manual
+  downloads from v0.4.0 onward.
+- **One window only** — the separate "Server status & settings"
+  window is gone. Server status (running, port, FFmpeg, dry-run) is a
+  status bar in the main window, and logs live in an in-app drawer.
+- **Honest FFmpeg handling** — jobs that need FFmpeg now fail with a
+  clear "FFmpeg is missing — install it from ffmpeg.org" message
+  instead of failing silently; the API reports FFmpeg found/path/
+  version in `GET /settings`.
+- If you have v0.3.0 installed, just install v0.4.0 over it — no need
+  to uninstall first.
 
 ## What's new in v0.3.0
 

@@ -8,7 +8,12 @@ import {
   clipVideoUrl,
   failedStageIndex,
   latestSnapshotPerPlatform,
+  deriveRedirectUri,
+  explainConnectionError,
   maskSecret,
+  normalizeConnectGuide,
+  normalizeJobLogEntry,
+  normalizeOnboarding,
   normalizeAccount,
   normalizeAnalytics,
   normalizeAnalyticsSnapshot,
@@ -275,4 +280,71 @@ test("normalizeSettings keeps masked views and drops non-objects", () => {
   assert.equal(view?.credentials.youtube.client_secret.configured, false);
   assert.equal(view?.ffmpeg.found, true);
   assert.equal(view?.monetization_thresholds.length, 1);
+});
+
+test("deriveRedirectUri uses the connected API's own port, never a hardcoded host", () => {
+  // In this test env NEXT_PUBLIC_API_URL is unset, so API_URL defaults to
+  // http://localhost:8000 — the redirect base is the API's own port.
+  assert.equal(deriveRedirectUri("youtube"), "http://127.0.0.1:8000/auth/callback/youtube");
+  assert.equal(deriveRedirectUri("tiktok"), "http://127.0.0.1:8000/auth/callback/tiktok");
+});
+
+test("explainConnectionError translates cryptic OAuth failures into plain language", () => {
+  const cases: [string, string, string][] = [
+    ["redirect_uri_mismatch", "redirect", "Copy the redirect URI"],
+    ["invalid_client: bad id", "did not recognise", "re-copy the client ID"],
+    ["token expired", "expired", "Reconnect"],
+    ["not connected yet", "not connected", "Connect button"],
+    ["YouTube client ID is not saved yet — the app credentials have not been entered. Next step: Save the Client ID in Settings (Step 3 of the Connect guide, GET /connect/guide/youtube)", "not saved yet", "step 3 of the Connect wizard"],
+    ["No LLM API key saved — add one in Settings first.", "No AI key saved yet", "built-in templates"],
+    ["", "no reason", "Try again"],
+  ];
+  for (const [input, summaryPart, nextPart] of cases) {
+    const out = explainConnectionError(input);
+    assert.ok(out.summary.toLowerCase().includes(summaryPart.toLowerCase()), `${input} -> ${out.summary}`);
+    assert.ok(out.nextStep.includes(nextPart), `${input} -> ${out.nextStep}`);
+  }
+  // Unknown messages pass through unchanged — never swallowed.
+  const unknown = explainConnectionError("weird provider 500");
+  assert.equal(unknown.summary, "weird provider 500");
+});
+
+test("normalizeJobLogEntry maps GET /jobs/{id}/logs rows", () => {
+  const entry = normalizeJobLogEntry({ ts: "2026-11-21T10:00:00", stage: "transcribe", level: "error", message: "boom [E1]" });
+  assert.equal(entry.stage, "transcribe");
+  assert.equal(entry.level, "error");
+  assert.equal(entry.message, "boom [E1]");
+  const empty = normalizeJobLogEntry(null);
+  assert.equal(empty.stage, "");
+  assert.equal(empty.level, "info");
+});
+
+test("normalizeConnectGuide maps GET /connect/guide/{platform}", () => {
+  const g = normalizeConnectGuide({
+    platform: "youtube", display_name: "YouTube",
+    console_name: "Google Cloud Console", console_url: "https://console.cloud.google.com/apis/credentials",
+    steps: [{ step: 1, title: "Create a project", detail: "Open the console." }],
+    credentials: [{ key: "client_id", label: "Client ID", saved: true }, { key: "client_secret", label: "Client secret", saved: false }],
+    redirect_uri: "http://127.0.0.1:8000/auth/callback/youtube",
+    scopes: ["https://www.googleapis.com/auth/youtube.upload"],
+    review_notice: "Google must verify the app.", fallback: "Manual-post pack.", daily_cap: 6,
+  });
+  assert.ok(g);
+  assert.equal(g?.redirect_uri, "http://127.0.0.1:8000/auth/callback/youtube");
+  assert.equal(g?.steps.length, 1);
+  assert.equal(g?.credentials[0].saved, true);
+  assert.equal(g?.credentials[1].saved, false);
+  assert.equal(normalizeConnectGuide({ platform: "youtube" }), null);
+  assert.equal(normalizeConnectGuide(null), null);
+});
+
+test("normalizeOnboarding fills defaults and rejects bad llm values", () => {
+  const d = normalizeOnboarding({});
+  assert.equal(d.completed, false);
+  assert.equal(d.llm, "");
+  const done = normalizeOnboarding({ completed: true, llm: "skipped", ffmpeg_acknowledged: true });
+  assert.equal(done.completed, true);
+  assert.equal(done.llm, "skipped");
+  const bad = normalizeOnboarding({ llm: "bogus" });
+  assert.equal(bad.llm, "");
 });

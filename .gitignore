@@ -82,3 +82,6 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# local test runtime data (created by pytest runs)
+apps/api/data/

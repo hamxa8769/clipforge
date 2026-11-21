@@ -147,7 +147,7 @@ export interface Candidate {
 }
 export interface Post { id: string; clip_id: string; platform: string; caption: string; scheduled_at: string; status: PostStatus; /** Last publish error, when the backend marked the post failed. */ error: string | null; /** Publish attempts so far. */ attempts: number; }
 export interface Monetization { platform: string; program: string; current: Record<string, number>; threshold: Record<string, number>; progress_pct: number; note?: string; }
-export interface Health { status: string; dry_run: boolean }
+export interface Health { status: string; dry_run: boolean; version?: string }
 
 /**
  * A connected social account, exactly as GET /accounts returns it
@@ -652,6 +652,85 @@ export async function startOAuth(platform: string): Promise<{ authorize_url: str
   return { authorize_url: r.authorize_url, redirect_uri: String(r.redirect_uri ?? "") };
 }
 
+/**
+ * The exact redirect URI to register in a platform's developer app,
+ * derived from the API the UI is actually talking to — never a hardcoded
+ * localhost guess. The API server's own port is the redirect base
+ * (providers.redirect_base): in dev the UI talks to NEXT_PUBLIC_API_URL
+ * (default localhost:8000); in the desktop app the UI is served by the
+ * API server itself, so the page's own port is the API port.
+ * Returns null when no port can be determined (should not happen in the
+ * desktop app or dev — both always have a port).
+ */
+export function deriveRedirectUri(platform: string): string | null {
+  let port = "";
+  try {
+    if (API_URL) port = new URL(API_URL).port;
+  } catch { /* API_URL is relative/empty in the desktop build — fall through */ }
+  if (!port && typeof window !== "undefined") port = window.location.port;
+  if (!port) return null;
+  return `http://127.0.0.1:${port}/auth/callback/${platform}`;
+}
+
+/**
+ * Redirect URI for a platform, from the API when possible.
+ * GET /auth/{platform}/start returns the authoritative URI — but only
+ * once the platform's client id is saved (it 409s before that, which is
+ * exactly when the wizard needs the URI most). So: use the API's answer
+ * when available, otherwise the URI derived from the connected API's
+ * own port (same value the API computes — see deriveRedirectUri).
+ * `authoritative` is false for the derived value; the wizard says so.
+ */
+export async function getRedirectUri(platform: string): Promise<{ uri: string; authoritative: boolean } | null> {
+  const started = await startOAuth(platform);
+  if (started && started.redirect_uri) return { uri: started.redirect_uri, authoritative: true };
+  const derived = deriveRedirectUri(platform);
+  return derived ? { uri: derived, authoritative: false } : null;
+}
+
+/** One per-stage log line, exactly as GET /jobs/{id}/logs returns it. */
+export interface JobLogEntry { ts: string | null; stage: string; level: string; message: string; }
+export function normalizeJobLogEntry(raw: unknown): JobLogEntry {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  return {
+    ts: typeof r.ts === "string" ? r.ts : null,
+    stage: String(r.stage ?? ""),
+    level: String(r.level ?? "info"),
+    message: String(r.message ?? ""),
+  };
+}
+
+/** GET /jobs/{id}/logs — per-stage run log for a job, oldest first. */
+export async function getJobLogs(jobId: string): Promise<JobLogEntry[] | null> {
+  const raw = await apiGet<unknown>(`/jobs/${encodeURIComponent(jobId)}/logs`);
+  if (raw === null) return null;
+  const logs = (raw as { logs?: unknown }).logs;
+  if (!Array.isArray(logs)) return [];
+  return logs.map(normalizeJobLogEntry);
+}
+
+/**
+ * Turn a backend / provider error string into plain language plus the
+ * next step. Unknown messages pass through unchanged (the backend
+ * already writes plain sentences for most failures) — this only
+ * translates the cryptic OAuth/provider codes a user cannot act on.
+ */
+export function explainConnectionError(message: string | undefined | null): { summary: string; nextStep: string } {
+  const raw = (message ?? "").trim();
+  const lower = raw.toLowerCase();
+  if (!raw) return { summary: "The connection check failed, but the server gave no reason.", nextStep: "Try again. If it keeps failing, check the server is running and try the Connect wizard again." };
+  if (lower.includes("llm") && (lower.includes("not saved") || lower.includes("no api key") || lower.includes("no llm"))) return { summary: "No AI key saved yet.", nextStep: "Paste your API key in the box above and press Save key — or skip it: ClipForge works without a key and writes titles from built-in templates instead." };
+  if (lower.includes("client id is not saved") || lower.includes("not saved yet") || lower.includes("not been entered") || lower.includes("credentials have not been")) return { summary: "The app keys for this platform are not saved yet.", nextStep: "Open step 3 of the Connect wizard, paste the Client ID and Client Secret from the platform's developer app, save them, then press Connect." };
+  if (lower.includes("not connected")) return { summary: "This channel is not connected yet.", nextStep: "Use the Connect button on the Channels page — sign in on the platform's own page and grant access." };
+  if (lower.includes("expired")) return { summary: "The saved sign-in has expired.", nextStep: "Press Reconnect on the Channels page and sign in again." };
+  if (lower.includes("redirect_uri_mismatch") || lower.includes("redirect uri")) return { summary: "The platform refused the redirect address (redirect URI mismatch).", nextStep: "Copy the redirect URI shown in the Connect wizard exactly — no extra spaces, no trailing slash — into the platform app's redirect URIs and save it there, then try again." };
+  if (lower.includes("invalid_client") || lower.includes("unauthorized_client")) return { summary: "The platform did not recognise the client ID or secret.", nextStep: "Open the Connect wizard, re-copy the client ID and client secret from the platform's developer app, and save them again. Make sure no extra spaces were pasted." };
+  if (lower.includes("access_denied") || lower.includes("user denied")) return { summary: "Access was declined on the platform's sign-in page.", nextStep: "Press Connect again and choose Allow / Grant access on the platform's page." };
+  if (lower.includes("not configured") || lower.includes("not set up")) return { summary: "The platform app is not set up in ClipForge yet.", nextStep: "Open the Connect wizard for this platform — it walks through creating the developer app and pasting the client ID and secret." };
+  if (lower.includes("api unreachable") || lower.includes("unreachable")) return { summary: "ClipForge could not reach its own server.", nextStep: "Check the server is running (the status bar at the top shows this), then try again." };
+  return { summary: raw, nextStep: "Try the Connect wizard again — it checks each step and shows the exact error at the step that failed." };
+}
+
 /** POST /channels/{platform}/refresh — refresh / extend the stored token. */
 export async function refreshChannel(platform: string): Promise<ApiResult> {
   return apiPostJson(`/channels/${encodeURIComponent(platform)}/refresh`);
@@ -754,4 +833,100 @@ export function maskSecret(value: string | null | undefined): string {
   if (!value) return "";
   if (value.length <= 4) return "•".repeat(value.length);
   return "•".repeat(8) + value.slice(-4);
+}
+
+// ---------------------------------------------------------------------------
+// Guided connect (v0.4.0): GET /connect/guide/{platform} — the API worker's
+// endpoint. The guide (steps, console, redirect URI, review note) comes
+// from the running server, so the wizard never hardcodes a localhost
+// guess and never drifts from the backend. The local guide in
+// lib/connect.ts is only a fallback for an older server that lacks the
+// endpoint.
+// ---------------------------------------------------------------------------
+
+export interface ConnectGuideStep { step: number; title: string; detail: string; }
+export interface ConnectGuide {
+  platform: string; display_name: string;
+  console_name: string; console_url: string;
+  steps: ConnectGuideStep[];
+  credentials: { key: string; label: string; saved: boolean }[];
+  redirect_uri: string;
+  scopes: string[];
+  review_notice: string; fallback: string; daily_cap: number;
+}
+
+export function normalizeConnectGuide(raw: unknown): ConnectGuide | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (typeof r.platform !== "string" || typeof r.redirect_uri !== "string") return null;
+  const steps = Array.isArray(r.steps)
+    ? (r.steps as Record<string, unknown>[]).map((s, i) => ({
+        step: typeof s.step === "number" ? s.step : i + 1,
+        title: String(s.title ?? ""),
+        detail: String(s.detail ?? ""),
+      }))
+    : [];
+  const creds = Array.isArray(r.credentials)
+    ? (r.credentials as Record<string, unknown>[]).map((c) => ({
+        key: String(c.key ?? ""),
+        label: String(c.label ?? c.key ?? ""),
+        saved: c.saved === true,
+      }))
+    : [];
+  return {
+    platform: r.platform,
+    display_name: String(r.display_name ?? r.platform),
+    console_name: String(r.console_name ?? ""),
+    console_url: String(r.console_url ?? ""),
+    steps,
+    credentials: creds,
+    redirect_uri: r.redirect_uri,
+    scopes: Array.isArray(r.scopes) ? r.scopes.map(String) : [],
+    review_notice: String(r.review_notice ?? ""),
+    fallback: String(r.fallback ?? ""),
+    daily_cap: typeof r.daily_cap === "number" ? r.daily_cap : 0,
+  };
+}
+
+/** GET /connect/guide/{platform} — server-side guide + exact redirect URI. Null when the server lacks the endpoint. */
+export async function getConnectGuide(platform: string): Promise<ConnectGuide | null> {
+  const raw = await apiGet<unknown>(`/connect/guide/${encodeURIComponent(platform)}`);
+  return raw === null ? null : normalizeConnectGuide(raw);
+}
+
+// ---------------------------------------------------------------------------
+// First-run onboarding progress (v0.4.0): GET/PUT /onboarding — server
+// prefs stored in settings.json. The web UI also keeps a localStorage
+// flag (see components/Onboarding.tsx) so the wizard never nags even
+// when the server is unreachable on a later launch.
+// ---------------------------------------------------------------------------
+
+export interface OnboardingState {
+  ffmpeg_acknowledged: boolean;
+  llm: "" | "skipped" | "set";
+  first_channel_connected: boolean;
+  sample_workflow_run: boolean;
+  completed: boolean;
+}
+
+export function normalizeOnboarding(raw: unknown): OnboardingState {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const llm = r.llm === "skipped" || r.llm === "set" ? r.llm : "";
+  return {
+    ffmpeg_acknowledged: r.ffmpeg_acknowledged === true,
+    llm,
+    first_channel_connected: r.first_channel_connected === true,
+    sample_workflow_run: r.sample_workflow_run === true,
+    completed: r.completed === true,
+  };
+}
+
+/** GET /onboarding — first-run progress (defaults when never started). */
+export async function getOnboarding(): Promise<OnboardingState | null> {
+  const raw = await apiGet<unknown>("/onboarding");
+  return raw === null ? null : normalizeOnboarding(raw);
+}
+
+/** PUT /onboarding — partial progress update; omitted = keep. */
+export async function updateOnboarding(patch: Partial<OnboardingState>): Promise<ApiResult> {
+  return apiPutJson("/onboarding", patch);
 }

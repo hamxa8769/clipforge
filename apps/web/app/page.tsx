@@ -132,7 +132,7 @@ export default function Dashboard() {
         <EmptyState
           title="No channel connected yet"
           body="Connect a channel to see live views, watch time and followers here. Until then, ClipForge can still clip, score and schedule — it just has no platform stats to show."
-          action={<PrimaryButton href="/settings">Connect a channel</PrimaryButton>}
+          action={<PrimaryButton href="/channels/connect">Connect a channel</PrimaryButton>}
         />
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -151,8 +151,8 @@ export default function Dashboard() {
         ) : accounts.length === 0 ? (
           <EmptyState
             title="No accounts configured"
-            body="Add a channel in Settings (the server stores only the name of the token's environment variable — never a token value). YouTube needs YOUTUBE_REFRESH_TOKEN, Meta needs META_ACCESS_TOKEN, TikTok needs TIKTOK_ACCESS_TOKEN."
-            action={<PrimaryButton href="/settings">Go to Settings</PrimaryButton>}
+            body="Open the Connect wizard — it walks you through creating the platform app and pasting the keys, step by step."
+            action={<PrimaryButton href="/channels/connect">Open the Connect wizard</PrimaryButton>}
           />
         ) : (
           <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">

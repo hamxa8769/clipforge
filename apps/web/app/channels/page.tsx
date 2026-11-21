@@ -204,7 +204,7 @@ export default function ChannelsPage() {
                       <SecondaryButton onClick={() => disconnect(p)} disabled={busy === p}>Disconnect</SecondaryButton>
                     </>
                   ) : (
-                    <PrimaryButton onClick={() => connect(p)} disabled={busy === p || !live}>Connect</PrimaryButton>
+                    <PrimaryButton href={`/channels/connect?platform=${p}`}>Connect</PrimaryButton>
                   )}
                 </div>
                 {!live && <p className="mt-2 text-xs text-neutral-500">Connect needs the live API — start the server first.</p>}
@@ -217,11 +217,11 @@ export default function ChannelsPage() {
       <Card>
         <h2 className="mb-2 text-lg font-semibold">How connecting works</h2>
         <ul className="list-disc space-y-1 pl-5 text-sm text-neutral-400">
-          <li>Save the platform app&apos;s client id and secret in Settings first — the redirect URI shown there must be registered in the platform app.</li>
+          <li>The Connect wizard walks you through it: create the platform app, paste its client id and secret, then press Connect. The redirect URI shown there must be registered in the platform app.</li>
           <li>Connect opens the platform&apos;s own sign-in page. ClipForge never asks for your password or cookies; the token is stored encrypted on the server.</li>
           <li>Each platform gates public posting behind its own review/audit; until that passes, ClipForge stays in draft / dry-run mode for that platform.</li>
         </ul>
-        <div className="mt-4"><PrimaryButton href="/settings">Open Settings</PrimaryButton></div>
+        <div className="mt-4"><PrimaryButton href="/channels/connect">Open the Connect wizard</PrimaryButton></div>
       </Card>
     </div>
   );
