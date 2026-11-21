@@ -30,13 +30,11 @@ def _clean_seeded():
     session = get_session()
     try:
         if _seeded_clip_ids:
-            session.query(ClipCandidate).filter(
-                ClipCandidate.id.in_(_seeded_clip_ids)
-            ).delete(synchronize_session=False)
-        if _seeded_job_ids:
-            session.query(Job).filter(Job.id.in_(_seeded_job_ids)).delete(
+            session.query(ClipCandidate).filter(ClipCandidate.id.in_(_seeded_clip_ids)).delete(
                 synchronize_session=False
             )
+        if _seeded_job_ids:
+            session.query(Job).filter(Job.id.in_(_seeded_job_ids)).delete(synchronize_session=False)
         session.commit()
     finally:
         session.close()
@@ -113,9 +111,7 @@ def test_own_content_is_clean(tmp_path):
 
 
 def test_youtube_source_without_declaration_warns():
-    result = scan_clip(
-        _clip(), _job(source_type="youtube", own_content=False, meta_json={})
-    )
+    result = scan_clip(_clip(), _job(source_type="youtube", own_content=False, meta_json={}))
     licence_flags = [f for f in result["flags"] if f["type"] == "licence"]
     assert licence_flags[0]["severity"] == "warning"
     assert "YouTube" in licence_flags[0]["message"]
@@ -211,9 +207,7 @@ def test_router_scan_returns_flags_and_disclaimer(client):
     body = resp.json()
     assert body["clip_id"] == clip_id
     assert isinstance(body["flags"], list)
-    assert all(
-        set(f) >= {"type", "message", "severity"} for f in body["flags"]
-    )
+    assert all(set(f) >= {"type", "message", "severity"} for f in body["flags"])
     assert all(f["severity"] in ("info", "warning", "severe") for f in body["flags"])
     assert "does NOT guarantee" in body["disclaimer"]
     assert "Content ID" in body["disclaimer"]

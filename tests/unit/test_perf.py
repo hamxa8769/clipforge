@@ -44,8 +44,13 @@ def test_recommend_profile_thresholds():
 
 def test_profile_settings_fully_specified():
     required = {
-        "whisper_model", "preview", "max_concurrent_jobs",
-        "batch_max", "animations", "ffmpeg_preset", "max_parallel_clips",
+        "whisper_model",
+        "preview",
+        "max_concurrent_jobs",
+        "batch_max",
+        "animations",
+        "ffmpeg_preset",
+        "max_parallel_clips",
     }
     for name in perf.PROFILE_NAMES:
         settings = perf.PROFILE_SETTINGS[name]

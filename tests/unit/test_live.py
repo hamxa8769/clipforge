@@ -70,9 +70,19 @@ def _ensure_fixture_mp4() -> None:
     FIXTURE_MP4.parent.mkdir(parents=True, exist_ok=True)
     proc = subprocess.run(
         [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30:duration=40",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=30:duration=40",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
             str(FIXTURE_MP4),
         ],
         capture_output=True,

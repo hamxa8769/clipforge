@@ -42,19 +42,17 @@ def _clean_seeded():
     session = get_session()
     try:
         if _seeded_clip_ids:
-            session.query(Post).filter(
-                Post.clip_candidate_id.in_(_seeded_clip_ids)
-            ).delete(synchronize_session=False)
+            session.query(Post).filter(Post.clip_candidate_id.in_(_seeded_clip_ids)).delete(
+                synchronize_session=False
+            )
             session.query(CandidateSeo).filter(
                 CandidateSeo.clip_candidate_id.in_(_seeded_clip_ids)
             ).delete(synchronize_session=False)
-            session.query(ClipCandidate).filter(
-                ClipCandidate.id.in_(_seeded_clip_ids)
-            ).delete(synchronize_session=False)
-        if _seeded_job_ids:
-            session.query(Job).filter(Job.id.in_(_seeded_job_ids)).delete(
+            session.query(ClipCandidate).filter(ClipCandidate.id.in_(_seeded_clip_ids)).delete(
                 synchronize_session=False
             )
+        if _seeded_job_ids:
+            session.query(Job).filter(Job.id.in_(_seeded_job_ids)).delete(synchronize_session=False)
         session.commit()
     finally:
         session.close()
@@ -111,8 +109,7 @@ def _seed_clip(tmp_path, *, with_seo: bool = True) -> str:
 def test_add_utm_basic_shape():
     url = add_utm("https://example.com/product", "youtube", "clip", "clip123")
     assert url == (
-        "https://example.com/product"
-        "?utm_source=youtube&utm_medium=clip&utm_campaign=clip123"
+        "https://example.com/product?utm_source=youtube&utm_medium=clip&utm_campaign=clip123"
     )
 
 
@@ -321,9 +318,7 @@ def test_fetch_youtube_revenue_403_is_honest_error():
     from clipforge.monetization import RevenueError
 
     with pytest.raises(RevenueError) as excinfo:
-        fetch_youtube_revenue(
-            "tok", client=httpx.Client(transport=httpx.MockTransport(handler))
-        )
+        fetch_youtube_revenue("tok", client=httpx.Client(transport=httpx.MockTransport(handler)))
     assert "403" in str(excinfo.value)
 
 

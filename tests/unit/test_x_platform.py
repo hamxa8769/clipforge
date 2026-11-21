@@ -52,13 +52,11 @@ def _clean_seeded():
     session = get_session()
     try:
         if _seeded_clip_ids:
-            session.query(ClipCandidate).filter(
-                ClipCandidate.id.in_(_seeded_clip_ids)
-            ).delete(synchronize_session=False)
-        if _seeded_job_ids:
-            session.query(Job).filter(Job.id.in_(_seeded_job_ids)).delete(
+            session.query(ClipCandidate).filter(ClipCandidate.id.in_(_seeded_clip_ids)).delete(
                 synchronize_session=False
             )
+        if _seeded_job_ids:
+            session.query(Job).filter(Job.id.in_(_seeded_job_ids)).delete(synchronize_session=False)
         session.commit()
     finally:
         session.close()
@@ -119,8 +117,7 @@ def _store_token(tmp_path: Path, *, expired: bool = False) -> None:
         platform="x",
         access_token="x-access-token",
         refresh_token="x-refresh-token",
-        expires_at=datetime.now(UTC)
-        + (timedelta(hours=-1) if expired else timedelta(hours=2)),
+        expires_at=datetime.now(UTC) + (timedelta(hours=-1) if expired else timedelta(hours=2)),
         scopes=["tweet.read", "tweet.write", "users.read", "offline.access"],
         account_name="testuser",
     )
@@ -130,9 +127,11 @@ def _store_token(tmp_path: Path, *, expired: bool = False) -> None:
 # ------------------------------------------------------------------ PKCE / authorize URL
 def test_pkce_challenge_is_sha256_of_verifier():
     verifier, challenge = new_pkce_pair()
-    expected = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(
-        b"="
-    ).decode("ascii")
+    expected = (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest())
+        .rstrip(b"=")
+        .decode("ascii")
+    )
     assert challenge == expected
     assert verifier != challenge
 
