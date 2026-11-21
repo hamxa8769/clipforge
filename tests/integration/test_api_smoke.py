@@ -33,6 +33,7 @@ except ImportError:
         allow_module_level=True,
     )
 
+from clipforge import __version__  # noqa: E402
 from clipforge.db import ClipCandidate, get_session  # noqa: E402
 
 client = TestClient(app)
@@ -64,7 +65,7 @@ def test_health_ok():
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
-    assert body["version"] == "0.4.0"
+    assert body["version"] == __version__
     assert body["dry_run"] is True
 
 

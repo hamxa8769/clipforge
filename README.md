@@ -8,10 +8,14 @@ captions, writes a different title / description / hashtag set for each
 platform, and publishes **only after a human approves** — through the
 platforms' official APIs, and nothing else.
 
-> **Status: v0.4.0 — production-level single-window app.** The clipping
+> **Status: v0.4.1 — production-level single-window app.** The clipping
 > pipeline, review UI, and publishing adapters are under active
 > development. Nothing in this repo posts to any platform automatically,
-> and `DRY_RUN=true` is the default. v0.4.0 adds the guided Connect
+> and `DRY_RUN=true` is the default. v0.4.1 fixes the two things users
+> actually hit in v0.4.0: "Connect a channel" no longer shows raw API
+> JSON (the server now serves the wizard page for browser navigations),
+> and FFmpeg installs itself with one click instead of asking for a
+> manual download. v0.4.0 adds the guided Connect
 > wizard (no raw JSON anywhere — step-by-step per platform, with the
 > exact developer-console steps, a copyable redirect URI, masked keys,
 > and a real Test Connection), a first-run onboarding wizard, the
@@ -54,9 +58,9 @@ for public use (test users work meanwhile); Meta needs App Review +
 Business Verification; TikTok needs a Content Posting API audit and
 stays in inbox-draft mode until it passes.
 
-**First run:** a 4-step onboarding wizard checks FFmpeg (with install
-help if it is missing — clipping cannot work without it), offers an
-optional LLM key, connects your first channel, and runs a first clip.
+**First run:** a 4-step onboarding wizard checks FFmpeg (one click
+installs it if it is missing — clipping cannot work without it), offers
+an optional LLM key, connects your first channel, and runs a first clip.
 It appears once; replay it from Settings → Replay onboarding.
 
 ## Updating the app (in-app — no manual downloads)
@@ -162,9 +166,14 @@ automatically — there is no terminal window, no Node.js install, and no
 separate server to start. Logs and data live in
 `%APPDATA%\com.clipforge.app\` (server log: `logs\clipforge-server.log`).
 
-FFmpeg is still required separately for clipping — download it from
-https://ffmpeg.org/download.html and put it on `PATH`. Without FFmpeg the
-app still runs (review / SEO only) and tells you so.
+FFmpeg is installed in one click from inside the app — press
+**Install FFmpeg** in the onboarding wizard, the banner, or
+Settings → This app. It downloads the official build (Windows: gyan.dev
+essentials, linked from ffmpeg.org; Linux: johnvansickle static build),
+installs it into the app's data folder, and adds it to your Windows
+PATH. No manual download, no restart. Without FFmpeg the app still runs
+(review / SEO only) and tells you so. From the command line:
+`python scripts/install-ffmpeg.py`.
 
 ## Download the executable (no Python needed)
 
@@ -197,8 +206,10 @@ Each zip contains:
 
 Things to know:
 
-- **FFmpeg is still required separately** (and on `PATH`) for clipping,
-  transcription, and rendering — the exe does not bundle it.
+- **FFmpeg is installed in one click** (onboarding, banner, or
+  Settings → This app) — the exe does not bundle it, the app installs
+  the official build itself (see `GET /ffmpeg/status` /
+  `POST /ffmpeg/install` in the API table below).
 - **The web UI needs Node.js 20+** to run (`start-web`). The API server
   does not. The Next.js app is server-rendered, so it cannot run inside
   the Python exe; if you place a static export of the web app at
@@ -211,6 +222,39 @@ Things to know:
 
 Building the exe yourself: `python scripts/build_exe.py --with-web`
 (see `clipforge-server.spec`).
+
+## What's new in v0.4.1
+
+- **"Connect a channel" no longer shows raw JSON** — a full-page
+  navigation to `/channels/connect` (and `/channels`, `/settings`,
+  `/jobs/view`, `/monetization`) used to be claimed by the API routes
+  and answered with `{"detail": "unknown platform: connect"}`. The
+  server now serves the exported wizard page for real browser
+  navigations, while API fetches still get JSON. In-app buttons are
+  also real client-side links now, and `?platform=youtube` starts the
+  wizard at step 2 instead of asking for the platform a second time.
+- **One-click FFmpeg install** — press **Install FFmpeg** in the
+  onboarding wizard, the missing-FFmpeg banner, or Settings → This app.
+  The app downloads the official build (Windows: gyan.dev essentials
+  zip linked from ffmpeg.org; Linux: johnvansickle static build),
+  checks the published SHA-256 when one exists, installs it into the
+  data folder, verifies `ffmpeg -version`, saves the path, and adds it
+  to the Windows user PATH — with download progress, plain-language
+  errors, and retry. Clipping works right after, no restart, no manual
+  download. Same installer from the command line:
+  `python scripts/install-ffmpeg.py`. macOS is not auto-installed yet
+  (`brew install ffmpeg` instead). A **Reinstall FFmpeg** button in
+  Settings / onboarding re-installs over an existing FFmpeg.
+- **Workflow fixes from a full audit** — local files given as
+  `file://` URLs now ingest instead of failing with "source file does
+  not exist"; the approval queue stays in sync after a live post; the
+  job review page explains itself when a job finishes with zero
+  candidates and shows real server progress; the schedule page no
+  longer calls unscheduled posts "scheduled".
+- If you have v0.4.0 installed, update from inside the app
+  (Settings → Updates, or the "Update available" banner) — no need to
+  download anything by hand. Installing v0.4.1 over v0.4.0 keeps your
+  clips, settings, and keys.
 
 ## What's new in v0.4.0
 
@@ -332,6 +376,8 @@ Building the exe yourself: `python scripts/build_exe.py --with-web`
 | `POST` | `/posts/{id}/publish?dry_run=true` | Publish (409 if not approved; dry-run default) |
 | `GET` | `/monetization` | Threshold progress per platform |
 | `GET` | `/accounts` | Connected social accounts |
+| `GET` | `/ffmpeg/status` | Pollable FFmpeg install state + live detection |
+| `POST` | `/ffmpeg/install` | Start the one-click FFmpeg install (202; `?force=true` re-installs) |
 
 Full reference: [docs/api.md](docs/api.md).
 

@@ -16,6 +16,7 @@ import pytest
 from clipforge_api.app import app
 from fastapi.testclient import TestClient
 
+from clipforge import __version__
 from clipforge.workflow import FFMPEG_DOWNLOAD_URL, ffmpeg_missing_message
 
 PLATFORMS = ("youtube", "instagram", "facebook", "tiktok")
@@ -261,10 +262,10 @@ def test_test_connection_llm_points_at_skip(client: TestClient) -> None:
 
 
 # ------------------------------------------------------------------ version + ffmpeg report
-def test_health_reports_version_0_4_0(client: TestClient) -> None:
+def test_health_reports_version(client: TestClient) -> None:
     health = client.get("/health").json()
     assert health["status"] == "ok"
-    assert health["version"] == "0.4.0"
+    assert health["version"] == __version__
 
 
 def test_settings_reports_ffmpeg_version(client: TestClient) -> None:
