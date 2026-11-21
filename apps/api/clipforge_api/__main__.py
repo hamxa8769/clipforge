@@ -110,6 +110,7 @@ def _build_app(base: Path):
     """Import the FastAPI app and attach the web UI / status page."""
     # Env vars must be set before this import: settings are read at import.
     from clipforge import __version__  # noqa: F401  (re-exported below)
+    from clipforge.auth.providers import PLATFORMS as _PLATFORMS
     from clipforge.config import settings
     from clipforge_api.app import app
 
@@ -177,7 +178,12 @@ def _build_app(base: Path):
                         # Accept: */* and must keep getting JSON. A path
                         # with no exported directory (e.g.
                         # /channels/bogus-platform) still falls through
-                        # to the API, which 404s it as before.
+                        # to the API, which 404s it as before. UI-shaped
+                        # paths with no exported page at all (/jobs,
+                        # /channels/<platform>, /posts,
+                        # /auth/<platform>/start, /jobs/<id>/...) redirect
+                        # (303) to the real page that answers them instead
+                        # (v0.6.0, below).
                         headers = dict(scope.get("headers", []))
                         accept = headers.get(b"accept", b"").decode("latin-1")
                         if "text/html" in accept:
@@ -191,22 +197,84 @@ def _build_app(base: Path):
                                 if index.is_file():
                                     await FileResponse(index)(scope, receive, send)
                                     return
-                            # Live job ids have no exported directory
-                            # (only demo ids are generated at build time),
-                            # so a direct load / refresh of /jobs/<live-id>
-                            # would otherwise fall through to the API and
-                            # show raw JSON. Redirect to the review page
-                            # that reads the id from the query string.
+                            # v0.6.0: UI-shaped paths with no exported
+                            # page. The exported page above wins whenever
+                            # one exists; what is left here used to fall
+                            # through to the API and show raw JSON on a
+                            # full-page load (refresh / pasted URL /
+                            # back-forward). Each case redirects the
+                            # browser navigation to the real page that
+                            # answers it. API fetches (Accept: */*) never
+                            # reach this branch and still get JSON, and an
+                            # unknown platform still falls through to the
+                            # API, which 404s it as before.
+                            from urllib.parse import quote
+
+                            from starlette.responses import RedirectResponse
+
                             parts = [s for s in raw_path.split("/") if s]
-                            if len(parts) == 2 and parts[0] == "jobs":
-                                from urllib.parse import quote
 
-                                from starlette.responses import RedirectResponse
+                            async def _redirect(url: str):
+                                await RedirectResponse(url=url, status_code=303)(
+                                    scope, receive, send
+                                )
 
-                                await RedirectResponse(
-                                    url=f"/jobs/view/?id={quote(parts[1], safe='')}",
-                                    status_code=303,
-                                )(scope, receive, send)
+                            if parts == ["jobs"]:
+                                # No /jobs list page exists (no
+                                # jobs/page.tsx), yet the Pipeline page
+                                # links "Go to Jobs" here — a direct load
+                                # answered GET /jobs, raw JSON ([]).
+                                # Automation is the jobs list (runner,
+                                # rules & history).
+                                await _redirect("/automation")
+                                return
+                            if parts and parts[0] == "channels" and len(parts) >= 2:
+                                if parts[1] == "connect" and len(parts) == 3:
+                                    # /channels/connect/<platform>
+                                    target = "/channels/connect"
+                                    if parts[2] in _PLATFORMS:
+                                        target += f"?platform={parts[2]}"
+                                    await _redirect(target)
+                                    return
+                                if parts[1] in _PLATFORMS:
+                                    # /channels/<platform> has no exported
+                                    # page; it answered the channel-status
+                                    # JSON. The Connect wizard (preselected
+                                    # via ?platform=) is the page for it.
+                                    await _redirect(f"/channels/connect?platform={parts[1]}")
+                                    return
+                            if len(parts) >= 2 and parts[0] == "jobs":
+                                if parts[1] == "view":
+                                    # /jobs/view/<anything> — the review
+                                    # page itself; deeper paths have no page.
+                                    await _redirect("/jobs/view/")
+                                    return
+                                # Live job ids have no exported directory
+                                # (only demo ids are generated at build
+                                # time), so a direct load / refresh of
+                                # /jobs/<live-id> would otherwise fall
+                                # through to the API and show raw JSON.
+                                # Redirect to the review page that reads
+                                # the id from the query string. Deeper
+                                # paths (/jobs/<id>/candidates, ...) are
+                                # API shapes, but a browser landing on one
+                                # gets the same review page rather than
+                                # raw JSON.
+                                await _redirect(f"/jobs/view/?id={quote(parts[1], safe='')}")
+                                return
+                            if parts and parts[0] == "posts":
+                                # No /posts page; the approval queue lists
+                                # posts. A direct load answered GET /posts,
+                                # raw JSON.
+                                await _redirect("/queue")
+                                return
+                            if len(parts) >= 2 and parts[0] == "auth" and parts[1] in _PLATFORMS:
+                                # /auth/<platform>/start is a fetch-only API
+                                # endpoint; a browser landing on it saw raw
+                                # JSON (or a 409). The Connect wizard is the
+                                # page that starts it. /auth/callback/* is
+                                # untouched: it already answers HTML.
+                                await _redirect(f"/channels/connect?platform={parts[1]}")
                                 return
                 await self.app(scope, receive, send)
 
