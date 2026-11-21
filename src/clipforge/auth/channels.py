@@ -52,6 +52,7 @@ def channel_status(platform: str, *, secrets: SecretStore, db: Session) -> dict:
         "source": "none",
         "review_notice": spec.review_notice,
         "fallback": spec.fallback,
+        "connect_guide": f"/connect/guide/{platform}",
     }
     if account is not None:
         card["scopes"] = list(account.scopes or spec.scopes)

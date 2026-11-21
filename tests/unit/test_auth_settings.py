@@ -102,9 +102,18 @@ def test_test_connection_llm_reports_exact_errors(store: SettingsStore) -> None:
 
 
 def test_test_connection_platform_needs_token_first(store: SettingsStore) -> None:
+    # No credentials saved at all: the missing client ID is named first.
+    result = store.test_connection("youtube")
+    assert result["ok"] is False
+    assert "client ID is not saved yet" in result["message"]
+    assert result["next_step"]
+    # Credentials saved but no token: the plain "not connected" message.
+    store.set_credential("youtube", "client_id", "cid")
+    store.set_credential("youtube", "client_secret", "csec")
     result = store.test_connection("youtube")
     assert result["ok"] is False
     assert "not connected" in result["message"]
+    assert result["next_step"]
 
 
 def test_test_connection_platform_uses_stored_token(store: SettingsStore) -> None:

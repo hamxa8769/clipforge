@@ -1,4 +1,4 @@
-"""Secret storage for ClipForge v0.3.0 — OS keyring first, encrypted file fallback.
+"""Secret storage for ClipForge v0.4.0 — OS keyring first, encrypted file fallback.
 
 Design borrowed (not code) from artbyjazi/autoclip (MIT): secrets go into
 the OS keyring — Credential Manager on Windows, Keychain on macOS, Secret

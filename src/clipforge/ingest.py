@@ -25,6 +25,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from clipforge.workflow import ffmpeg_missing_message
+
 ALLOWED_EXTENSIONS = {".mp4", ".mov"}
 ALLOWED_FORMATS = {"mov,mp4,m4a,3gp,3g2,mj2", "mp4", "mov"}
 MAX_SOURCE_BYTES = 10 * 1024 * 1024 * 1024  # 10 GiB sanity cap
@@ -86,8 +88,8 @@ def ffprobe_info(path: Path) -> dict:
     ]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    except FileNotFoundError as exc:
-        raise IngestError("ffprobe is not installed or not on PATH") from exc
+    except FileNotFoundError:
+        raise IngestError(ffmpeg_missing_message("ffprobe")) from None
     except subprocess.TimeoutExpired as exc:
         raise IngestError(f"ffprobe timed out probing {path}") from exc
     if proc.returncode != 0:

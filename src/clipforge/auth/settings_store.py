@@ -1,4 +1,4 @@
-"""App settings for ClipForge v0.3.0 — masked credentials + safe preferences.
+"""App settings for ClipForge v0.4.0 — masked credentials + safe preferences.
 
 Two stores, kept strictly apart:
 
@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -28,6 +29,7 @@ import httpx
 from clipforge.auth.providers import PLATFORMS, get_provider
 from clipforge.auth.secrets import SecretStore, mask_secret
 from clipforge.monetization import THRESHOLDS
+from clipforge.workflow import FFMPEG_DOWNLOAD_URL
 
 # Secret names in the SecretStore (never shown, never logged).
 SECRET_NAMES = {
@@ -55,6 +57,59 @@ DEFAULT_PRIVACY = {
     "tiktok": "private",
 }
 
+# First-run onboarding progress (GET/PUT /onboarding). Stored in the same
+# settings.json as the other preferences — no new file, no new table.
+# ``llm`` is "" (undecided), "skipped" or "set".
+DEFAULT_ONBOARDING: dict[str, object] = {
+    "ffmpeg_acknowledged": False,
+    "llm": "",
+    "first_channel_connected": False,
+    "sample_workflow_run": False,
+    "completed": False,
+}
+ONBOARDING_LLM_CHOICES = ("", "skipped", "set")
+
+
+def normalize_onboarding(data: object) -> dict[str, object]:
+    """Keep only known onboarding keys with valid values; defaults fill gaps."""
+    out = dict(DEFAULT_ONBOARDING)
+    if not isinstance(data, dict):
+        return out
+    for key, value in data.items():
+        if key not in DEFAULT_ONBOARDING:
+            continue
+        if key == "llm":
+            if value in ONBOARDING_LLM_CHOICES:
+                out[key] = value
+        elif isinstance(value, bool):
+            out[key] = value
+    return out
+
+
+def ffmpeg_info() -> dict:
+    """Honest FFmpeg report: found on PATH, where, and which version.
+
+    ``version`` is the first line of ``ffmpeg -version`` (e.g.
+    ``ffmpeg version 6.1.1``) when the binary runs, else "" — never a
+    guessed version, never a crash when the binary is absent.
+    """
+    path = shutil.which("ffmpeg")
+    info = {
+        "found": bool(path),
+        "path": path or "",
+        "version": "",
+        "install_url": FFMPEG_DOWNLOAD_URL,
+    }
+    if not path:
+        return info
+    try:
+        proc = subprocess.run([path, "-version"], capture_output=True, text=True, timeout=5)
+        first = (proc.stdout or "").splitlines()[0].strip() if proc.stdout else ""
+        info["version"] = first
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return info
+
 
 @dataclass
 class AppSettings:
@@ -66,6 +121,8 @@ class AppSettings:
     llm_provider: str = "openai-compatible"
     llm_base_url: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4o-mini"
+    # First-run onboarding progress (see DEFAULT_ONBOARDING).
+    onboarding: dict[str, object] = field(default_factory=lambda: dict(DEFAULT_ONBOARDING))
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -82,6 +139,7 @@ class AppSettings:
         }
         settings.default_privacy = {p: kept.get(p, DEFAULT_PRIVACY[p]) for p in PLATFORMS}
         settings.default_platforms = [p for p in settings.default_platforms if p in PLATFORMS]
+        settings.onboarding = normalize_onboarding(settings.onboarding)
         return settings
 
 
@@ -113,6 +171,27 @@ class SettingsStore:
         """Settings override wins; otherwise the environment decides."""
         stored = self.load().dry_run
         return env_dry_run if stored is None else stored
+
+    # ------------------------------------------------------------ onboarding
+    def get_onboarding(self) -> dict:
+        """Current first-run progress (defaults when never started)."""
+        return normalize_onboarding(self.load().onboarding)
+
+    def update_onboarding(self, patch: dict) -> dict:
+        """Apply a partial onboarding update; unknown keys / bad values
+        raise ValueError (the API turns that into a 422)."""
+        unknown = sorted(set(patch) - set(DEFAULT_ONBOARDING))
+        if unknown:
+            raise ValueError(f"unknown onboarding fields: {unknown}")
+        if "llm" in patch and patch["llm"] not in ONBOARDING_LLM_CHOICES:
+            raise ValueError("onboarding.llm must be '', 'skipped' or 'set'")
+        for key, value in patch.items():
+            if key != "llm" and not isinstance(value, bool):
+                raise ValueError(f"onboarding.{key} must be true or false")
+        current = self.load()
+        current.onboarding = normalize_onboarding({**self.get_onboarding(), **patch})
+        self.save(current)
+        return dict(current.onboarding)
 
     # ------------------------------------------------------------ secrets
     def get_credential(self, service: str, kind: str) -> str | None:
@@ -167,7 +246,6 @@ class SettingsStore:
     def public_view(self, *, env_dry_run: bool) -> dict:
         """Everything GET /settings returns: masked credentials + status."""
         settings = self.load()
-        ffmpeg = shutil.which("ffmpeg")
         return {
             "dry_run": self.effective_dry_run(env_dry_run),
             "dry_run_source": "settings" if settings.dry_run is not None else "env",
@@ -188,11 +266,7 @@ class SettingsStore:
             },
             "data_dir": str(self.data_dir.resolve()),
             "secret_backend": self.secrets.backend,
-            "ffmpeg": {
-                "found": bool(ffmpeg),
-                "path": ffmpeg or "",
-                "install_url": "https://ffmpeg.org/download.html",
-            },
+            "ffmpeg": ffmpeg_info(),
             "monetization_thresholds": [
                 {
                     "platform": platform,
@@ -209,10 +283,12 @@ class SettingsStore:
     def test_connection(self, service: str, *, client: httpx.Client | None = None) -> dict:
         """Hit the real API with the stored credential and report the result.
 
-        Returns ``{"ok": bool, "message": str}`` — the exact provider error
-        is surfaced, never a generic "failed". No credential is included.
-        Never raises: an unexpected failure becomes an honest not-ok
-        result instead of a 500.
+        Returns ``{"ok", "message", "code", "next_step"}`` in plain
+        language: ``message`` says what happened, ``next_step`` says what
+        to do about it (which wizard step, which button). No credential
+        is included, and no traceback or bare HTTP code is ever the only
+        message. Never raises: an unexpected failure becomes an honest
+        not-ok result instead of a 500.
         """
         try:
             if service in PLATFORMS:
@@ -220,31 +296,91 @@ class SettingsStore:
             if service == "llm":
                 return self._test_llm(client=client)
         except Exception as exc:  # noqa: BLE001  (test endpoint must not 500)
-            return {"ok": False, "message": f"Test failed before reaching the API: {exc}"}
-        return {"ok": False, "message": f"Unknown service: {service}."}
+            return {
+                "ok": False,
+                "code": "test_failed",
+                "message": f"Test failed before reaching the API: {exc}",
+                "next_step": "Check the saved settings for this service and test again.",
+            }
+        return {
+            "ok": False,
+            "code": "unknown_service",
+            "message": f"Unknown service: {service}.",
+            "next_step": "Pick one of youtube, instagram, facebook, tiktok or llm.",
+        }
 
     def _test_platform(self, platform: str, *, client: httpx.Client | None = None) -> dict:
         from clipforge.auth.oauth import check_health  # noqa: PLC0415
         from clipforge.auth.token_store import TokenStore  # noqa: PLC0415
 
         spec = get_provider(platform)
+        guide = f"GET /connect/guide/{platform}"
         record = TokenStore(self.secrets).load(platform)
         if record is None:
+            # No token yet: say exactly which setup step is missing, so
+            # the wizard can point at it instead of showing a bare error.
+            client_id = self.get_credential(platform, "client_id")
+            client_secret = self.get_credential(platform, "client_secret")
+            if not client_id:
+                return {
+                    "ok": False,
+                    "code": "not_configured",
+                    "message": (
+                        f"{spec.display_name} client ID is not saved yet — "
+                        "the app credentials have not been entered."
+                    ),
+                    "next_step": (
+                        f"Save the Client ID and Client secret in Settings "
+                        f"(Step 3 of the Connect guide, {guide}), then press Connect."
+                    ),
+                }
+            if not client_secret:
+                return {
+                    "ok": False,
+                    "code": "not_configured",
+                    "message": (
+                        f"{spec.display_name} client secret is not saved yet — "
+                        "the Client ID is saved, but the secret is missing."
+                    ),
+                    "next_step": (
+                        f"Save the Client secret in Settings "
+                        f"(Step 3 of the Connect guide, {guide}), then press Connect."
+                    ),
+                }
             return {
                 "ok": False,
+                "code": "not_connected",
                 "message": (
                     f"{spec.display_name} is not connected — press Connect on the "
                     "Channels page first."
+                ),
+                "next_step": (
+                    f"Follow the Connect guide ({guide}) and press Connect for {spec.display_name}."
                 ),
             }
         if record.is_expired():
             return {
                 "ok": False,
+                "code": "token_expired",
                 "message": (
                     f"{spec.display_name} token expired — press Reconnect on the Channels page."
                 ),
+                "next_step": f"Press Reconnect for {spec.display_name} on the Channels page.",
             }
-        return check_health(platform, record.access_token, client=client)
+        result = check_health(platform, record.access_token, client=client)
+        if result["ok"]:
+            result.setdefault("code", "ok")
+            result.setdefault("next_step", "")
+            return result
+        return {
+            "ok": False,
+            "code": result.get("code") or "token_rejected",
+            "message": result["message"],
+            "next_step": (
+                f"The stored {spec.display_name} token was refused — "
+                "press Reconnect on the Channels page to connect again."
+            ),
+        }
 
     def _test_llm(self, *, client: httpx.Client | None = None) -> dict:
         import os  # noqa: PLC0415
@@ -254,7 +390,12 @@ class SettingsStore:
         if not key:
             return {
                 "ok": False,
+                "code": "not_configured",
                 "message": "No LLM API key saved — add one in Settings first.",
+                "next_step": (
+                    "Save an LLM API key in Settings, or skip the LLM — "
+                    "ClipForge works without it (SEO uses built-in templates)."
+                ),
             }
         base = settings.llm_base_url.rstrip("/")
         own_client = client is None
@@ -264,27 +405,48 @@ class SettingsStore:
         try:
             resp = client.get(f"{base}/models", headers={"Authorization": f"Bearer {key}"})
         except httpx.HTTPError as exc:
-            return {"ok": False, "message": f"Could not reach {base}: {exc}"}
+            return {
+                "ok": False,
+                "code": "unreachable",
+                "message": f"Could not reach {base}: {exc}",
+                "next_step": (
+                    "Check your internet connection and the LLM base URL in "
+                    "Settings, then test again."
+                ),
+            }
         finally:
             if own_client:
                 client.close()
         if resp.status_code == 200:
-            return {"ok": True, "message": f"LLM reachable at {base} (models list OK)."}
+            return {
+                "ok": True,
+                "code": "ok",
+                "message": f"LLM reachable at {base} (models list OK).",
+                "next_step": "",
+            }
         if resp.status_code in (401, 403):
             return {
                 "ok": False,
+                "code": "key_rejected",
                 "message": f"LLM key rejected by {base} (HTTP {resp.status_code}) — check the key.",
+                "next_step": "Check the LLM API key saved in Settings and test again.",
             }
         return {
             "ok": False,
+            "code": "unexpected_status",
             "message": f"LLM endpoint {base} answered HTTP {resp.status_code}.",
+            "next_step": "Check the LLM base URL in Settings and test again.",
         }
 
 
 __all__ = [
     "AppSettings",
+    "DEFAULT_ONBOARDING",
     "DEFAULT_PRIVACY",
     "LEGACY_ENV_VARS",
+    "ONBOARDING_LLM_CHOICES",
     "SECRET_NAMES",
     "SettingsStore",
+    "ffmpeg_info",
+    "normalize_onboarding",
 ]

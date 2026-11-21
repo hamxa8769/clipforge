@@ -1,4 +1,4 @@
-"""Provider specs for ClipForge v0.3.0 — one spec per platform.
+"""Provider specs for ClipForge v0.4.0 — one spec per platform.
 
 The shape mirrors the provider contract from gitroomhq/postiz-app (AGPL-3.0)
 — ``generateAuthUrl`` / ``authenticate`` / ``refreshToken`` / ``post`` plus

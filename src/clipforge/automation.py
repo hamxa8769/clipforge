@@ -1,4 +1,4 @@
-"""Automation rules engine for ClipForge v0.3.0.
+"""Automation rules engine for ClipForge v0.4.0.
 
 Three rules, all toggleable, all logged — nothing automated is silent:
 

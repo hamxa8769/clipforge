@@ -192,10 +192,21 @@ def test_oauth_callback_unknown_platform(client: TestClient) -> None:
 
 
 def test_test_connection_endpoint_reports_honestly(client: TestClient) -> None:
-    # Nothing connected yet: exact, actionable message — not a bare 500.
+    # Nothing saved yet: the missing credential is named, with a next step.
+    resp = client.post("/settings/test-connection/youtube")
+    assert resp.status_code == 502
+    assert "client ID is not saved yet" in resp.json()["detail"]
+    assert "Next step:" in resp.json()["detail"]
+    # Credentials saved but no token: the "not connected" message, still
+    # with a plain-language next step — not a bare 500.
+    client.put(
+        "/settings",
+        json={"credentials": {"youtube": {"client_id": "cid", "client_secret": "csec"}}},
+    )
     resp = client.post("/settings/test-connection/youtube")
     assert resp.status_code == 502
     assert "not connected" in resp.json()["detail"]
+    assert "Next step:" in resp.json()["detail"]
     assert client.post("/settings/test-connection/myspace").status_code == 404
     assert client.post("/settings/test-connection/llm").status_code == 502
     assert "No LLM API key" in client.post("/settings/test-connection/llm").json()["detail"]

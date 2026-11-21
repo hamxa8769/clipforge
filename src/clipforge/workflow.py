@@ -1,4 +1,4 @@
-"""Live workflow for ClipForge v0.3.0 — job stages, dependencies, progress.
+"""Live workflow for ClipForge v0.4.0 — job stages, dependencies, progress.
 
 This module is the shared core behind the worker (``clipforge.worker``)
 and the API workflow endpoints. It does not run the pipeline itself;
@@ -70,6 +70,26 @@ def stage_progress_before(stage: str) -> float:
 
 
 # ---------------------------------------------------------------- errors
+# The one download URL every FFmpeg-missing message points at, so a job
+# blocked on a missing tool always tells the user exactly where to get it.
+FFMPEG_DOWNLOAD_URL = "https://ffmpeg.org/download.html"
+
+
+def ffmpeg_missing_message(tool: str = "ffmpeg") -> str:
+    """Plain-language error for a missing FFmpeg/ffprobe binary.
+
+    Used by ingest / transcribe / render and by the worker's blocked-job
+    records, so the message is identical everywhere: no traceback, no
+    bare ``FileNotFoundError``, just what is missing and where to get it.
+    """
+    if tool == "ffprobe":
+        return (
+            "ffprobe is missing — it ships with FFmpeg. Install FFmpeg from "
+            f"{FFMPEG_DOWNLOAD_URL} and make sure it is on PATH."
+        )
+    return f"FFmpeg is missing — install it from {FFMPEG_DOWNLOAD_URL} and make sure it is on PATH."
+
+
 class MissingDependencyError(ValueError):
     """A pipeline step cannot run: a tool, key, package or account is missing.
 
@@ -400,6 +420,8 @@ __all__ = [
     "STAGES",
     "STAGE_NAMES",
     "MIN_SCORE_THRESHOLD",
+    "FFMPEG_DOWNLOAD_URL",
+    "ffmpeg_missing_message",
     "stage_progress_before",
     "MissingDependencyError",
     "Dependency",

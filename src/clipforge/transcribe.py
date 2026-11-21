@@ -29,6 +29,8 @@ import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from clipforge.workflow import ffmpeg_missing_message
+
 DEFAULT_CACHE_DIR = Path(os.environ.get("CLIPFORGE_DATA_DIR", "data")) / "transcripts"
 
 
@@ -207,7 +209,13 @@ def _extract_audio_wav(source: Path) -> Path:
         "pcm_s16le",
         tmp.name,
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    except FileNotFoundError:
+        # ffmpeg binary absent: say so plainly instead of leaking a
+        # traceback-style "[Errno 2] No such file or directory: 'ffmpeg'".
+        # The worker turns this into a blocked job (see worker.py).
+        raise RuntimeError(ffmpeg_missing_message()) from None
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg audio extraction failed: {proc.stderr.strip()}")
     return Path(tmp.name)

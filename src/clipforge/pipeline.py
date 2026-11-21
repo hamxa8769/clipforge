@@ -17,6 +17,7 @@ import time
 import uuid
 from pathlib import Path
 
+from clipforge import __version__
 from clipforge.captions import STYLES
 from clipforge.highlights import find_candidates
 from clipforge.ingest import SourceInfo, ingest_local, ingest_youtube
@@ -111,7 +112,7 @@ def run_pipeline(
 
     return {
         "job_id": job_id,
-        "engine": "clipforge 0.3.0",
+        "engine": f"clipforge {__version__}",
         "elapsed_s": round(time.time() - started, 2),
         "source": source.to_dict(),
         "transcript": {

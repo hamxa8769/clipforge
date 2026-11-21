@@ -1,4 +1,4 @@
-"""ClipForge API v0.3.0 — FastAPI app.
+"""ClipForge API v0.4.0 — FastAPI app.
 
 Endpoints (all dry-run by default; nothing publishes live without an
 approved Post record, explicit credentials, and ``dry_run=false``):
@@ -23,6 +23,8 @@ approved Post record, explicit credentials, and ``dry_run=false``):
   GET  /posts/{id}
   GET  /accounts | POST /accounts    (token stored as env-var NAME only)
   GET  /channels                     (per-platform connection status)
+  GET  /connect/guide/{platform}     (guided-connect steps per platform)
+  GET  /onboarding | PUT /onboarding (first-run progress, resumable)
   GET  /auth/{platform}/start        (OAuth authorize URL)
   GET  /auth/callback/{platform}     (OAuth callback — exchanges the code)
   POST /channels/{platform}/refresh  (refresh / extend the stored token)
@@ -68,7 +70,7 @@ for _candidate in (
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from clipforge import __version__ as _VERSION  # noqa: F401  (package version)
@@ -98,6 +100,7 @@ from clipforge.auth import (
     TokenStore,
 )
 from clipforge.auth.channels import all_channels, channel_status
+from clipforge.auth.connect_guide import connect_guide
 from clipforge.auth.oauth import (
     build_authorize_url,
     exchange_code,
@@ -307,6 +310,22 @@ class SettingsUpdate(BaseModel):
     credentials: dict[str, dict[str, str | None]] | None = None
 
 
+class OnboardingUpdate(BaseModel):
+    """Partial onboarding update. Omitted = keep current value.
+
+    ``llm`` is "" (undecided), "skipped" or "set"; the other fields are
+    booleans. Unknown fields are rejected with a 422.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ffmpeg_acknowledged: bool | None = None
+    llm: str | None = None
+    first_channel_connected: bool | None = None
+    sample_workflow_run: bool | None = None
+    completed: bool | None = None
+
+
 # ------------------------------------------------------------------ app setup
 _engine = init_db()
 _Session = session_factory()
@@ -320,7 +339,7 @@ def get_db():
         db.close()
 
 
-app = FastAPI(title="ClipForge API", version="0.3.0")
+app = FastAPI(title="ClipForge API", version=_VERSION)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -526,7 +545,7 @@ def health():
     return {
         "status": "ok",
         "dry_run": _effective_dry_run(),
-        "version": "0.3.0",
+        "version": _VERSION,
         "database_url_scheme": settings.database_url.split("://")[0],
     }
 
@@ -1135,6 +1154,47 @@ def get_channel(platform: str, db: Session = Depends(get_db)):
     return channel_status(platform, secrets=_secrets(), db=db)
 
 
+@app.get("/connect/guide/{platform}")
+def get_connect_guide(platform: str):
+    """Plain-language setup guide for the Connect wizard.
+
+    The wizard shows this instead of raw JSON: the official developer
+    console, the exact steps in order, what to copy where, the exact
+    redirect URI this server expects (computed from the running server,
+    not a hardcoded guess), the scopes requested, and the review/audit
+    note. ``credentials[].saved`` are presence flags only — no values.
+    """
+    _require_platform(platform)  # 404 for an unknown platform
+    store = _settings_store()
+    return connect_guide(
+        platform,
+        redirect_uri=redirect_uri(platform),
+        client_id_saved=bool(store.get_credential(platform, "client_id")),
+        client_secret_saved=bool(store.get_credential(platform, "client_secret")),
+    )
+
+
+@app.get("/onboarding")
+def get_onboarding():
+    """First-run progress for the onboarding wizard (resumable).
+
+    Stored in the same settings.json as the other preferences, so the
+    wizard can resume where the user left off and stops nagging once
+    ``completed`` is true.
+    """
+    return _settings_store().get_onboarding()
+
+
+@app.put("/onboarding")
+def update_onboarding(payload: OnboardingUpdate):
+    """Record onboarding progress. Partial: omitted fields are kept."""
+    patch = {k: v for k, v in payload.model_dump().items() if v is not None}
+    try:
+        return _settings_store().update_onboarding(patch)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @app.get("/auth/{platform}/start")
 def start_oauth(platform: str):
     """Return the platform authorize URL for the Connect button to open.
@@ -1215,6 +1275,9 @@ def oauth_callback(
     except OAuthError:
         pass
     TokenStore(_secrets()).save(record)
+    # First-run onboarding: a real connect marks this step done, so the
+    # wizard resumes past it instead of nagging on every launch.
+    _settings_store().update_onboarding({"first_channel_connected": True})
     account = (
         db.query(SocialAccount)
         .filter_by(provider=platform)
@@ -1334,12 +1397,20 @@ def update_settings(payload: SettingsUpdate):
 
 @app.post("/settings/test-connection/{service}")
 def test_connection(service: str):
-    """Hit the real API with the stored credential; report the exact result."""
+    """Hit the real API with the stored credential; report the exact result.
+
+    On failure the 502 detail is a plain-language message plus the next
+    step — never a raw traceback or a bare HTTP code on its own. On
+    success the full result (ok / message / code / next_step) is returned.
+    """
     if service not in (*PLATFORMS, "llm"):
         raise HTTPException(404, f"unknown service: {service}")
     result = _settings_store().test_connection(service)
     if not result["ok"]:
-        raise HTTPException(502, result["message"])
+        detail = result["message"]
+        if result.get("next_step"):
+            detail = f"{detail} Next step: {result['next_step']}"
+        raise HTTPException(502, detail)
     return result
 
 

@@ -1,4 +1,4 @@
-"""Encrypted OAuth token storage for ClipForge v0.3.0.
+"""Encrypted OAuth token storage for ClipForge v0.4.0.
 
 Tokens live in the :class:`SecretStore` (OS keyring where available, else
 Fernet-encrypted file) as one JSON blob per platform — never in the SQLite

@@ -26,6 +26,22 @@ from clipforge.captions import write_ass
 from clipforge.highlights import Candidate
 from clipforge.reframe import ReframePlan
 from clipforge.transcribe import Word
+from clipforge.workflow import ffmpeg_missing_message
+
+
+def _run(cmd: list[str], *, timeout: int, tool: str) -> subprocess.CompletedProcess[str]:
+    """Run an ffmpeg/ffprobe command, or raise a plain-language error.
+
+    A missing binary raises ``FileNotFoundError`` from ``subprocess``;
+    without this wrapper the caller would surface a bare
+    ``[Errno 2] No such file or directory`` instead of telling the user
+    FFmpeg is missing and where to install it.
+    """
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        raise RenderError(ffmpeg_missing_message(tool)) from None
+
 
 TARGET_WIDTH = 1080
 TARGET_HEIGHT = 1920
@@ -68,7 +84,7 @@ def ffprobe_verify(path: Path) -> RenderResult:
         "json",
         str(path),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    proc = _run(cmd, timeout=120, tool="ffprobe")
     if proc.returncode != 0:
         raise RenderError(f"ffprobe failed for {path}: {proc.stderr.strip()}")
     info = json.loads(proc.stdout)
@@ -214,7 +230,7 @@ def render_clip(
 
     # Probe source dimensions if no plan was supplied.
     if plan is None:
-        probe = subprocess.run(
+        probe = _run(
             [
                 "ffprobe",
                 "-v",
@@ -227,9 +243,8 @@ def render_clip(
                 "json",
                 str(source),
             ],
-            capture_output=True,
-            text=True,
             timeout=120,
+            tool="ffprobe",
         )
         dims = json.loads(probe.stdout)["streams"][0]
         src_w, src_h = int(dims["width"]), int(dims["height"])
@@ -337,7 +352,7 @@ def render_clip(
         "+faststart",
         str(out),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    proc = _run(cmd, timeout=3600, tool="ffmpeg")
     if proc.returncode != 0:
         raise RenderError(f"ffmpeg render failed for {out}: {proc.stderr.strip()[-800:]}")
     if not out.exists() or out.stat().st_size == 0:

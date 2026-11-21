@@ -1,4 +1,4 @@
-"""Background worker / queue for ClipForge v0.3.0.
+"""Background worker / queue for ClipForge v0.4.0.
 
 The worker runs one job end to end — ingest → transcribe → score →
 render → seo → review — and records everything it does so the
@@ -62,6 +62,7 @@ from clipforge.retention import adjust_candidate_scores, feedback_from_points
 from clipforge.seo import generate_all as generate_all_seo
 from clipforge.transcribe import Transcript, transcribe
 from clipforge.workflow import (
+    FFMPEG_DOWNLOAD_URL,
     MIN_SCORE_THRESHOLD,
     MissingDependencyError,
     StageTracker,
@@ -290,7 +291,8 @@ def _run_stages(
             require_tool(
                 "ffprobe",
                 "ffprobe validates the local source file",
-                "Install FFmpeg (which ships ffprobe).",
+                f"Install FFmpeg from {FFMPEG_DOWNLOAD_URL} "
+                "(ffprobe ships with it) and make sure it is on PATH.",
             )
             source = ingest_local(str(job.source_path or job.source_url or ""))
     except MissingDependencyError as exc:
@@ -346,6 +348,22 @@ def _run_stages(
         raise
     except RuntimeError as exc:
         # transcribe() raises RuntimeError when no backend is available.
+        if "FFmpeg is missing" in str(exc):
+            # Audio extraction needs the ffmpeg binary (not just a
+            # transcription backend): a blocked job, not a failed one,
+            # with the install link in the required action.
+            dep = MissingDependencyError(
+                code="ffmpeg_missing",
+                dependency="ffmpeg",
+                kind="tool",
+                detail=str(exc),
+                required_action=(
+                    f"Install FFmpeg from {FFMPEG_DOWNLOAD_URL} "
+                    "and make sure it is on PATH, then retry the job."
+                ),
+            )
+            tracker.block("transcribe", dep)
+            raise dep
         if "no transcription backend" in str(exc):
             dep = MissingDependencyError(
                 code="transcription_backend_missing",
@@ -527,7 +545,8 @@ def _run_stages(
         require_tool(
             "ffmpeg",
             "FFmpeg renders the clips",
-            "Install FFmpeg and make sure it is on PATH.",
+            f"Install FFmpeg from {FFMPEG_DOWNLOAD_URL} "
+            "and make sure it is on PATH, then retry the job.",
         )
     except MissingDependencyError as exc:
         tracker.block("render", exc)
