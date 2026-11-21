@@ -288,7 +288,7 @@ function PipelinePageInner() {
             <CardHeader
               title={job.title || job.source || job.id}
               hint={job.started_at ? `Started ${new Date(job.started_at).toLocaleString()}` : job.created_at ? `Created ${new Date(job.created_at).toLocaleString()}` : undefined}
-              action={<Link href={`/jobs/${job.id}`} className="text-sm text-sky-400 underline">Open job</Link>}
+              action={<Link href={`/jobs/view/?id=${encodeURIComponent(job.id)}`} className="text-sm text-sky-400 underline">Open job</Link>}
             />
             <div className="flex flex-wrap items-center gap-3 text-sm">
               <StatusPill status={job.status} />

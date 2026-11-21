@@ -191,6 +191,23 @@ def _build_app(base: Path):
                                 if index.is_file():
                                     await FileResponse(index)(scope, receive, send)
                                     return
+                            # Live job ids have no exported directory
+                            # (only demo ids are generated at build time),
+                            # so a direct load / refresh of /jobs/<live-id>
+                            # would otherwise fall through to the API and
+                            # show raw JSON. Redirect to the review page
+                            # that reads the id from the query string.
+                            parts = [s for s in raw_path.split("/") if s]
+                            if len(parts) == 2 and parts[0] == "jobs":
+                                from urllib.parse import quote
+
+                                from starlette.responses import RedirectResponse
+
+                                await RedirectResponse(
+                                    url=f"/jobs/view/?id={quote(parts[1], safe='')}",
+                                    status_code=303,
+                                )(scope, receive, send)
+                                return
                 await self.app(scope, receive, send)
 
         # Starlette refuses add_middleware once the app has served a

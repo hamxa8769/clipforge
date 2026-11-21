@@ -122,3 +122,27 @@ def test_browser_navigation_to_unknown_platform_still_404s(tmp_path):
     client = _launcher_client(tmp_path)
     res = client.get("/channels/bogus-platform", headers={"Accept": BROWSER_ACCEPT})
     assert res.status_code == 404
+
+
+def test_browser_navigation_to_live_job_id_redirects_to_review(tmp_path):
+    """v0.5.0: a live job id has no exported directory (only demo ids
+    are generated at build time), so a direct load / refresh of
+    /jobs/<live-id> used to fall through to the API and show raw JSON.
+    A browser navigation now redirects to the review page that reads
+    the id from the query string. API fetches (Accept: */*) are
+    unaffected and still get the job JSON."""
+    client = _launcher_client(tmp_path)
+    live_id = "262819a0612c4368"
+    res = client.get(
+        f"/jobs/{live_id}", headers={"Accept": BROWSER_ACCEPT}, follow_redirects=False
+    )
+    assert res.status_code == 303, res.text
+    assert res.headers["location"] == f"/jobs/view/?id={live_id}"
+    # Following the redirect lands on the exported review page.
+    res = client.get(res.headers["location"], headers={"Accept": BROWSER_ACCEPT})
+    assert res.status_code == 200
+    assert "<h1>Job</h1>" in res.text
+    # The API still answers JSON for the same id when asked as an API.
+    res = client.get(f"/jobs/{live_id}", headers={"Accept": "*/*"})
+    assert res.status_code in {200, 404}  # 200 when the job exists, else API 404
+    assert "text/html" not in res.headers.get("content-type", "")
