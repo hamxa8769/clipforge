@@ -2281,7 +2281,20 @@ def test_gemini_key(payload: GeminiKeyIn):
             "No Gemini API key given and none saved — paste your key "
             "(Google AI Studio > Get API key) and test again.",
         )
-    result = test_gemini(key, model)
+    # A test must never 500: any unexpected failure (e.g. a broken
+    # proxy config on the machine) comes back as a plain-language
+    # {ok: False} so the Test button can show it.
+    try:
+        result = test_gemini(key, model)
+    except Exception as exc:  # noqa: BLE001 — test endpoint never 500s
+        return {
+            "ok": False,
+            "model": model,
+            "message": (
+                "Gemini could not be tested right now — "
+                f"check your internet connection and try again. ({exc})"
+            ),
+        }
     return {"ok": result["ok"], "model": result["model"], "message": result["message"]}
 
 

@@ -74,7 +74,21 @@ def _http_error_message(status: int, provider: str) -> str:
 
 
 def _new_client(timeout_s: float = _LLM_TIMEOUT_S) -> httpx.Client:
-    return httpx.Client(timeout=timeout_s)
+    """httpx client that ignores proxy env vars.
+
+    The VM / user machine may carry a malformed proxy config (e.g. a
+    bracketed-IPv6 NO_PROXY entry like ``[::1]``) that makes plain
+    ``httpx.Client()`` raise InvalidURL at construction time. A desktop
+    app calling the Gemini API directly must not fail — or 500 a Test
+    button — because of that. Same fix as oauth._new_client.
+    """
+    try:
+        return httpx.Client(timeout=timeout_s, trust_env=False)
+    except Exception as exc:
+        raise LlmError(
+            "Could not start the network client — your machine's proxy "
+            f"settings look broken ({exc}). Check the proxy settings and test again."
+        ) from exc
 
 
 @dataclass
@@ -92,8 +106,8 @@ class GeminiProvider(LlmProvider):
 
     def generate_text(self, prompt: str, *, client: httpx.Client | None = None) -> str:
         own_client = client is None
-        client = client or _new_client()
         try:
+            client = client or _new_client()
             resp = client.post(
                 self._url(),
                 headers={"x-goog-api-key": self.api_key, "Content-Type": "application/json"},
@@ -105,7 +119,7 @@ class GeminiProvider(LlmProvider):
                 "Check your internet connection and test again."
             ) from exc
         finally:
-            if own_client:
+            if own_client and client is not None:
                 client.close()
         if resp.status_code != 200:
             raise LlmError(_http_error_message(resp.status_code, "Gemini"))
@@ -159,8 +173,8 @@ class OpenAICompatibleProvider(LlmProvider):
 
     def generate_text(self, prompt: str, *, client: httpx.Client | None = None) -> str:
         own_client = client is None
-        client = client or _new_client()
         try:
+            client = client or _new_client()
             resp = client.post(
                 f"{self.base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {self.api_key}"},
@@ -176,7 +190,7 @@ class OpenAICompatibleProvider(LlmProvider):
                 "Check your internet connection and test again."
             ) from exc
         finally:
-            if own_client:
+            if own_client and client is not None:
                 client.close()
         if resp.status_code != 200:
             raise LlmError(_http_error_message(resp.status_code, "LLM"))

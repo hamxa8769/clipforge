@@ -15,6 +15,7 @@ from clipforge.llm import (
     GeminiProvider,
     LlmError,
     OpenAICompatibleProvider,
+    _new_client,
     generate_copy_with_engine,
     resolve_engine,
 )
@@ -43,6 +44,25 @@ def _mock_client(handler) -> httpx.Client:
 
 
 # ---------------------------------------------------------------- Gemini test
+def test_gemini_client_ignores_broken_proxy_env(monkeypatch):
+    # Regression: sandbox proxy env vars — a bracketed-IPv6 NO_PROXY
+    # entry like "[::1]" — made plain httpx.Client() raise InvalidURL
+    # ("Invalid port: ':1]'") at construction time, and
+    # POST /api/llm/gemini/test 500'd. The LLM client must ignore
+    # proxy env vars entirely (same fix as oauth._new_client).
+    monkeypatch.setenv("NO_PROXY", "[::1],localhost")
+    monkeypatch.setenv("no_proxy", "[::1],localhost")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:8080")
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:8080")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:8080")
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:8080")
+    client = _new_client()
+    try:
+        assert client._trust_env is False
+    finally:
+        client.close()
+
+
 def test_gemini_test_success_mocked():
     result = llm_test_gemini(FAKE_KEY, client=_mock_client(_gemini_ok_handler))
     assert result["ok"] is True

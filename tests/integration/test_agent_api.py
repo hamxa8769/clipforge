@@ -306,6 +306,21 @@ def test_gemini_test_unknown_model_is_plain_422():
     assert "gemini-9.9" in resp.json()["detail"]
 
 
+def test_gemini_test_never_500s_when_test_raises(monkeypatch):
+    # Regression: a broken proxy config made the Gemini test 500 with
+    # a traceback. The endpoint must always answer 200 {ok: False}
+    # in plain language, even if the underlying test blows up.
+    def _boom(key, model="gemini-2.0-flash"):
+        raise RuntimeError("InvalidURL: Invalid port: ':1]'")
+
+    monkeypatch.setattr(app_module, "test_gemini", _boom)
+    resp = client.post("/api/llm/gemini/test", json={"api_key": FAKE_KEY})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["ok"] is False
+    assert "Traceback" not in resp.text
+    assert FAKE_KEY not in resp.text
+
+
 def test_gemini_save_unknown_model_is_plain_422():
     resp = client.post("/api/llm/gemini/save", json={"api_key": FAKE_KEY, "model": "gemini-9.9"})
     assert resp.status_code == 422
