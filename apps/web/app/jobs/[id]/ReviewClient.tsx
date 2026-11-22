@@ -2,6 +2,7 @@
 import { useState } from "react";
 import type { Candidate, Job } from "@/lib/api";
 import { approveCandidate, attributionForClip, licenseBadgeLabel, regenerateThumbnail, rejectCandidate, selectThumbnailVariant } from "@/lib/api";
+import { summarizeApproveQueue } from "@/lib/review";
 import { Card, ExternalLink, StatusPill } from "@/components/ui";
 import ClipPlayer from "@/components/ClipPlayer";
 
@@ -10,9 +11,9 @@ const PLATFORM_LABEL: Record<string, string> = { youtube: "YouTube", tiktok: "Ti
 
 function CandidateCard({ c, job, demo }: { c: Candidate; job: Job; demo: boolean }) {
   const [platform, setPlatform] = useState<string>("youtube");
-  const [aiLabel, setAiLabel] = useState(true);
   const [status, setStatus] = useState(c.status);
   const [note, setNote] = useState("");
+  const [noChannel, setNoChannel] = useState(false);
   const seo = c.seo[platform];
   // Thumbnail step (v0.7.0): the generated thumbnail, with Regenerate and
   // a variant picker when the API offers variants.
@@ -88,7 +89,32 @@ function CandidateCard({ c, job, demo }: { c: Candidate; job: Job; demo: boolean
     const res = action === "approve" ? await approveCandidate(job.id, c.n) : await rejectCandidate(job.id, c.n);
     if (res.ok) {
       setStatus(action === "approve" ? "approved" : "rejected");
-      setNote(action === "approve" ? "Approved — sent to the approval queue." : "Rejected.");
+      if (action === "approve") {
+        // The server's automation result says what actually happened to
+        // the queue — say that, not "sent to the approval queue". With no
+        // channel connected the approval creates zero posts, and the old
+        // note lied about it.
+        const automation = ((res.data as Record<string, unknown> | null)?.automation ?? {}) as Record<string, unknown>;
+        const summary = summarizeApproveQueue(automation.queue);
+        setNoChannel(false);
+        if (summary.total === 0) {
+          setNote("Approved — the server did not say what happened to the queue; check the approval queue.");
+        } else if (summary.queued.length === 0 && summary.alreadyExisted.length === 0) {
+          const reason = summary.skippedNoAccount.length > 0
+            ? `no channel is connected yet (${summary.skippedNoAccount.map((p) => PLATFORM_LABEL[p] ?? p).join(", ")})`
+            : summary.skippedCap.length > 0 ? "the daily cap was reached" : "no platform accepted it";
+          setNote(`Approved — but no post was created: ${reason}. Connect a channel first, then approve again.`);
+          setNoChannel(summary.skippedNoAccount.length > 0);
+        } else {
+          const created = [...summary.queued, ...summary.alreadyExisted].map((p) => PLATFORM_LABEL[p] ?? p).join(", ");
+          const skipped = summary.skippedNoAccount.length > 0
+            ? ` — skipped ${summary.skippedNoAccount.map((p) => PLATFORM_LABEL[p] ?? p).join(", ")} (no channel connected)`
+            : "";
+          setNote(`Approved — post created for ${created}${skipped}. See the approval queue.`);
+        }
+      } else {
+        setNote("Rejected.");
+      }
     } else {
       setNote(`Could not ${action}: ${res.error ?? "request failed"}.`);
     }
@@ -167,12 +193,8 @@ function CandidateCard({ c, job, demo }: { c: Candidate; job: Job; demo: boolean
 
       <div className="mt-4 flex flex-wrap items-center gap-4">
         <span className="text-sm text-neutral-400">Clip span: {c.start_s}s – {c.end_s}s</span>
-        <label className="ml-auto flex items-center gap-2 text-sm">
-          <input type="checkbox" checked={aiLabel} onChange={(e) => setAiLabel(e.target.checked)} className="h-4 w-4 accent-amber-400" />
-          AI-assisted edit — label as AI-generated content
-        </label>
       </div>
-      <p className="mt-2 text-xs text-neutral-500">Own-content declaration: this clip is from content you own or have rights to. AI label defaults ON when captions, reframing or voiceover were AI-generated; simple cleanup alone generally does not need a label.</p>
+      <p className="mt-2 text-xs text-neutral-500">Own-content declaration: this clip is from content you own or have rights to. AI-assisted edits: when captions, reframing or voiceover were AI-generated, label the clip as AI-generated on the platform when you publish — ClipForge does not send that label for you yet.</p>
 
       <div className="mt-5">
         <div className="flex gap-1 border-b border-neutral-800">
@@ -208,6 +230,7 @@ function CandidateCard({ c, job, demo }: { c: Candidate; job: Job; demo: boolean
         <button onClick={() => act("approve")} className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium hover:bg-emerald-500">Approve</button>
         <button onClick={() => act("reject")} className="rounded-md bg-red-600/80 px-4 py-2 text-sm font-medium hover:bg-red-600">Reject</button>
         {note && <span className="self-center text-sm text-neutral-400">{note}</span>}
+        {noChannel && <a href="/channels" className="self-center text-sm text-sky-400 underline">Connect a channel</a>}
       </div>
     </Card>
   );

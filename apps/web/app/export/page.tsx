@@ -6,16 +6,22 @@
 //   YouTube Shorts ≤ 60s · TikTok ≤ 60s · Instagram Reels ≤ 90s ·
 //   Facebook Reels ≤ 90s · X (video ≤ 140s).
 // A clip longer than a platform's limit is flagged for that platform and
-// the publish button for it is disabled, with an auto-trim note.
+// the publish button for it is disabled, with a note to trim it in Clip
+// Studio first — publishing never auto-trims.
 // The copyright scan (POST /publish/scan) runs before any publish: a
 // severe flag blocks publishing with a warning — the scan is a check,
 // never a guarantee that a platform will accept the clip.
 //
+// The export works off a POST from the approval queue, not a typed-in
+// id: the copyright scan needs the post's clip (candidate) id while
+// publish needs the post id — one free-text "Clip ID" could never
+// satisfy both, so the old flow 404'd on one of the two steps.
+//
 // Rights guardrail: clips are made ONLY from your own videos or Creative
 // Commons / licensed / public-domain videos.
 "use client";
-import { useState } from "react";
-import { apiPostJson, publishToX, scanPublish, type PublishScanFlag } from "@/lib/api";
+import { useEffect, useState } from "react";
+import { apiPostJson, getPosts, publishToX, scanPublish, type Post, type PublishScanFlag } from "@/lib/api";
 import {
   Badge, Card, CardHeader, EmptyState, ErrorBanner, PageHeader,
   PrimaryButton, SecondaryButton,
@@ -44,7 +50,13 @@ function fmtTime(s: number): string {
 }
 
 export default function ExportPage() {
-  const [clipId, setClipId] = useState("");
+  // The post picked from the approval queue. The scan runs on the post's
+  // clip (candidate) id; publish runs on the post id — they are different
+  // ids, which is why a single typed-in "Clip ID" could never work.
+  const [posts, setPosts] = useState<Post[] | null>(null);
+  const [selectedPostId, setSelectedPostId] = useState("");
+  const selectedPost = (posts ?? []).find((p) => p.id === selectedPostId) ?? null;
+  const clipId = selectedPost?.clip_id ?? "";
   const [clipUrl, setClipUrl] = useState("");
   const [clipDuration, setClipDuration] = useState(45);
   const [clipAspect, setClipAspect] = useState("9:16");
@@ -60,6 +72,15 @@ export default function ExportPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [published, setPublished] = useState<string[]>([]);
 
+  useEffect(() => {
+    getPosts()
+      .then((p) => {
+        setPosts(p ?? []);
+        if (p && p.length > 0) setSelectedPostId(p[0].id);
+      })
+      .catch(() => setPosts([]));
+  }, []);
+
   const safeDuration = Number.isFinite(clipDuration) && clipDuration > 0 ? clipDuration : 0;
   const severe = (flags ?? []).some((f) => f.severity.toLowerCase() === "severe" || f.severity.toLowerCase() === "high" || f.severity.toLowerCase() === "error");
   const blocked = scanned && severe;
@@ -69,10 +90,10 @@ export default function ExportPage() {
   }
 
   async function onScan() {
-    if (!clipId.trim()) { setScanError("Enter a clip ID first (the ID of the clip in your approval queue)."); return; }
+    if (!selectedPost) { setScanError("Pick a post from the approval queue first — the scan runs on its clip."); return; }
     setScanning(true);
     setScanError(null);
-    const { flags: found, error } = await scanPublish(clipId.trim());
+    const { flags: found, error } = await scanPublish(clipId);
     setScanning(false);
     setScanned(true);
     if (error) { setScanError(error + " The scan service may not be installed in this build yet."); setFlags(null); return; }
@@ -80,7 +101,7 @@ export default function ExportPage() {
   }
 
   async function onPublish(p: PlatformRule) {
-    if (!clipId.trim()) { setNotice("Enter a clip ID first."); return; }
+    if (!selectedPost) { setNotice("Pick a post from the approval queue first."); return; }
     if (!scanned) { setNotice("Run the copyright scan first — publishing is blocked until the scan has run."); return; }
     if (blocked) { setNotice("Publishing is blocked: the copyright scan found a severe flag. Fix the clip first."); return; }
     if (safeDuration > p.maxSeconds) { setNotice(`${p.label} only takes clips up to ${p.maxSeconds}s — this clip is ${fmtTime(safeDuration)}. Trim it in Clip Studio first.`); return; }
@@ -88,8 +109,8 @@ export default function ExportPage() {
     setNotice(null);
     const text = [caption.trim(), hashtags.trim()].filter(Boolean).join(" ");
     const res = p.id === "x"
-      ? await publishToX(clipId.trim(), text)
-      : await apiPostJson(`/posts/${encodeURIComponent(clipId.trim())}/publish`, { platform: p.id, caption: text });
+      ? await publishToX(clipId, text)
+      : await apiPostJson(`/posts/${encodeURIComponent(selectedPost.id)}/publish`, { platform: p.id, caption: text });
     setPublishing(null);
     if (!res.ok) { setNotice(res.error ?? `Could not publish to ${p.label}.`); return; }
     setPublished((prev) => [...prev, p.id]);
@@ -112,9 +133,33 @@ export default function ExportPage() {
           <CardHeader title="Clip" hint="The clip to export" />
           <div className="space-y-3">
             <label className="block text-sm">
-              <span className="text-neutral-400">Clip ID</span>
-              <input className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 font-mono text-sm" value={clipId} onChange={(e) => setClipId(e.target.value)} placeholder="e.g. clip_01 — from the approval queue" aria-label="Clip ID" />
+              <span className="text-neutral-400">Post from the approval queue</span>
+              {posts === null ? (
+                <p className="mt-1 text-sm text-neutral-400">Loading posts…</p>
+              ) : posts.length === 0 ? (
+                <p className="mt-1 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-100">
+                  No posts yet — approve a clip on a job review page first.{" "}
+                  <a className="underline" href="/queue">Open the approval queue</a>.
+                </p>
+              ) : (
+                <select
+                  className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm"
+                  value={selectedPostId}
+                  onChange={(e) => { setSelectedPostId(e.target.value); setScanned(false); setFlags(null); setPublished([]); }}
+                  aria-label="Post from the approval queue"
+                >
+                  {posts.map((p) => (
+                    <option key={p.id} value={p.id}>{p.platform} · {p.status} · {p.caption ? p.caption.slice(0, 40) : p.id}</option>
+                  ))}
+                </select>
+              )}
             </label>
+            {selectedPost && (
+              <p className="text-xs text-neutral-500">
+                Post {selectedPost.id} · clip {selectedPost.clip_id || "—"} · {selectedPost.platform} · {selectedPost.status}
+                {selectedPost.error ? ` · last error: ${selectedPost.error}` : ""}
+              </p>
+            )}
             <label className="block text-sm">
               <span className="text-neutral-400">Clip file URL (preview)</span>
               <input className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 font-mono text-sm" value={clipUrl} onChange={(e) => setClipUrl(e.target.value)} placeholder="https://…/clip_01.mp4" aria-label="Clip file URL" />
@@ -193,7 +238,7 @@ export default function ExportPage() {
                 </label>
                 <span className="text-xs text-neutral-400">Max {p.maxSeconds}s · {p.aspect}</span>
                 {tooLong ? (
-                  <span className="rounded-full bg-red-500/15 px-2 py-0.5 text-xs font-medium text-red-300">Too long — {fmtTime(safeDuration)} &gt; {p.maxSeconds}s. Auto-trim: the clip will be cut to the first {p.maxSeconds}s in Clip Studio before publishing.</span>
+                  <span className="rounded-full bg-red-500/15 px-2 py-0.5 text-xs font-medium text-red-300">Too long — {fmtTime(safeDuration)} &gt; {p.maxSeconds}s. Trim it in Clip Studio first — publishing never auto-trims.</span>
                 ) : (
                   <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-300">Fits ({fmtTime(safeDuration)} ≤ {p.maxSeconds}s)</span>
                 )}

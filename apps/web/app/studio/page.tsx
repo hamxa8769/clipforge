@@ -1,14 +1,18 @@
 // Clip Studio (v0.8.0) — AI clip suggestions + manual timeline editing.
 //
 //   - Paste your own video URL (or a clip file URL) for the preview, the
-//     duration, and optionally transcript lines ("start-end: text").
+//     duration, and transcript lines ("start-end: text") — the analysis
+//     needs transcript text (at least 15 seconds of it) to score anything.
 //     POST /detection/analyze returns AI suggestions with a viral score
 //     0-100 and a per-signal breakdown.
 //   - The timeline at the bottom shows the chosen clip range; drag the
 //     handles or type start/end. Trim snaps the range to the selected
 //     suggestion; Ripple-cut marks the range as cut out of the clip.
 //   - Manual Pro Mode (caption style, punch-in zoom, aspect ratio) is a
-//     clearly-labelled section — simple by default.
+//     clearly-labelled preview-only section — simple by default. The
+//     settings are not saved or sent to the renderer: Studio has no
+//     render step yet, so the section says so plainly instead of
+//     promising the settings are "applied when rendered".
 //
 // Rights guardrail: clips are made ONLY from your own videos or Creative
 // Commons / licensed / public-domain videos — never another creator's
@@ -180,12 +184,12 @@ export default function StudioPage() {
           </label>
         </div>
         <label className="mt-3 block text-sm">
-          <span className="text-neutral-400">Transcript lines (optional — one per line, “start-end: text”, e.g. 12-24: the hook)</span>
+          <span className="text-neutral-400">Transcript lines (required — one per line, “start-end: text”, e.g. 12-24: the hook)</span>
           <textarea rows={3} className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 font-mono text-sm" value={transcript} onChange={(e) => setTranscript(e.target.value)} placeholder={"0-15: welcome back to the channel\n15-40: the big reveal"} aria-label="Transcript lines" />
         </label>
         <div className="mt-3 flex flex-wrap gap-2">
           <PrimaryButton onClick={onAnalyze} disabled={analyzing}>{analyzing ? "Analysing…" : "Analyse — find viral clips"}</PrimaryButton>
-          <span className="self-center text-xs text-neutral-500">Without transcript lines the whole video is analysed as one segment.</span>
+          <span className="self-center text-xs text-neutral-500">Analysis needs transcript lines — a clip needs at least 15 seconds of transcript to score. Paste the lines above.</span>
         </div>
       </Card>
 
@@ -281,7 +285,7 @@ export default function StudioPage() {
                     ))}
                   </div>
                 </fieldset>
-                <p className="text-xs text-neutral-500">These settings are applied when the clip is rendered from this range. Captions: {captionStyle} · Punch-in: {punchIn ? "on" : "off"} · Aspect: {aspect}.</p>
+                <p className="text-xs text-neutral-500">Preview only for now — these settings are not saved and are not sent to the renderer yet; there is no render step from Studio. Use them to preview the look, then create the clip from a job. Captions: {captionStyle} · Punch-in: {punchIn ? "on" : "off"} · Aspect: {aspect}.</p>
               </div>
             </details>
           </Card>

@@ -16,7 +16,8 @@ import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
-  PIPELINE_STAGES, apiGet, getJob, getJobLogs, getJobs, getPosts, retryJob,
+  PIPELINE_STAGES, apiGet, apiPostJson, cancelJob, getJob, getJobLogs, getJobs,
+  getPosts, pauseJob, resumeJob, retryJob,
   type Candidate, type Job, type JobLogEntry, type Post,
 } from "@/lib/api";
 import {
@@ -159,6 +160,8 @@ function PipelinePageInner() {
   const [error, setError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [retryMsg, setRetryMsg] = useState<string | null>(null);
+  const [controlling, setControlling] = useState(false);
+  const [controlMsg, setControlMsg] = useState<string | null>(null);
 
   const loadJobs = useCallback(async () => {
     const fetched = await getJobs();
@@ -210,6 +213,13 @@ function PipelinePageInner() {
   );
   const doneCount = stages.filter((s) => s.state === "done").length;
   const failedStage = stages.find((s) => s.state === "failed" || s.state === "blocked");
+  // Which job controls make sense for the current status (the server
+  // 409s the rest — e.g. a job in review / ready cannot be cancelled
+  // from here, so Cancel is hidden there instead of failing).
+  const canRun = job?.status === "pending";
+  const canPause = job ? ["queued", "running", "transcribing", "scoring", "rendering"].includes(job.status) : false;
+  const canResume = job?.status === "paused";
+  const canCancel = job ? ["pending", "queued", "running", "paused", "transcribing", "scoring", "rendering"].includes(job.status) : false;
 
   async function onRetry() {
     if (!job) return;
@@ -223,6 +233,33 @@ function PipelinePageInner() {
     } else {
       setRetryMsg(res?.error ?? "Retry failed.");
     }
+  }
+
+  // Job controls (v0.9.0): Run / Pause / Resume / Cancel. Run uses
+  // wait=false + a refresh — a run takes minutes and the POST helper
+  // times out after 5s, so the UI must never block on a synchronous run.
+  async function onControl(action: "run" | "pause" | "resume" | "cancel") {
+    if (!job) return;
+    setControlling(true);
+    setControlMsg(null);
+    const res = action === "run"
+      ? await apiPostJson(`/jobs/${encodeURIComponent(job.id)}/run?wait=false`)
+      : action === "pause" ? await pauseJob(job.id)
+      : action === "resume" ? await resumeJob(job.id)
+      : await cancelJob(job.id);
+    setControlling(false);
+    if (!res.ok) {
+      setControlMsg(res.error ?? `Could not ${action} the job.`);
+      return;
+    }
+    setControlMsg(
+      action === "run" ? "Job started — it is now in the queue; jobs run one at a time."
+      : action === "pause" ? "Job paused — it stops between stages; resume to continue."
+      : action === "resume" ? "Job resumed."
+      : "Job cancelled.",
+    );
+    await loadDetail(job.id);
+    await loadJobs();
   }
 
   if (!loaded) {
@@ -300,6 +337,16 @@ function PipelinePageInner() {
               )}
               {job.blocked_by && <span className="text-red-300">Blocked by: {job.blocked_by}</span>}
             </div>
+            {(canRun || canPause || canResume || canCancel) && (
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                {canRun && <PrimaryButton onClick={() => onControl("run")} disabled={controlling}>{controlling ? "Starting…" : "Run job"}</PrimaryButton>}
+                {canPause && <PrimaryButton onClick={() => onControl("pause")} disabled={controlling}>{controlling ? "Working…" : "Pause"}</PrimaryButton>}
+                {canResume && <PrimaryButton onClick={() => onControl("resume")} disabled={controlling}>{controlling ? "Working…" : "Resume"}</PrimaryButton>}
+                {canCancel && <SecondaryButton onClick={() => onControl("cancel")} disabled={controlling}>{controlling ? "Working…" : "Cancel job"}</SecondaryButton>}
+                {canRun && <span className="text-xs text-neutral-400">Jobs don&apos;t start on their own — press Run. They run one at a time.</span>}
+                {controlMsg && <span className="text-sm text-neutral-300">{controlMsg}</span>}
+              </div>
+            )}
             <ProgressBar value={job.progress_pct} className="mt-3" />
             {job.status === "failed" && (
               <div className="mt-4 rounded-lg border border-red-500/40 bg-red-500/10 p-4">

@@ -419,8 +419,17 @@ function WizardInner() {
           <p className="mt-1 text-sm text-neutral-400">ClipForge checks the saved sign-in against {platformLabel(platform)} and shows who is connected.</p>
           {channel && (
             <p className="mt-4 flex items-center gap-2 text-sm">
-              <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-300">Connected</span>
-              <span>{channel.account_name || channel.account_ref || platformLabel(platform)}</span>
+              {channel.status === "connected" ? (
+                <>
+                  <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-medium text-emerald-300">Connected</span>
+                  <span>{channel.account_name || channel.account_ref || platformLabel(platform)}</span>
+                </>
+              ) : (
+                <>
+                  <span className="rounded-full bg-neutral-700/50 px-2 py-0.5 text-xs font-medium text-neutral-300">Not connected yet</span>
+                  <span>Press “Test connection” below to check the saved sign-in.</span>
+                </>
+              )}
             </p>
           )}
           {afterNote && <p className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-xs leading-relaxed text-amber-100/90">{afterNote}</p>}

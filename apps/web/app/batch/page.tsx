@@ -14,9 +14,12 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  getBatch, getPerfProfile, pauseBatch, resumeBatch, startBatch,
+  apiGet, apiPostJson, getBatch, getPerfProfile, pauseBatch, resumeBatch,
   type BatchStatus, type PerfProfile,
 } from "@/lib/api";
+import {
+  batchStartError, buildBatchPayload, extractBatchItemErrors, isBatchTerminal,
+} from "@/lib/batch";
 import {
   Badge, Card, CardHeader, EmptyState, ErrorBanner, PageHeader,
   PrimaryButton, ProgressBar, SecondaryButton, Skeleton,
@@ -32,8 +35,15 @@ const RUNNING_STATES = ["running", "processing", "transcribing", "scoring", "ren
 export default function BatchPage() {
   const [input, setInput] = useState("");
   const [sources, setSources] = useState<string[]>([]);
+  // Rights guardrail (fixed): the server only accepts YouTube URLs when
+  // own_content_declaration is true, so the user must confirm it here
+  // before a batch can start.
+  const [rights, setRights] = useState(false);
   const [batch, setBatch] = useState<BatchStatus | null>(null);
   const [batchId, setBatchId] = useState<string | null>(null);
+  // Per-item server errors (keyed by source) — the normalised batch
+  // status drops `error`, so they are read from the raw response.
+  const [itemErrors, setItemErrors] = useState<Map<string, string>>(new Map());
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -63,13 +73,22 @@ export default function BatchPage() {
 
   async function onStart() {
     if (sources.length === 0) { setError("Add at least one video URL or path first."); return; }
+    if (!rights) { setError("Please tick the rights box first — ClipForge only clips your own videos or Creative Commons / public-domain videos."); return; }
     setStarting(true);
     setError(null);
     setNotice(null);
-    const payload = sources.map((s) => (/^https?:\/\//i.test(s) ? { url: s } : { path: s }));
-    const { batch_id, error: err } = await startBatch(payload);
+    // POST /batch expects plain string sources + own_content_declaration.
+    // (The old code sent [{url} | {path}] objects, which the server
+    // rejects with 422 — every batch start from the UI failed.)
+    const res = await apiPostJson("/batch", buildBatchPayload(sources, rights));
     setStarting(false);
-    if (err || !batch_id) { setError(err ?? "Could not start the batch. The batch service may not be installed in this build yet."); return; }
+    const batch_id = (res.data as { batch_id?: unknown } | null)?.batch_id;
+    if (!res.ok || typeof batch_id !== "string") {
+      setError(batchStartError(res) || "Could not start the batch. The batch service may not be installed in this build yet.");
+      return;
+    }
+    setBatch(null);
+    setItemErrors(new Map());
     setBatchId(batch_id);
     setNotice(`Batch started — ${sources.length} video${sources.length === 1 ? "" : "s"} queued.`);
     const first = await getBatch(batch_id);
@@ -80,6 +99,8 @@ export default function BatchPage() {
     if (!batchId) return;
     const next = await getBatch(batchId);
     if (next) setBatch(next);
+    const raw = await apiGet<unknown>(`/batch/${encodeURIComponent(batchId)}`);
+    if (raw) setItemErrors(extractBatchItemErrors(raw));
   }, [batchId]);
 
   const running = batch !== null && RUNNING_STATES.includes(batch.status.toLowerCase());
@@ -160,7 +181,7 @@ export default function BatchPage() {
         </label>
         <div className="mt-3 flex flex-wrap gap-2">
           <SecondaryButton onClick={() => addSources(input)} disabled={!input.trim()}>Add to batch</SecondaryButton>
-          <SecondaryButton onClick={() => fileRef.current?.click()}>Drop / choose a file list</SecondaryButton>
+          <SecondaryButton onClick={() => fileRef.current?.click()}>Choose a file list</SecondaryButton>
           <input
             ref={fileRef}
             type="file"
@@ -190,10 +211,22 @@ export default function BatchPage() {
             </ul>
           </div>
         )}
+        <label className="mt-4 flex items-start gap-2 text-sm">
+          <input type="checkbox" checked={rights} onChange={(e) => setRights(e.target.checked)} className="mt-0.5 h-4 w-4 accent-amber-400" />
+          <span>
+            These videos are my own, or Creative Commons / public-domain videos I may use.
+            CC-BY attribution is added to clips automatically. The server refuses
+            YouTube URLs without this confirmation.
+          </span>
+        </label>
         <div className="mt-4">
-          <PrimaryButton onClick={onStart} disabled={starting || sources.length === 0 || batchId !== null}>
-            {starting ? "Starting batch…" : batchId ? "Batch running — see progress below" : `Start batch (${sources.length} video${sources.length === 1 ? "" : "s"})`}
+          <PrimaryButton
+            onClick={onStart}
+            disabled={starting || sources.length === 0 || !rights || (batchId !== null && !(batch !== null && isBatchTerminal(batch.status)))}
+          >
+            {starting ? "Starting batch…" : batchId !== null && !(batch !== null && isBatchTerminal(batch.status)) ? "Batch running — see progress below" : batch !== null && isBatchTerminal(batch.status) ? `Start a new batch (${sources.length} video${sources.length === 1 ? "" : "s"})` : `Start batch (${sources.length} video${sources.length === 1 ? "" : "s"})`}
           </PrimaryButton>
+          {sources.length > 0 && !rights && <span className="ml-3 text-xs text-amber-200">Tick the rights box above to start.</span>}
           {lowEnd && <span className="ml-3 text-xs text-neutral-400">Low-end mode: 1 at a time.</span>}
         </div>
       </Card>
@@ -226,6 +259,9 @@ export default function BatchPage() {
                     </div>
                     <div className="mt-2"><ProgressBar value={it.progress} tone={it.state.toLowerCase() === "failed" ? "danger" : DONE_STATES.includes(it.state.toLowerCase()) ? "success" : "default"} /></div>
                     <p className="mt-1 text-xs text-neutral-500">{Math.round(it.progress)}%</p>
+                    {it.state.toLowerCase() === "failed" && itemErrors.get(it.source) && (
+                      <p className="mt-1 text-xs text-red-300">{itemErrors.get(it.source)}</p>
+                    )}
                   </li>
                 ))}
               </ul>

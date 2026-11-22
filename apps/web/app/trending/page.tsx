@@ -723,7 +723,7 @@ export default function TrendingPage() {
                 </p>
                 {capture.jobId && (
                   <div className="flex flex-wrap gap-2">
-                    <SecondaryButton href={`/jobs/${encodeURIComponent(capture.jobId)}`}>Open the capture job</SecondaryButton>
+                    <SecondaryButton href={`/jobs/view/?id=${encodeURIComponent(capture.jobId)}`}>Open the capture job</SecondaryButton>
                     <SecondaryButton href="/queue">Approval queue</SecondaryButton>
                   </div>
                 )}
@@ -920,7 +920,7 @@ export default function TrendingPage() {
               Job: <span className="font-mono text-sm">{clipJobId}</span> — the clips appear in the pipeline and the approval queue when they are ready.
             </p>
             <div className="flex flex-wrap gap-2">
-              <SecondaryButton href={`/jobs/${encodeURIComponent(clipJobId)}`}>Open the clip job</SecondaryButton>
+              <SecondaryButton href={`/jobs/view/?id=${encodeURIComponent(clipJobId)}`}>Open the clip job</SecondaryButton>
               <SecondaryButton href="/pipeline">See the pipeline</SecondaryButton>
               <SecondaryButton href="/queue">Approval queue</SecondaryButton>
             </div>
@@ -942,7 +942,7 @@ export default function TrendingPage() {
             {runState === "done" && (
               <div className="flex flex-wrap gap-2">
                 <SecondaryButton href="/queue">Review in the approval queue</SecondaryButton>
-                {runJobId && <SecondaryButton href={`/jobs/${runJobId}`}>Open the job</SecondaryButton>}
+                {runJobId && <SecondaryButton href={`/jobs/view/?id=${encodeURIComponent(runJobId)}`}>Open the job</SecondaryButton>}
               </div>
             )}
             {runState === "done" && runJob && runJob.posts.length > 0 && (

@@ -14,8 +14,38 @@ export default function QueueClient({ posts, demo }: { posts: Post[]; demo: bool
     setItems(posts);
   }, [posts]);
   const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
   async function act(id: string, action: "approve" | "publish") {
-    try { await fetch(`${API_URL}/posts/${id}/${action}`, { method: "POST" }); } catch { /* demo */ }
+    // Never update optimistically: only a real 2xx from the server moves
+    // the post. (The old code set the status even when the request
+    // failed or the API was unreachable, so demo posts looked approved.)
+    if (demo) {
+      setMsg("Demo data — the API is unreachable, so nothing can be approved or published from here.");
+      return;
+    }
+    setBusy(`${action}:${id}`);
+    setMsg("");
+    let ok = false;
+    let error = "";
+    try {
+      const res = await fetch(`${API_URL}/posts/${id}/${action}`, { method: "POST" });
+      ok = res.ok;
+      if (!ok) {
+        try {
+          const data = (await res.json()) as { detail?: unknown };
+          error = typeof data.detail === "string" ? data.detail : `Request failed (${res.status})`;
+        } catch {
+          error = `Request failed (${res.status})`;
+        }
+      }
+    } catch {
+      error = "The API did not answer.";
+    }
+    setBusy(null);
+    if (!ok) {
+      setMsg(`Could not ${action} this post: ${error}`);
+      return;
+    }
     // Optimistic update uses real PostStatus values: a dry-run publish lands
     // the post in "dry_run", an approval in "approved" (docs/api.md).
     setItems((xs) => xs.map((p) => (p.id === id ? { ...p, status: action === "approve" ? "approved" : "dry_run" } : p)));
@@ -36,9 +66,10 @@ export default function QueueClient({ posts, demo }: { posts: Post[]; demo: bool
             </div>
             <p className="mt-3 text-sm">{p.caption}</p>
             <div className="mt-4 flex gap-2">
-              <button onClick={() => act(p.id, "approve")} className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium hover:bg-emerald-500">Approve</button>
-              <button onClick={() => act(p.id, "publish")} className="rounded-md bg-neutral-800 px-4 py-2 text-sm font-medium hover:bg-neutral-700">Publish (dry-run)</button>
+              <button onClick={() => act(p.id, "approve")} disabled={demo || busy !== null} className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium hover:bg-emerald-500 disabled:opacity-60" title={demo ? "Demo data — the API is unreachable" : undefined}>{busy === `approve:${p.id}` ? "Working…" : "Approve"}</button>
+              <button onClick={() => act(p.id, "publish")} disabled={demo || busy !== null} className="rounded-md bg-neutral-800 px-4 py-2 text-sm font-medium hover:bg-neutral-700 disabled:opacity-60" title={demo ? "Demo data — the API is unreachable" : undefined}>{busy === `publish:${p.id}` ? "Working…" : "Publish (dry-run)"}</button>
             </div>
+            {demo && <p className="mt-2 text-xs text-neutral-500">Demo post — approve / publish are disabled until the API answers.</p>}
           </Card></li>
         ))}</ul>
       )}
