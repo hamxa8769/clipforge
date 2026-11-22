@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+import threading
 from pathlib import Path
 
 _KEYRING_SERVICE = "clipforge"
@@ -50,6 +51,10 @@ class SecretStore:
         self.secrets_dir = self.data_dir / "secrets"
         self._keyring = self._probe_keyring()
         self._fernet = None  # lazy: only built for the file backend
+        # The API caches one store per data dir, shared across request
+        # threads: guard the lazy Fernet build so two threads cannot
+        # generate different machine keys on first use.
+        self._fernet_lock = threading.Lock()
 
     # ------------------------------------------------------------ backend
     @staticmethod
@@ -82,23 +87,26 @@ class SecretStore:
         """Fernet instance keyed by the machine key (created once, 0600)."""
         if self._fernet is not None:
             return self._fernet
-        from cryptography.fernet import Fernet  # noqa: PLC0415
+        with self._fernet_lock:
+            if self._fernet is not None:
+                return self._fernet
+            from cryptography.fernet import Fernet  # noqa: PLC0415
 
-        self.secrets_dir.mkdir(parents=True, exist_ok=True)
-        key_path = self.secrets_dir / ".machine.key"
-        try:
-            raw = key_path.read_bytes()
-            key = raw.strip()
-            Fernet(key)  # validate
-        except Exception:
-            key = Fernet.generate_key()
-            key_path.write_bytes(key)
+            self.secrets_dir.mkdir(parents=True, exist_ok=True)
+            key_path = self.secrets_dir / ".machine.key"
             try:
-                os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)
-            except OSError:
-                pass  # Windows has no POSIX modes; ACLs are out of scope
-        self._fernet = Fernet(key)
-        return self._fernet
+                raw = key_path.read_bytes()
+                key = raw.strip()
+                Fernet(key)  # validate
+            except Exception:
+                key = Fernet.generate_key()
+                key_path.write_bytes(key)
+                try:
+                    os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)
+                except OSError:
+                    pass  # Windows has no POSIX modes; ACLs are out of scope
+            self._fernet = Fernet(key)
+            return self._fernet
 
     def _secret_path(self, name: str) -> Path:
         return self.secrets_dir / f"{_sanitize_name(name)}.enc"

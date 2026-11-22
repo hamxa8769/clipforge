@@ -696,12 +696,35 @@ def _get_or_404(db: Session, model, obj_id: str, name: str):
 
 
 # ------------------------------------------------------------------ health
+# One SecretStore / SettingsStore per data dir (tests point
+# CLIPFORGE_DATA_DIR at a temp dir; same pattern as _INSTALLERS below).
+# SecretStore.__init__ probes the OS keyring — a live Credential Manager
+# read on Windows — so building one per request made every endpoint pay
+# that cost, and made /health hang whenever Credential Manager was slow
+# (the v0.8.1 startup failure: /health never answered within 30 s while
+# /yt-dlp/status, which never touches secrets, answered fine). The stores
+# are stateless apart from their data dir, so one cached instance per dir
+# is enough.
+_SECRETS_CACHE: dict[str, SecretStore] = {}
+_SETTINGS_CACHE: dict[str, SettingsStore] = {}
+
+
 def _secrets() -> SecretStore:
-    return SecretStore(_data_dir())
+    key = str(_data_dir())
+    store = _SECRETS_CACHE.get(key)
+    if store is None:
+        store = SecretStore(_data_dir())
+        _SECRETS_CACHE[key] = store
+    return store
 
 
 def _settings_store() -> SettingsStore:
-    return SettingsStore(_data_dir(), _secrets())
+    key = str(_data_dir())
+    store = _SETTINGS_CACHE.get(key)
+    if store is None:
+        store = SettingsStore(_data_dir(), _secrets())
+        _SETTINGS_CACHE[key] = store
+    return store
 
 
 def _effective_dry_run() -> bool:
@@ -711,9 +734,18 @@ def _effective_dry_run() -> bool:
 
 @app.get("/health")
 def health():
+    """Liveness probe only — no keyring, settings file, or database.
+
+    Polled every 250 ms while the desktop waits for the server (and
+    every 30 s by the web status bar), so the payload is static data
+    computed once at startup; ``dry_run`` is refreshed when settings are
+    saved (PUT /settings). The field names are part of the contract:
+    the Rust shell checks for ``"status"`` + ``ok`` and ``"version"``,
+    the web status bar reads ``dry_run``.
+    """
     return {
         "status": "ok",
-        "dry_run": _effective_dry_run(),
+        "dry_run": _HEALTH_DRY_RUN_BY_DIR.get(str(_data_dir()), settings.dry_run),
         "version": _VERSION,
         "database_url_scheme": settings.database_url.split("://")[0],
     }
@@ -757,6 +789,15 @@ def _data_dir() -> Path:
     # Read per request (not from the frozen settings snapshot) so tests can
     # point the media root at a temp dir via CLIPFORGE_DATA_DIR.
     return Path(os.environ.get("CLIPFORGE_DATA_DIR") or settings.data_dir)
+
+
+# dry_run shown by GET /health, computed once at startup (here, after
+# _data_dir exists) and cached per data dir — /health must never do I/O
+# per request. Refreshed when the user saves settings (PUT /settings),
+# so the web status-bar pill stays correct without a restart. Keyed by
+# dir because tests point CLIPFORGE_DATA_DIR at temp dirs; a dir never
+# seen at startup or via a settings save falls back to the env default.
+_HEALTH_DRY_RUN_BY_DIR: dict[str, bool] = {str(_data_dir()): _effective_dry_run()}
 
 
 def _media_file(subdir: str, *parts: str, allowed_exts: set[str] | None = None) -> Path:
@@ -1844,6 +1885,11 @@ def update_settings(payload: SettingsUpdate):
     if payload.llm_model is not None:
         current.llm_model = payload.llm_model
     store.save(current)
+    if payload.dry_run is not None:
+        # Keep the cached /health value in sync (see
+        # _HEALTH_DRY_RUN_BY_DIR), so the status-bar dry-run pill
+        # updates without a restart.
+        _HEALTH_DRY_RUN_BY_DIR[str(_data_dir())] = payload.dry_run
     if payload.llm_api_key is not None:
         store.set_credential("llm", "api_key", payload.llm_api_key or None)
     if payload.gemini_api_key is not None:
