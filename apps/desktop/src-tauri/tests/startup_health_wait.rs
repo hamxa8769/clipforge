@@ -245,10 +245,12 @@ fn splash_shows_progress_and_the_status_button_works() {
 }
 
 #[test]
-fn version_not_bumped_by_this_fix() {
+fn release_version_is_0_8_2() {
+    // The fix branch deliberately did NOT bump the version (the release
+    // process owns that); the release bump to 0.8.2 updates this pin.
     let cargo = read("Cargo.toml");
     assert!(
-        cargo.contains("version = \"0.8.1\""),
-        "v0.8.2 must not bump the version (release process owns that)"
+        cargo.contains("version = \"0.8.2\""),
+        "Cargo.toml must say 0.8.2 for the v0.8.2 release"
     );
 }

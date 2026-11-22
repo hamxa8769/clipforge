@@ -7,7 +7,7 @@ and environment variables. No secrets are stored or logged here.
 
 from __future__ import annotations
 
-__version__ = "0.8.1"
+__version__ = "0.8.2"
 
 # Engine re-exports are optional at import time: other ClipForge components
 # (API / publishing / scheduler) must stay importable while the engine

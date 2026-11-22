@@ -8,10 +8,14 @@ captions, writes a different title / description / hashtag set for each
 platform, and publishes **only after a human approves** — through the
 platforms' official APIs, and nothing else.
 
-> **Status: v0.8.1 — production-level single-window app.** The clipping
+> **Status: v0.8.2 — production-level single-window app.** The clipping
 > pipeline, review UI, and publishing adapters are under active
 > development. Nothing in this repo posts to any platform automatically,
-> and `DRY_RUN=true` is the default. v0.8.1 fixes the server staying
+> and `DRY_RUN=true` is the default. v0.8.2 fixes the app never opening
+> (splash said the server did not answer `/health` within 30 s while
+> `/yt-dlp/status` answered fine): `/health` no longer touches the
+> keyring, and startup waits up to 120 s for a slow server instead of
+> killing it. v0.8.1 fixes the server staying
 > alive after the app closes (close = quit, no background server), the
 > NSIS installer hitting a locked `clipforge-server.exe`, the Agent
 > on/off toggle, and adds one-click yt-dlp install.
@@ -240,6 +244,38 @@ Things to know:
 
 Building the exe yourself: `python scripts/build_exe.py --with-web`
 (see `clipforge-server.spec`).
+
+## What's new in v0.8.2 — app opens again: startup health fix
+
+- **`/health` never touches the keyring.** Every `/health` call used to
+  build a fresh `SecretStore`, whose init probes the OS keyring (a
+  Credential Manager read on Windows). A slow or hung Credential
+  Manager hung `/health` — the endpoint the desktop polls to decide
+  the server is up — while `/yt-dlp/status`, which never touches
+  secrets, answered fine. `/health` is now a pure liveness probe
+  (same 4 fields), `dry_run` is cached at startup, and the secret /
+  settings stores are cached per data dir with a lock-guarded Fernet.
+- **Startup waits up to 120 s, and never kills a slow-but-healthy
+  server.** The splash used to give up at 30 s and kill the server —
+  a frozen-exe cold start can take longer, so Retry repeated the same
+  doomed cycle forever. Now a server that exited fails fast with its
+  exit code and the bind error / traceback from the log, a server that
+  is still starting keeps being waited on (elapsed time shown), and a
+  timed-out but alive server is reused by Retry instead of restarted.
+  The splash log is rotated per launch, timestamped, and shows only
+  the current run's lines; stale cleanup also acts when a port accepts
+  TCP but `/health` hangs.
+- **Working "Server status & settings" panel.** The dead button now
+  opens an inline panel (live status, port setting, data folder) in
+  the same window — no second window.
+- **Every external link opens in the browser.** The last two raw
+  `<a target="_blank">` links (Trending licence details, Review
+  source video) now go through `openExternal()` / `ExternalLink`,
+  so the Rust `open_external_links` test is 4/4.
+- **CI now runs the Rust tests.** A new `rust` job on
+  `windows-latest` runs `cargo test`, and the release workflow runs
+  it too on the exact release code — the desktop tests never ran in
+  CI before this release.
 
 ## What's new in v0.8.1 — shutdown fix, Agent toggle, one-click yt-dlp
 
