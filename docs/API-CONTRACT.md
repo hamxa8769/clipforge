@@ -99,6 +99,67 @@ honest "not connected yet" state. No frontend change is needed here —
 this is a server/credentials task (plus each platform's app review /
 audit for live posting).
 
+## 6. Notifications feed + job pause/resume + post reject (v0.9.0, Worker C)
+
+All three are IMPLEMENTED on the server and wired in the dashboard
+(Worker D). This section is the contract the UI relies on.
+
+### 6a. Notifications centre — IMPLEMENTED
+- The header bell uses the UI ALIASES (app.py, "notifications: UI
+  aliases" — explicitly "the shape the header bell is built against"):
+  `GET /notifications` -> `NotificationItem[]`, newest first. One
+  item: `{id, title, body, tone, read, created_at, link}` where `tone`
+  is `danger | warning | success | info` (stored level `error` ->
+  `danger`) and `link` is an in-app route (e.g. `/queue`,
+  `/jobs/<id>`) or null.
+- `POST /notifications/read {ids?: string[]}` -> `{read: number}`.
+  Omit `ids` to mark all read. `POST /notifications/clear` ->
+  `{cleared: number}`.
+- The canonical API is the same store in a different shape:
+  `GET /api/notifications?unread_only=&limit=` ->
+  `{notifications, unread}` (note: the key is `unread`, NOT
+  `unread_count`) with items in `{id, level, title, message, action,
+  platform, job_id, read, created_at}` shape; `POST
+  /api/notifications/{id}/read`, `/read-all` (`{marked_read, unread}`)
+  and `/clear` (`{cleared, unread}`). `POST /api/notifications
+  {level, title, message, action?, platform?, dedupe_key?}` creates
+  one (201); `action` is a path (`/channels`) or a
+  `reconnect:<platform>` hint.
+- WARNING — duplicate, unmounted router: the standalone file
+  `apps/api/clipforge_api/notifications.py` (Worker C) defines the
+  same routes with `unread_count` in the GET response, but it is
+  NEVER included in `app.py` — only the app.py handlers above serve
+  traffic. The frontend must use the shapes above, not the router
+  file's. (Flag for Worker C / coordinator: mount it or delete it.)
+- Events worth notifying about: a job finished / failed, a clip is
+  waiting for approval, a channel token is about to expire / expired,
+  an update is available. The header bell polls every 60s.
+
+### 6b. Job pause / resume / cancel — IMPLEMENTED (job queue engine)
+- `POST /jobs/{id}/pause` — queued or running jobs. A running job
+  pauses between stages / clips (a clip already rendering finishes
+  first), then waits in `paused` until resumed. 409 when the job is
+  not queued / running.
+- `POST /jobs/{id}/resume` — paused jobs only. Continues from the
+  next stage — nothing is re-done; a job paused while queued goes
+  back to `queued`. 409 when the job is not paused.
+- `POST /jobs/{id}/cancel` — anything not terminal (pending, queued,
+  running, transcribing, scoring, rendering, paused, failed,
+  blocked). A running job reports `cancelling: true` until the worker
+  confirms it and the job lands in `cancelled`. A job in review /
+  ready cannot be cancelled from here (409).
+- New `JobStatus` values on the wire: `queued`, `running`, `paused`,
+  `cancelled`. `GET /worker/queue` also returns `paused[]` and
+  `active_job_id`, and queued entries carry an honest 1-based
+  `queue_position`.
+
+### 6c. Post reject — NOT IMPLEMENTED
+- No `POST /posts/{id}/reject` endpoint exists (only candidate reject:
+  `POST /jobs/{id}/candidates/{n}/reject`). The dashboard's inline
+  Reject button is disabled with that reason. `POST
+  /posts/{id}/approve` and `POST /posts/{id}/publish` are real and wired
+  to the dashboard.
+
 ## Conventions the frontend relies on
 
 - Status enums are exactly the backend's (`JobStatus`, `PostStatus`);

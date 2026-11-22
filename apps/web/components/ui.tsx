@@ -37,9 +37,13 @@ export function CardHeader({ title, hint, action }: { title: string; hint?: stri
 }
 
 export function StatusPill({ status }: { status: string }) {
-  const map: Record<string, string> = { ready: "bg-emerald-500/15 text-emerald-300", failed: "bg-red-500/15 text-red-300", blocked: "bg-red-500/15 text-red-300", scoring: "bg-amber-500/15 text-amber-300", rendering: "bg-violet-500/15 text-violet-300", review: "bg-sky-500/15 text-sky-300", transcribing: "bg-sky-500/15 text-sky-300", pending: "bg-neutral-700/50 text-neutral-300", approved: "bg-emerald-500/15 text-emerald-300", rejected: "bg-red-500/15 text-red-300", pending_approval: "bg-amber-500/15 text-amber-300", scheduled: "bg-sky-500/15 text-sky-300", published: "bg-emerald-500/15 text-emerald-300", dry_run: "bg-neutral-700/50 text-neutral-300", publishing: "bg-sky-500/15 text-sky-300", draft: "bg-neutral-700/50 text-neutral-300" };
-  // Unknown statuses fall back to the "pending" style — never to "queued",
-  // which is not a backend status (see lib/api.ts normalizeJobStatus).
+  const map: Record<string, string> = { ready: "bg-emerald-500/15 text-emerald-300", failed: "bg-red-500/15 text-red-300", blocked: "bg-red-500/15 text-red-300", scoring: "bg-amber-500/15 text-amber-300", rendering: "bg-violet-500/15 text-violet-300", review: "bg-sky-500/15 text-sky-300", transcribing: "bg-sky-500/15 text-sky-300", pending: "bg-neutral-700/50 text-neutral-300", approved: "bg-emerald-500/15 text-emerald-300", rejected: "bg-red-500/15 text-red-300", pending_approval: "bg-amber-500/15 text-amber-300", scheduled: "bg-sky-500/15 text-sky-300", published: "bg-emerald-500/15 text-emerald-300", dry_run: "bg-neutral-700/50 text-neutral-300", publishing: "bg-sky-500/15 text-sky-300", draft: "bg-neutral-700/50 text-neutral-300",
+    // v0.9.0 job queue engine: queued waits for the dispatcher, running
+    // is claimed by it, paused waits for the user, cancelled is terminal.
+    queued: "bg-sky-500/15 text-sky-300", running: "bg-sky-500/15 text-sky-300", paused: "bg-amber-500/15 text-amber-300", cancelled: "bg-neutral-700/50 text-neutral-300" };
+  // Unknown statuses fall back to the "pending" style — never render
+  // raw text the UI has no style or meaning for (see lib/api.ts
+  // normalizeJobStatus).
   return <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${map[status] ?? map.pending}`}>{status}</span>;
 }
 
@@ -287,5 +291,99 @@ export function Toggle({ checked, onChange, disabled, label, hint }: { checked: 
         {hint && <span className="mt-0.5 block text-xs text-neutral-400">{hint}</span>}
       </span>
     </div>
+  );
+}
+
+/* --- v0.9.0 design-system additions ---------------------------------- */
+/* Form controls + page states, shared by every page so loading, empty
+ * and error states look the same everywhere. No page should hand-roll
+ * its own input styling or its own "something went wrong" box. */
+
+const INPUT_CLS =
+  "w-full rounded-lg border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 hover:border-neutral-600 focus:border-amber-400 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50";
+
+/** Labelled form field: label + hint + control, one consistent shape. */
+export function Field({ label, hint, children, htmlFor }: { label: string; hint?: string; children: ReactNode; htmlFor?: string }) {
+  return (
+    <label htmlFor={htmlFor} className="block">
+      <span className="mb-1.5 block text-sm font-medium text-neutral-200">{label}</span>
+      {children}
+      {hint && <span className="mt-1 block text-xs leading-snug text-neutral-500">{hint}</span>}
+    </label>
+  );
+}
+
+export function TextInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
+  const { className = "", ...rest } = props;
+  return <input {...rest} className={`${INPUT_CLS} ${className}`} />;
+}
+
+export function Select(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
+  const { className = "", children, ...rest } = props;
+  return (
+    <select {...rest} className={`${INPUT_CLS} ${className}`}>
+      {children}
+    </select>
+  );
+}
+
+/** Small inline spinner — a rotating border, never an emoji. */
+export function Spinner({ label = "Loading…" }: { label?: string }) {
+  return (
+    <span role="status" aria-label={label} className="inline-flex items-center gap-2 text-sm text-neutral-400">
+      <span className="h-4 w-4 animate-spin rounded-full border-2 border-neutral-600 border-t-amber-400" aria-hidden="true" />
+      {label}
+    </span>
+  );
+}
+
+/** Full loading state for a section: skeletons + a line, never blank. */
+export function LoadingState({ lines = 3, label = "Loading…" }: { lines?: number; label?: string }) {
+  return (
+    <div aria-label={label}>
+      <p className="mb-3"><Spinner label={label} /></p>
+      <div className="space-y-3">
+        {Array.from({ length: lines }).map((_, i) => (
+          <div key={i} className="skeleton-shimmer h-12 rounded-lg" aria-hidden="true" />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Full error state for a section: plain words, what to do next, retry. */
+export function ErrorState({ title, body, onRetry }: { title: string; body: string; onRetry?: () => void }) {
+  return (
+    <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-5 text-center" role="alert">
+      <p className="font-medium text-red-200">{title}</p>
+      <p className="mx-auto mt-1 max-w-md text-sm text-red-200/80">{body}</p>
+      {onRetry && (
+        <button onClick={onRetry} className="mt-4 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500">
+          Try again
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** Icon-only button (bell, close, refresh) with an accessible label. */
+export function IconButton({ label, onClick, disabled, active, children, title }: {
+  label: string; onClick?: () => void; disabled?: boolean; active?: boolean; children: ReactNode; title?: string;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={title ?? label}
+      onClick={onClick}
+      disabled={disabled}
+      className={`relative inline-flex h-9 w-9 items-center justify-center rounded-lg border text-neutral-300 transition-colors ${
+        active
+          ? "border-amber-400/50 bg-amber-400/10 text-amber-300"
+          : "border-neutral-700 bg-neutral-900 hover:border-neutral-600 hover:bg-neutral-800 hover:text-neutral-100"
+      } disabled:cursor-not-allowed disabled:opacity-50`}
+    >
+      {children}
+    </button>
   );
 }

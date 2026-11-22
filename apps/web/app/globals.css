@@ -2,11 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ClipForge design system (v0.5.0) — one set of tokens for every screen.
+/* ClipForge design system (v0.9.0) — one set of tokens for every screen.
  *
  * The app is a real desktop app, not a web page in a window: a fixed
  * sidebar, a slim top strip, content in the middle, and a status bar
- * pinned to the bottom. Dark theme throughout.
+ * pinned to the bottom.
+ *
+ * THEME DECISION (v0.9.0): dark-only, deliberately. A light theme done
+ * properly means every page, banner, chart and status colour re-checked
+ * in both themes; half-done it would ship unreadable text on half the
+ * screens. The app is dark-first and stays dark until a light theme can
+ * be done completely. Do not add a light toggle without that full pass.
  *
  * Tokens:
  * - Surfaces: --surface-0 page, --surface-1 cards, --surface-2 inner
@@ -18,6 +24,11 @@
  * - Radius: 12px cards, 8px inner panels, full pills.
  * - Type scale: page title 24px/700, section 18px/600, card title
  *   15px/600, body 14px, caption 12px.
+ * - Motion: 150ms ease transitions everywhere; one soft pulse for live
+ *   dots only. The Low performance profile (and prefers-reduced-motion)
+ *   turns ALL of it off — see the rules at the bottom of this file.
+ * - Shadows: --shadow-card for resting cards, --shadow-pop for menus,
+ *   toasts and dropdown panels.
  */
 :root {
   --surface-0: #09090b;
@@ -25,6 +36,7 @@
   --surface-2: #0a0a0a;
   --surface-3: #27272a;
   --border: #27272a;
+  --border-strong: #3f3f46;
   --text-1: #fafafa;
   --text-2: #d4d4d8;
   --text-3: #a1a1aa;
@@ -35,6 +47,11 @@
   --success: #34d399;
   --info: #38bdf8;
   --danger: #f87171;
+  --radius-card: 12px;
+  --radius-inner: 8px;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --focus-ring: 0 0 0 2px #09090b, 0 0 0 4px var(--accent);
 }
 
 html,
@@ -113,13 +130,67 @@ button[class*="bg-amber-400"]:hover {
   box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.45), 0 0 18px rgba(251, 191, 36, 0.25);
 }
 
+/* v0.9.0 — card lift on hover for interactive cards only (opt in with
+ * class "card-hover"). Never on Low profile (see below). */
+.card-hover:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-card);
+  transform: translateY(-1px);
+}
+
+/* v0.9.0 — one soft pulse, used only for "live" dots (server up, job
+ * running, agent active). Everything else is static. */
+@keyframes cf-pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+.live-dot {
+  animation: cf-pulse-dot 1.8s ease-in-out infinite;
+}
+
+/* v0.9.0 — dropdowns, toasts and the notifications panel fade/slide in
+ * once, 150ms. No looping motion anywhere else. */
+@keyframes cf-pop-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.pop-in {
+  animation: cf-pop-in 150ms ease;
+}
+
+/* v0.9.0 — skeleton shimmer (subtle, single direction). */
+@keyframes cf-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+.skeleton-shimmer {
+  background: linear-gradient(90deg, #27272a 25%, #3f3f46 50%, #27272a 75%);
+  background-size: 200% 100%;
+  animation: cf-shimmer 1.6s linear infinite;
+}
+
+/* Low performance profile + reduced-motion: NO animation, NO transition,
+ * NO transform anywhere. The desktop shell sets data-perf="low" on
+ * <html> when the detected / chosen profile is Low (see TopBar); the
+ * media query covers the OS-level setting. This is what keeps the app
+ * fast on low-end hardware — never gate it behind a hover or a class
+ * that a page can forget. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
   }
+}
+
+html[data-perf="low"] *,
+html[data-perf="low"] *::before,
+html[data-perf="low"] *::after {
+  transition-duration: 0.01ms !important;
+  animation: none !important;
+  transform: none !important;
 }
 
 button:disabled,

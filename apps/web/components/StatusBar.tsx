@@ -8,7 +8,7 @@
 // server port; in dev it comes from the configured API URL.
 "use client";
 import { useCallback, useEffect, useState } from "react";
-import { API_URL, getHealth, getSettings, type AppSettingsView, type Health } from "@/lib/api";
+import { API_URL, getHealth, getPerfProfile, getSettings, type AppSettingsView, type Health, type PerfProfile } from "@/lib/api";
 import LogsDrawer from "./LogsDrawer";
 
 function portLabel(): string {
@@ -32,12 +32,14 @@ function Pill({ ok, warn, label, value }: { ok?: boolean; warn?: boolean; label:
 export default function StatusBar() {
   const [health, setHealth] = useState<Health | null | undefined>(undefined);
   const [settings, setSettings] = useState<AppSettingsView | null>(null);
+  const [perf, setPerf] = useState<PerfProfile | null>(null);
   const [logsOpen, setLogsOpen] = useState(false);
 
   const load = useCallback(async () => {
-    const [h, s] = await Promise.all([getHealth(), getSettings()]);
+    const [h, s, p] = await Promise.all([getHealth(), getSettings(), getPerfProfile()]);
     setHealth(h);
     setSettings(s);
+    setPerf(p);
   }, []);
 
   useEffect(() => {
@@ -67,6 +69,9 @@ export default function StatusBar() {
                 <Pill warn label="FFmpeg" value={serverUp ? "checking…" : "unknown"} />
               )}
               <Pill ok={!dryRun} warn={dryRun} label="Dry-run" value={dryRun ? "on — nothing publishes" : "off"} />
+              {perf && (
+                <Pill ok={perf.profile !== "low"} warn={perf.profile === "low"} label="Performance" value={`${perf.profile}${perf.override ? " (override)" : ""}`} />
+              )}
               {health?.version && <span className="text-xs text-neutral-500">v{health.version}</span>}
             </>
           )}

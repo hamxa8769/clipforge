@@ -50,6 +50,8 @@ import {
   deriveCanClip,
   attributionForClip,
   normalizeWorkerQueue,
+  normalizeNotifications,
+  normalizeNotification,
   normalizePerfProfile,
   normalizeBatchStatus,
   normalizeDetectionCandidate,
@@ -61,13 +63,14 @@ import {
 } from "./api.js";
 
 test("normalizeJobStatus passes backend statuses through unchanged", () => {
-  for (const s of ["pending", "transcribing", "scoring", "rendering", "review", "ready", "failed", "blocked"]) {
+  for (const s of ["pending", "queued", "running", "paused", "transcribing", "scoring", "rendering", "review", "ready", "failed", "blocked", "cancelled"]) {
     assert.equal(normalizeJobStatus(s), s);
   }
 });
 
-test("normalizeJobStatus maps the legacy 'queued' alias to 'pending'", () => {
-  assert.equal(normalizeJobStatus("queued"), "pending");
+test("normalizeJobStatus keeps the v0.9.0 queue statuses (queued/running/paused) — they are real, not aliases", () => {
+  assert.equal(normalizeJobStatus("queued"), "queued");
+  assert.equal(normalizeJobStatus("paused"), "paused");
 });
 
 test("normalizeJobStatus falls back to 'pending' for unknown or non-string values", () => {
@@ -78,15 +81,38 @@ test("normalizeJobStatus falls back to 'pending' for unknown or non-string value
 
 test("normalizeJob normalises the status of a raw job payload", () => {
   const job = normalizeJob({ id: "j1", title: "t", source: "s.mp4", status: "queued", created_at: "2026-11-20", candidates: 2 });
-  assert.equal(job.status, "pending");
+  assert.equal(job.status, "queued");
   assert.equal(job.candidates, 2);
   const empty = normalizeJob({ status: "ready" });
   assert.equal(empty.id, "");
   assert.equal(empty.candidates, 0);
 });
 
+test("normalizeJob carries the v0.9.0 queue position + plain-language failure", () => {
+  const queued = normalizeJob({ id: "j2", status: "queued", queue_position: 2, queue_priority: 1 });
+  assert.equal(queued.queue_position, 2);
+  assert.equal(queued.queue_priority, 1);
+  const failed = normalizeJob({
+    id: "j3", status: "failed",
+    error: "FFmpeg is missing — press 'Install FFmpeg' in ClipForge.",
+    error_title: "FFmpeg is missing",
+    error_action: "Press 'Install FFmpeg' in Settings, then retry the job.",
+    error_code: "ffmpeg_missing",
+  });
+  assert.equal(failed.error_title, "FFmpeg is missing");
+  assert.equal(failed.error_action, "Press 'Install FFmpeg' in Settings, then retry the job.");
+  assert.equal(failed.error_code, "ffmpeg_missing");
+  // Missing fields stay null/0 — never undefined, never a crash.
+  const bare = normalizeJob({ id: "j4", status: "pending" });
+  assert.equal(bare.queue_position, null);
+  assert.equal(bare.queue_priority, 0);
+  assert.equal(bare.error_title, null);
+  assert.equal(bare.error_action, null);
+  assert.equal(bare.error_code, null);
+});
+
 test("normalizeJobs maps an array and drops non-arrays", () => {
-  assert.deepEqual(normalizeJobs([{ status: "queued" }, { status: "ready" }]).map((j) => j.status), ["pending", "ready"]);
+  assert.deepEqual(normalizeJobs([{ status: "queued" }, { status: "ready" }]).map((j) => j.status), ["queued", "ready"] );
   assert.deepEqual(normalizeJobs(null), []);
   assert.deepEqual(normalizeJobs({}), []);
 });
@@ -215,9 +241,10 @@ test("pipelineStageStates never guesses a failed stage", () => {
 });
 
 test("RUNNING_STATUSES is only the stages where the worker is active", () => {
-  // "pending" has not started yet (it is queued) and "review" has
-  // finished rendering and waits for a human — neither is "running".
-  assert.deepEqual([...RUNNING_STATUSES], ["transcribing", "scoring", "rendering"]);
+  // "pending" / "queued" have not started yet, "paused" waits, and
+  // "review" has finished rendering and waits for a human — none of
+  // those is "running". "running" itself (claimed, pre-stage) is.
+  assert.deepEqual([...RUNNING_STATUSES], ["running", "transcribing", "scoring", "rendering"]);
 });
 
 test("pipelineStageStates marks the reported failed stage (contract §2)", () => {
@@ -909,4 +936,39 @@ test("normalizeDetectionCandidate keeps all six signal scores", () => {
   assert.equal(c.hook_score, 90);
   assert.equal(c.completeness_score, 95);
   assert.equal(c.title, "The hook");
+});
+
+test("normalizeNotifications keeps real UI-alias items, drops broken ones, defaults tone to info", () => {
+  const items = normalizeNotifications([
+    { id: "n1", title: "Clip ready", body: "3 clips wait for approval.", tone: "success", read: false, created_at: "2026-11-23T00:00:00Z", link: "/queue" },
+    { id: "n2", title: "Token expiring", tone: "danger", read: true },
+    { id: "n3", title: "Unknown tone falls back to info", tone: "bogus" },
+    { title: "No id — dropped" },
+    { id: "n4" },
+  ]);
+  assert.equal(items.length, 3);
+  assert.equal(items[0].tone, "success");
+  assert.equal(items[0].link, "/queue");
+  assert.equal(items[1].tone, "danger");
+  assert.equal(items[1].read, true);
+  assert.equal(items[2].tone, "info");
+  assert.equal(normalizeNotifications(null).length, 0);
+  assert.equal(normalizeNotification({}), null);
+});
+test("normalizeWorkerQueue keeps the v0.9.0 paused list, active job and queue positions", () => {
+  const q = normalizeWorkerQueue({
+    running: [],
+    queued: [{ id: "j1", title: "First", source_type: "local", status: "queued", queue_position: 1, created_at: null }],
+    paused: [{ id: "j2", title: "Paused one", source_type: "local", status: "paused", created_at: null }],
+    active_job_id: "j9",
+    next: { id: "j1", title: "First" },
+    recent_runs: [],
+  });
+  assert.equal(q?.queued[0].queue_position, 1);
+  assert.equal(q?.paused.length, 1);
+  assert.equal(q?.paused[0].id, "j2");
+  assert.equal(q?.active_job_id, "j9");
+  const legacy = normalizeWorkerQueue({ running: [], queued: [], recent_runs: [] });
+  assert.deepEqual(legacy?.paused, []);
+  assert.equal(legacy?.active_job_id, null);
 });

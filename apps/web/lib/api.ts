@@ -6,6 +6,10 @@
 //   GET  /media/clips/{job_id}/{filename} -> rendered 9:16 clip file
 //   GET  /media/uploads/{filename} -> source upload file
 //   GET  /posts -> Post[] (approval queue) ; POST /posts/{id}/approve ; POST /posts/{id}/publish
+//   POST /jobs/{id}/pause | /resume | /cancel (v0.9.0 job control)
+//   GET  /notifications -> NotificationItem[] ; POST /notifications/read {ids?} | /clear (bell UI aliases)
+//   GET  /api/notifications -> {notifications, unread} ; POST /api/notifications/{id}/read | /read-all | /clear
+//   GET  /worker/queue -> {running, queued, paused, active_job_id, next, recent_runs}
 //   GET  /monetization -> Monetization[]
 //   GET  /analytics -> AnalyticsSummary
 // When the API is unreachable, callers use mock data and must show a "Demo data" badge.
@@ -27,19 +31,30 @@ export function resolveApiUrl(value: string | undefined): string {
 
 export const API_URL = resolveApiUrl(process.env.NEXT_PUBLIC_API_URL);
 
-/** Canonical job statuses, exactly as the backend JobStatus enum sends them. */
+/** Canonical job statuses, exactly as the backend JobStatus enum sends them.
+ * v0.9.0 added the queue engine's states: "queued" (waiting for the
+ * dispatcher), "running" (claimed, before the first stage sets its
+ * stage status), "paused" (user-paused, running or queued) and
+ * "cancelled" (terminal). */
 export type JobStatus =
   | "pending"
+  | "queued"
+  | "running"
+  | "paused"
   | "transcribing"
   | "scoring"
   | "rendering"
   | "review"
   | "ready"
   | "failed"
-  | "blocked";
+  | "blocked"
+  | "cancelled";
 
 export const JOB_STATUSES: readonly JobStatus[] = [
   "pending",
+  "queued",
+  "running",
+  "paused",
   "transcribing",
   "scoring",
   "rendering",
@@ -47,11 +62,16 @@ export const JOB_STATUSES: readonly JobStatus[] = [
   "ready",
   "failed",
   "blocked",
+  "cancelled",
 ];
 
-/** Statuses that count as "still processing" on the dashboard. */
+/** Statuses that count as "still processing" on the dashboard — a job
+ *  that is queued, running, paused mid-run, or in a stage. */
 export const PROCESSING_STATUSES: readonly JobStatus[] = [
   "pending",
+  "queued",
+  "running",
+  "paused",
   "transcribing",
   "scoring",
   "rendering",
@@ -60,12 +80,14 @@ export const PROCESSING_STATUSES: readonly JobStatus[] = [
 
 /**
  * Statuses that count as "running right now" on the Automation page:
- * the worker is actively doing something. "pending" is NOT here — a
- * pending job has not started yet (it is "queued"), and "review" is
- * NOT here either — a job in review has finished rendering and is
- * waiting for a human, so calling it "running" would mislead.
+ * the worker is actively doing something. "pending" / "queued" are NOT
+ * here — the job has not started yet — "paused" is NOT here either —
+ * the worker is waiting — and "review" is NOT here — a job in review
+ * has finished rendering and is waiting for a human, so calling it
+ * "running" would mislead.
  */
 export const RUNNING_STATUSES: readonly JobStatus[] = [
+  "running",
   "transcribing",
   "scoring",
   "rendering",
@@ -75,16 +97,16 @@ export const RUNNING_STATUSES: readonly JobStatus[] = [
  * Normalise a raw job status from the wire (or from mock/demo data) to a
  * canonical JobStatus. Type guard: always returns a valid JobStatus.
  *
- * - "queued" is a legacy alias the old frontend invented; the backend has
- *   only ever sent "pending" for a not-yet-started job, so it maps here.
- * - Known backend values pass through unchanged.
- * - Anything else (unknown future value, null, non-string) falls back to
- *   "pending" — the safest display state — rather than rendering raw text
- *   the UI has no style or meaning for.
+ * - v0.9.0: "queued", "running", "paused" and "cancelled" are REAL
+ *   backend statuses (job queue engine) and pass through unchanged —
+ *   the old code mapped "queued" to "pending", which hid paused and
+ *   queued jobs from the queue controls.
+ * - Anything else (unknown future value, null, non-string) falls back
+ *   to "pending" — the safest display state — rather than rendering
+ *   raw text the UI has no style or meaning for.
  */
 export function normalizeJobStatus(raw: unknown): JobStatus {
   if (typeof raw !== "string") return "pending";
-  if (raw === "queued") return "pending";
   if ((JOB_STATUSES as readonly string[]).includes(raw)) return raw as JobStatus;
   return "pending";
 }
@@ -375,11 +397,15 @@ export async function getPosts(): Promise<Post[] | null> {
 // Worker queue (v0.5.0): GET /worker/queue — what the worker is doing,
 // what is queued, what ran last. The dashboard's activity feed is built
 // from this + jobs + posts; no new server endpoint was needed.
-export interface QueuedJobSummary { id: string; title: string; source_type: string; status: string; created_at: string | null; }
+export interface QueuedJobSummary { id: string; title: string; source_type: string; status: string; created_at: string | null; queue_position: number | null; }
 export interface WorkerRunSummary extends WorkerRun { job_id: string; }
 export interface WorkerQueueSummary {
   running: WorkerRunSummary[];
   queued: QueuedJobSummary[];
+  /** v0.9.0 queue engine: jobs the user paused (resume from here). */
+  paused: QueuedJobSummary[];
+  /** v0.9.0 queue engine: the job the dispatcher is running now, if any. */
+  active_job_id: string | null;
   next: { id: string; title: string } | null;
   recent_runs: WorkerRunSummary[];
 }
@@ -392,20 +418,24 @@ export function normalizeWorkerRunSummary(raw: unknown): WorkerRunSummary {
 export function normalizeWorkerQueue(raw: unknown): WorkerQueueSummary | null {
   const r = (raw ?? {}) as Record<string, unknown>;
   if (!Array.isArray(r.running) && !Array.isArray(r.queued) && !Array.isArray(r.recent_runs)) return null;
-  const queued = (Array.isArray(r.queued) ? r.queued : []).map((q) => {
-    const j = (q ?? {}) as Record<string, unknown>;
-    return {
-      id: String(j.id ?? ""),
-      title: String(j.title ?? ""),
-      source_type: String(j.source_type ?? ""),
-      status: String(j.status ?? ""),
-      created_at: typeof j.created_at === "string" ? j.created_at : null,
-    } satisfies QueuedJobSummary;
-  });
   const next = (r.next ?? null) as Record<string, unknown> | null;
+  const queuedSummary = (list: unknown): QueuedJobSummary[] =>
+    (Array.isArray(list) ? list : []).map((q) => {
+      const j = (q ?? {}) as Record<string, unknown>;
+      return {
+        id: String(j.id ?? ""),
+        title: String(j.title ?? ""),
+        source_type: String(j.source_type ?? ""),
+        status: String(j.status ?? ""),
+        created_at: typeof j.created_at === "string" ? j.created_at : null,
+        queue_position: typeof j.queue_position === "number" ? j.queue_position : null,
+      } satisfies QueuedJobSummary;
+    });
   return {
     running: (Array.isArray(r.running) ? r.running : []).map(normalizeWorkerRunSummary),
-    queued,
+    queued: queuedSummary(r.queued),
+    paused: queuedSummary(r.paused),
+    active_job_id: typeof r.active_job_id === "string" && r.active_job_id ? r.active_job_id : null,
     next: next ? { id: String(next.id ?? ""), title: String(next.title ?? "") } : null,
     recent_runs: (Array.isArray(r.recent_runs) ? r.recent_runs : []).map(normalizeWorkerRunSummary),
   };
@@ -415,6 +445,72 @@ export function normalizeWorkerQueue(raw: unknown): WorkerQueueSummary | null {
 export async function getWorkerQueue(): Promise<WorkerQueueSummary | null> {
   const raw = await apiGet<unknown>("/worker/queue");
   return raw === null ? null : normalizeWorkerQueue(raw);
+}
+
+/* --- Notifications centre (v0.9.0, Worker C) --------------------------- *
+ * The bell uses the UI ALIASES (apps/api/clipforge_api/app.py,
+ * "notifications: UI aliases" — explicitly "the shape the header bell
+ * is built against", docs/API-CONTRACT.md §6):
+ *   GET  /notifications            -> NotificationItem[] (newest first)
+ *   POST /notifications/read {ids} -> {read: number}  (omit ids = all)
+ *   POST /notifications/clear      -> {cleared: number}
+ * One item: {id, title, body, tone, read, created_at, link} where tone
+ * is danger | warning | success | info (stored level error -> danger)
+ * and link is an in-app route (e.g. /queue, /jobs/<id>) or null.
+ *
+ * The canonical API is GET /api/notifications -> {notifications,
+ * unread} (note: key `unread`, not `unread_count`) with items in
+ * {id, level, title, message, action, platform, job_id, read,
+ * created_at} shape, plus POST /api/notifications/{id}/read,
+ * /read-all and /clear. Same store, same rows — only the shape
+ * differs. The standalone router file
+ * (apps/api/clipforge_api/notifications.py, returning `unread_count`)
+ * is NOT mounted in app.py, so the bell must not use it.
+ * Other workers post here from their failure paths: job failed,
+ * channel disconnected, install failed, update available, token
+ * expiring. */
+export type NotificationTone = "success" | "warning" | "danger" | "info";
+export interface NotificationItem {
+  id: string; title: string; body: string;
+  tone: NotificationTone; read: boolean;
+  created_at: string | null; link: string | null;
+}
+
+export function normalizeNotification(raw: unknown): NotificationItem | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (typeof r.id !== "string" || !r.id) return null;
+  if (typeof r.title !== "string" || !r.title) return null;
+  const tone = r.tone === "success" || r.tone === "warning" || r.tone === "danger" || r.tone === "info" ? r.tone : "info";
+  return {
+    id: r.id,
+    title: r.title,
+    body: typeof r.body === "string" ? r.body : (typeof r.message === "string" ? r.message : ""),
+    tone,
+    read: r.read === true,
+    created_at: typeof r.created_at === "string" ? r.created_at : null,
+    link: typeof r.link === "string" && r.link ? r.link : null,
+  };
+}
+
+export function normalizeNotifications(raw: unknown): NotificationItem[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map(normalizeNotification).filter((n): n is NotificationItem => n !== null);
+}
+
+/** GET /notifications (UI alias) — null when the API is unreachable. */
+export async function getNotifications(): Promise<NotificationItem[] | null> {
+  const raw = await apiGet<unknown>("/notifications");
+  return raw === null ? null : normalizeNotifications(raw);
+}
+
+/** POST /notifications/read — mark ids read (all when ids is omitted). */
+export async function markNotificationsRead(ids?: string[]): Promise<ApiResult> {
+  return apiPostJson("/notifications/read", ids ? { ids } : {});
+}
+
+/** POST /notifications/clear — delete every notification. */
+export async function clearNotifications(): Promise<ApiResult> {
+  return apiPostJson("/notifications/clear");
 }
 
 /** Normalise one raw account payload (GET /accounts) into a SocialAccount. */
@@ -527,6 +623,49 @@ export async function retryJob(job: Job): Promise<ApiResult | null> {
   return apiPostJson(`/jobs/${encodeURIComponent(job.id)}/retry`);
 }
 
+/**
+ * Cancel a job: POST /jobs/{id}/cancel (v0.9.0 job control).
+ * Anything not terminal can be cancelled — pending / queued / failed /
+ * blocked / paused at once, and a running job is told to stop (the
+ * response carries `cancelling: true` until the worker confirms it and
+ * the job lands in `cancelled`). A job in review / ready cannot be
+ * cancelled from here (409) — callers must disable Cancel there and
+ * say why instead of letting the user hit the 409.
+ */
+export async function cancelJob(jobId: string): Promise<ApiResult> {
+  return apiPostJson(`/jobs/${encodeURIComponent(jobId)}/cancel`);
+}
+
+/**
+ * Pause a queued or running job: POST /jobs/{id}/pause (v0.9.0 job
+ * control). A running job pauses between stages / clips — a clip
+ * already rendering finishes first, then the job waits in `paused`
+ * until resumed. 409 when the job is not queued / running.
+ */
+export async function pauseJob(jobId: string): Promise<ApiResult> {
+  return apiPostJson(`/jobs/${encodeURIComponent(jobId)}/pause`);
+}
+
+/**
+ * Resume a paused job: POST /jobs/{id}/resume (v0.9.0 job control).
+ * A job paused mid-run continues from the next stage — nothing is
+ * re-done. A job paused while queued goes back to `queued`. 409 when
+ * the job is not paused.
+ */
+export async function resumeJob(jobId: string): Promise<ApiResult> {
+  return apiPostJson(`/jobs/${encodeURIComponent(jobId)}/resume`);
+}
+
+/** POST /posts/{id}/approve — the real endpoint (docs/api.md). */
+export async function approvePost(postId: string): Promise<ApiResult> {
+  return apiPostJson(`/posts/${encodeURIComponent(postId)}/approve`);
+}
+
+/** POST /posts/{id}/publish — dry-run by default on the server. */
+export async function publishPost(postId: string): Promise<ApiResult> {
+  return apiPostJson(`/posts/${encodeURIComponent(postId)}/publish`);
+}
+
 /** One automation rule, exactly as GET /automation/rules returns it. */
 export interface AutomationRule {
   id: string; key: string; kind: string; label: string;
@@ -600,7 +739,12 @@ export type PipelineStageState = "done" | "active" | "failed" | "pending";
 
 /**
  * Map a job status to the index of its currently active pipeline stage.
- * - pending: nothing has run yet — Ingest is next.
+ * - pending / queued / running: nothing has run yet — Ingest is next
+ *   ("running" is claimed by the dispatcher, before the first stage
+ *   sets its stage status).
+ * - paused: the stage it stopped in is not in the status — the job
+ *   detail page reads the `stage` field; here Ingest is the safe
+ *   fallback and the row shows "Paused" instead of a stage name.
  * - transcribing/scoring/rendering: the matching middle stage is active
  *   (rendering produces the clips the Review stage shows).
  * - review: candidates are waiting for a human.
@@ -611,6 +755,9 @@ export type PipelineStageState = "done" | "active" | "failed" | "pending";
 export function activeStageIndex(status: JobStatus): number {
   switch (status) {
     case "pending": return 0;
+    case "queued": return 0;
+    case "running": return 0;
+    case "paused": return 0;
     case "transcribing": return 1;
     case "scoring": return 2;
     case "rendering": return 3;
