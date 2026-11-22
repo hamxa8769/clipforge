@@ -1881,8 +1881,13 @@ mod tests {
         let mut cmd = {
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            // NOTE: not `timeout /T 30` — timeout.exe refuses to run
+            // with redirected stdin ("Input redirection is not
+            // supported") and exits with code 1 at once, which made
+            // wait_for_health_running report Exited instead of Ready.
+            // `ping -n 31` sleeps ~30 s and does not care about stdin.
             let mut cmd = std::process::Command::new("cmd");
-            cmd.args(["/C", "timeout", "/T", "30", "/NOBREAK"])
+            cmd.args(["/C", "ping", "-n", "31", "127.0.0.1"])
                 .creation_flags(CREATE_NO_WINDOW)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
