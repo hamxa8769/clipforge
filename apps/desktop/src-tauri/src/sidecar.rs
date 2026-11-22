@@ -1478,7 +1478,11 @@ mod tests {
     fn find_sidecar_in_dirs_finds_exe() {
         let dir = std::env::temp_dir().join("clipforge-test-sidecar-dir");
         let _ = fs::create_dir_all(&dir);
-        let exe = dir.join("clipforge-server");
+        // The on-disk name is platform-specific (clipforge-server.exe
+        // on Windows, clipforge-server elsewhere) — the old test
+        // hardcoded the Unix name, so it never found the file on
+        // Windows.
+        let exe = dir.join(exe_names().into_iter().next().expect("exe_names"));
         fs::write(&exe, b"fake").unwrap();
         assert_eq!(find_sidecar_in_dirs(&[dir.clone()]), Some(exe));
         let _ = fs::remove_dir_all(&dir);
@@ -1822,8 +1826,14 @@ mod tests {
         use std::sync::Arc;
 
         // Fake server: binds immediately (so the port is open) but
-        // only answers /health 700 ms after the first request, the
-        // way a slow PyInstaller cold start behaves.
+        // only answers /health 1500 ms after the first request, the
+        // way a slow PyInstaller cold start behaves. The hold MUST
+        // exceed the 1000 ms probe timeout in health_body: with a
+        // shorter hold the very first probe succeeds, wait_for_health
+        // returns Ready before any progress tick runs, and the test
+        // can never observe the port as "listening but not ready yet"
+        // (that was the Windows CI failure — the 700 ms hold always
+        // lost that race).
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let first_request = Arc::new(AtomicBool::new(false));
@@ -1836,8 +1846,8 @@ mod tests {
                 let mut buf = [0u8; 4096];
                 let _ = stream.read(&mut buf);
                 let elapsed = start.elapsed();
-                if elapsed < Duration::from_millis(700) {
-                    std::thread::sleep(Duration::from_millis(700) - elapsed);
+                if elapsed < Duration::from_millis(1500) {
+                    std::thread::sleep(Duration::from_millis(1500) - elapsed);
                 }
                 let body = "{\"status\": \"ok\", \"version\": \"0.8.1\"}";
                 let resp = format!(

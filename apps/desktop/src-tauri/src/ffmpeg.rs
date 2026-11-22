@@ -113,9 +113,12 @@ mod tests {
 
     #[test]
     fn check_returns_a_struct() {
-        // In this VM ffmpeg IS installed, so this also verifies the happy path.
+        // The struct must be coherent whether or not ffmpeg is
+        // installed: a bare CI runner has no ffmpeg, a dev machine
+        // does. Never assert availability here — that is an
+        // environment fact, not a property of check_ffmpeg().
         let st = check_ffmpeg();
-        assert!(st.available);
-        assert!(st.version.is_some());
+        assert_eq!(st.available, st.version.is_some());
+        assert_eq!(st.available, st.path.is_some());
     }
 }

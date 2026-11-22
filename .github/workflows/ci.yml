@@ -81,15 +81,18 @@ jobs:
       - name: Set up Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      # tauri-build validates that the externalBin sidecar exists before
-      # it compiles anything, so `cargo test` needs the staged path to
-      # exist even though no test runs the server. A placeholder is
-      # enough — the tests only read sources and spin up TCP listeners.
-      # (The release workflow stages the real server exe instead.)
-      - name: Stage placeholder sidecar for tauri-build
+      # tauri-build validates that the externalBin sidecar AND the
+      # bundle.resources glob (binaries/web/**/*) exist before it
+      # compiles anything, so `cargo test` needs both staged paths to
+      # exist even though no test runs the server or serves the UI.
+      # Placeholders are enough — the tests only read sources and spin
+      # up TCP listeners. (The release workflow stages the real server
+      # exe + real web export instead.)
+      - name: Stage placeholders for tauri-build
         run: |
-          New-Item -ItemType Directory -Force -Path binaries | Out-Null
+          New-Item -ItemType Directory -Force -Path binaries/web/out | Out-Null
           New-Item -ItemType File -Force -Path binaries/clipforge-server-x86_64-pc-windows-msvc.exe | Out-Null
+          New-Item -ItemType File -Force -Path binaries/web/out/index.html | Out-Null
 
       - name: Cargo test
         run: cargo test
