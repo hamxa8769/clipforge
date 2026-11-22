@@ -195,11 +195,15 @@ fn web_ui_opens_external_links_only_through_open_external() {
     assert!(!files.is_empty(), "expected web sources under apps/web");
 
     for path in files {
+        // Normalise the separator: on Windows strip_prefix yields
+        // `components\ui.tsx`, which never equals the forward-slash
+        // exemption below — the test then flagged ExternalLink's own
+        // anchor (and lib/tauri.ts's fallback) as violations.
         let rel = path
             .strip_prefix(&web)
             .unwrap()
             .to_string_lossy()
-            .into_owned();
+            .replace('\\', "/");
         let text = fs::read_to_string(&path).unwrap();
         let code = code_lines(&text).join("\n");
         // The only live window.open() call is the plain-browser fallback
