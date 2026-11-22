@@ -26,12 +26,19 @@ approved Post record, explicit credentials, and ``dry_run=false``):
   GET  /posts/{id}
   GET  /accounts | POST /accounts    (token stored as env-var NAME only)
   GET  /channels                     (per-platform connection status)
+  GET  /channels/health               (connection health + monitor pass)
   GET  /connect/guide/{platform}     (guided-connect steps per platform)
   GET  /onboarding | PUT /onboarding (first-run progress, resumable)
   GET  /auth/{platform}/start        (OAuth authorize URL)
   GET  /auth/callback/{platform}     (OAuth callback — exchanges the code)
   POST /channels/{platform}/refresh  (refresh / extend the stored token)
+  POST /channels/{platform}/reconnect
+                                     (reconnect with backoff: silent
+                                      refresh first, full OAuth only
+                                      when the grant is dead)
   POST /channels/{platform}/disconnect
+  POST /api/notifications | GET /api/notifications
+  POST /api/notifications/{id}/read  (channel-disconnect alerts, etc.)
   GET  /settings | PUT /settings     (masked credentials + preferences)
   POST /settings/test-connection/{service}  (live auth check per service)
   GET  /ffmpeg/status | POST /ffmpeg/install
@@ -114,6 +121,20 @@ from clipforge.auth import (
 )
 from clipforge.auth.channels import all_channels, channel_status
 from clipforge.auth.connect_guide import connect_guide
+from clipforge.auth.health import check_all as check_all_channels
+from clipforge.auth.health import (
+    ensure_background_monitor,
+    notify_channel_disconnected,
+    refresh_with_retry,
+)
+from clipforge.auth.notifications import (
+    clear_notifications,
+    emit_notification,
+    list_notifications,
+    mark_notification_read,
+    mark_notifications_read,
+    unread_count,
+)
 from clipforge.auth.oauth import (
     build_authorize_url,
     exchange_code,
@@ -374,6 +395,24 @@ class SettingsUpdate(BaseModel):
     gemini_api_key: str | None = None  # v0.5.0: same semantics, Gemini key
     # {platform: {"client_id": ..., "client_secret": ...}} — same semantics.
     credentials: dict[str, dict[str, str | None]] | None = None
+
+
+class NotificationCreate(BaseModel):
+    """POST /api/notifications — the v0.9.0 notifications contract.
+
+    ``level`` is info | warning | error | success; ``action`` is a
+    path the UI can link to (``/channels``) or a ``reconnect:<platform>``
+    hint. ``job_id`` links a job notification to its job page (v0.9.0,
+    Worker C — job failed / blocked / finished).
+    """
+
+    level: str = "info"
+    title: str
+    message: str = ""
+    action: str | None = None
+    platform: str | None = None
+    dedupe_key: str | None = None
+    job_id: str | None = None
 
 
 class OnboardingUpdate(BaseModel):
@@ -1522,6 +1561,56 @@ def create_account(payload: AccountCreate, db: Session = Depends(get_db)):
 _OAUTH_STATES = StateStore()
 
 
+def _do_refresh(platform: str, db: Session, *, client=None):
+    """Refresh one stored token with retry + backoff.
+
+    Returns ``(new_record, None)`` on success, ``(None, error)`` on
+    failure, ``(None, None)`` when no token is stored. The refresh
+    function is the app-module global, so tests can monkeypatch
+    ``clipforge_api.app.refresh_access_token``. A successful refresh
+    saves the new record and marks the account active.
+    """
+    secrets = _secrets()
+    record = TokenStore(secrets).load(platform)
+    if record is None:
+        return None, None
+    store = _settings_store()
+    new_record, error = refresh_with_retry(
+        platform,
+        record,
+        client_id=store.get_credential(platform, "client_id") or "",
+        client_secret=store.get_credential(platform, "client_secret") or "",
+        client=client,
+        refresh_fn=refresh_access_token,
+    )
+    if new_record is None:
+        return None, error
+    TokenStore(secrets).save(new_record)
+    account = (
+        db.query(SocialAccount)
+        .filter_by(provider=platform)
+        .order_by(SocialAccount.created_at.desc())
+        .first()
+    )
+    if account is not None:
+        account.status = "active"
+        db.commit()
+    return new_record, None
+
+
+def _health_monitor():
+    """The channel-health monitor for this data dir (started lazily).
+
+    The factories capture the current SecretStore / SettingsStore
+    instances, so the background thread keeps working on this data dir
+    even if the process environment changes later (e.g. tests pointing
+    CLIPFORGE_DATA_DIR elsewhere).
+    """
+    secrets = _secrets()
+    settings_store = _settings_store()
+    return ensure_background_monitor(_data_dir(), lambda: secrets, lambda: settings_store, _Session)
+
+
 def _require_platform(platform: str):
     try:
         return get_provider(platform)
@@ -1557,8 +1646,29 @@ def list_channels(db: Session = Depends(get_db)):
     stays working for compatibility, but the Channels page and any new
     client must use /channels: only it knows OAuth token state, expiry,
     scopes granted, daily caps, and the review/audit notice.
+
+    Loading this endpoint also starts the background health monitor
+    (v0.9.0) — the dashboard loads /channels on every launch, so the
+    monitor is running whenever the app is.
     """
+    _health_monitor()
     return all_channels(secrets=_secrets(), db=db)
+
+
+@app.get("/channels/health")
+def channels_health(db: Session = Depends(get_db)):
+    """Connection health for every platform (v0.9.0).
+
+    Runs one monitor pass — refreshing every token that is due — and
+    returns the per-platform health (``connected`` / ``expiring_soon`` /
+    ``disconnected`` / ``not_connected`` with a plain-language reason
+    and next step) plus a summary. Cheap when nothing is due: no
+    provider call is made for a token that is not due, and the health
+    assessment itself is clock-based (no quota burn). Also starts the
+    background monitor, so health stays fresh between calls.
+    """
+    _health_monitor()
+    return check_all_channels(secrets=_secrets(), settings_store=_settings_store(), db=db)
 
 
 @app.get("/channels/{platform}")
@@ -1693,6 +1803,11 @@ def _handle_x_callback(
     except XError as exc:
         return _callback_page(title="Connection failed", message=exc.detail(), ok=False)
     record = record_from_token_response(token)
+    # v0.9.0: keep a previously stored refresh token when X omits a
+    # new one on a re-grant (same rule as the generic callback).
+    previous = TokenStore(_secrets()).load("x")
+    if previous is not None and not record.refresh_token:
+        record.refresh_token = previous.refresh_token
     try:
         profile = fetch_account(record.access_token)
         record.account_name = profile.get("account") or profile.get("name") or ""
@@ -1768,6 +1883,31 @@ def oauth_callback(
     except OAuthError as exc:
         return _callback_page(title="Connection failed", message=exc.message, ok=False)
     record = TokenRecord.from_token_response(platform, token)
+    # v0.9.0: a provider that omits refresh_token on a re-grant must
+    # not destroy the previously stored one (reconnecting used to
+    # leave the channel less refreshable than before).
+    previous = TokenStore(_secrets()).load(platform)
+    if previous is not None and not record.refresh_token:
+        record.refresh_token = previous.refresh_token
+    if platform in ("instagram", "facebook"):
+        # Meta hands out a ~1-hour short-lived token here; exchange it
+        # for a 60-day long-lived token right away (before v0.9.0 the
+        # short-lived token was stored as-is and the channel died
+        # within the hour). A failed exchange keeps the short-lived
+        # token — connect still succeeds, and the health monitor
+        # retries the exchange before it expires.
+        try:
+            long_lived = refresh_access_token(
+                platform,
+                client_id=client_id,
+                client_secret=client_secret,
+                access_token=record.access_token,
+            )
+            long_record = TokenRecord.from_token_response(platform, long_lived)
+            long_record.refresh_token = record.refresh_token
+            record = long_record
+        except OAuthError:
+            pass
     try:  # profile is best-effort: a token without a name still connects
         profile = fetch_profile(platform, record.access_token)
         record.account_name = profile.get("account_name") or ""
@@ -1804,31 +1944,168 @@ def oauth_callback(
 
 @app.post("/channels/{platform}/refresh")
 def refresh_channel(platform: str, db: Session = Depends(get_db)):
-    """Refresh (YouTube/TikTok) or extend (Meta, 60-day long-lived) the token."""
+    """Refresh (YouTube/TikTok/X) or extend (Meta, 60-day long-lived) the token.
+
+    Retries transient failures with backoff. A definitive failure
+    (the stored grant is dead — e.g. ``invalid_grant``) answers 409,
+    not 502: the user must press Connect and sign in again, and
+    retrying would not help. A network failure answers 502: try again.
+    """
     spec = _require_platform(platform)
-    secrets = _secrets()
-    record = TokenStore(secrets).load(platform)
-    if record is None:
+    if TokenStore(_secrets()).load(platform) is None:
         raise HTTPException(404, f"{spec.display_name} is not connected.")
-    store = _settings_store()
-    try:
-        token = refresh_access_token(
-            platform,
-            client_id=store.get_credential(platform, "client_id") or "",
-            client_secret=store.get_credential(platform, "client_secret") or "",
-            refresh_token=record.refresh_token,
-            access_token=record.access_token,
+    new_record, error = _do_refresh(platform, db=db)
+    if new_record is None:
+        assert error is not None
+        if error.code == "network_error":
+            raise HTTPException(502, error.message) from error
+        raise HTTPException(
+            409,
+            f"{error.message} Press Connect for {spec.display_name} on the "
+            "Channels page to sign in again.",
+        ) from error
+    return channel_status(platform, secrets=_secrets(), db=db)
+
+
+@app.post("/channels/{platform}/reconnect")
+def reconnect_channel(platform: str, db: Session = Depends(get_db)):
+    """Manual Reconnect with backoff (v0.9.0).
+
+    Tries a silent token refresh first — that fixes the common case
+    (an expired token with a live refresh token) without making the
+    user sign in again. Only when the refresh is definitively dead
+    does it answer 409 ("press Connect"), and it emits a notification
+    so the disconnect is never silent. A network failure answers 502:
+    try again in a moment.
+    """
+    spec = _require_platform(platform)
+    if TokenStore(_secrets()).load(platform) is None:
+        raise HTTPException(
+            404,
+            f"{spec.display_name} is not connected — press Connect on the "
+            "Channels page to sign in.",
         )
-    except OAuthError as exc:
-        raise HTTPException(502, exc.message) from exc
-    new_record = TokenRecord.from_token_response(platform, token)
-    # Providers often omit the refresh token on refresh — keep the old one.
-    new_record.refresh_token = new_record.refresh_token or record.refresh_token
-    new_record.account_name = record.account_name
-    new_record.avatar_url = record.avatar_url
-    new_record.account_ref = record.account_ref
-    TokenStore(secrets).save(new_record)
-    return channel_status(platform, secrets=secrets, db=db)
+    new_record, error = _do_refresh(platform, db=db)
+    if new_record is not None:
+        return channel_status(platform, secrets=_secrets(), db=db)
+    assert error is not None
+    if error.code == "network_error":
+        raise HTTPException(
+            502,
+            f"Could not reach {spec.display_name} to refresh the token "
+            f"({error.message}). Check your connection and press "
+            "Reconnect again.",
+        ) from error
+    notify_channel_disconnected(
+        db,
+        platform=platform,
+        level="error",
+        title=f"{spec.display_name} disconnected",
+        message=(
+            f"Automatic refresh failed: {error.message} Press Connect for "
+            f"{spec.display_name} on the Channels page to sign in again."
+        ),
+    )
+    raise HTTPException(
+        409,
+        f"{error.message} Press Connect for {spec.display_name} on the "
+        "Channels page to sign in again.",
+    ) from error
+
+
+# ------------------------------------------------- notifications (v0.9.0)
+# The POST /api/notifications contract from the v0.9.0 brief. No
+# notifications API existed on this branch yet, so this is the
+# canonical one (backed by the notifications table) — see
+# docs/channels-reliability.md for the assumption.
+@app.post("/api/notifications", status_code=201)
+def create_notification(payload: NotificationCreate, db: Session = Depends(get_db)):
+    """Store a user-facing notification (info | warning | error | success)."""
+    try:
+        return emit_notification(
+            db,
+            level=payload.level,
+            title=payload.title,
+            message=payload.message,
+            action=payload.action,
+            platform=payload.platform,
+            dedupe_key=payload.dedupe_key,
+            job_id=payload.job_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/api/notifications")
+def list_notifications_endpoint(
+    unread_only: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    """Newest-first notifications, with an unread count."""
+    return {
+        "notifications": list_notifications(db, unread_only=unread_only, limit=limit),
+        "unread": unread_count(db),
+    }
+
+
+@app.post("/api/notifications/{notification_id}/read")
+def read_notification(notification_id: str, db: Session = Depends(get_db)):
+    """Mark one notification read."""
+    row = mark_notification_read(db, notification_id)
+    if row is None:
+        raise HTTPException(404, f"notification {notification_id} not found")
+    return row
+
+
+# ------------------------------------------------- notifications: read-all / clear
+# (v0.9.0, Worker C) — the activity centre's "Mark all read" and
+# "Clear" buttons, on the same store as POST /api/notifications.
+@app.post("/api/notifications/read-all")
+def read_all_notifications(db: Session = Depends(get_db)):
+    """Mark every notification read; returns how many changed."""
+    return {"marked_read": mark_notifications_read(db), "unread": unread_count(db)}
+
+
+@app.post("/api/notifications/clear")
+def clear_notifications_endpoint(db: Session = Depends(get_db)):
+    """Delete every notification; returns how many were removed."""
+    return {"cleared": clear_notifications(db), "unread": unread_count(db)}
+
+
+# ------------------------------------------------- notifications: UI aliases
+# (v0.9.0, Worker C — docs/API-CONTRACT.md §6) — the shape the header
+# bell is built against: GET /notifications returns the bare newest-
+# first array in NotificationItem shape ({id, title, body, tone,
+# read, created_at, link}), and POST /notifications/read marks ids
+# read (all when ids is omitted). Same store, same rows as
+# /api/notifications — only the shape differs.
+class NotificationsRead(BaseModel):
+    ids: list[str] | None = None
+
+
+@app.get("/notifications")
+def list_notifications_ui(
+    unread_only: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    """Newest-first notifications in the UI (bell) shape."""
+    from clipforge.notifications import to_ui_item  # noqa: PLC0415 (adapter)
+
+    return [to_ui_item(n) for n in list_notifications(db, unread_only=unread_only, limit=limit)]
+
+
+@app.post("/notifications/read")
+def read_notifications_ui(payload: NotificationsRead, db: Session = Depends(get_db)):
+    """Mark notifications read — the given ids, or all when omitted."""
+    return {"read": mark_notifications_read(db, payload.ids)}
+
+
+@app.post("/notifications/clear")
+def clear_notifications_ui(db: Session = Depends(get_db)):
+    """Delete every notification (the centre's Clear button)."""
+    return {"cleared": clear_notifications(db)}
 
 
 @app.post("/channels/{platform}/disconnect")

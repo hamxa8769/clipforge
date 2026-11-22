@@ -33,6 +33,25 @@ class TokenRecord:
     account_ref: str = ""
     obtained_at: datetime | None = None
 
+    def seconds_until_expiry(self, now: datetime | None = None) -> float | None:
+        """Seconds until the token expires (None when expiry is unknown)."""
+        if self.expires_at is None:
+            return None
+        return (self.expires_at - (now or datetime.now(UTC))).total_seconds()
+
+    def needs_refresh(self, *, before_s: int = 900, now: datetime | None = None) -> bool:
+        """True when the token is expired or expires within ``before_s``.
+
+        The health monitor refreshes proactively (default: 15 minutes
+        before expiry) so a channel never flips to Expired in normal
+        use. A token with unknown expiry never needs a clock refresh —
+        the live health check, not the clock, decides then.
+        """
+        remaining = self.seconds_until_expiry(now)
+        if remaining is None:
+            return False
+        return remaining <= before_s
+
     def is_expired(self) -> bool:
         """True when the token is past expiry (or expiry is unknown and old).
 

@@ -438,14 +438,49 @@ class SettingsStore:
                 ),
             }
         if record.is_expired():
-            return {
-                "ok": False,
-                "code": "token_expired",
-                "message": (
-                    f"{spec.display_name} token expired — press Reconnect on the Channels page."
-                ),
-                "next_step": f"Press Reconnect for {spec.display_name} on the Channels page.",
-            }
+            # v0.9.0: an expired token is not automatically a reconnect
+            # — try one silent refresh first (the monitor retries with
+            # backoff; this user-triggered test only tries once). Only
+            # when the refresh is definitively dead do we ask the user
+            # to reconnect.
+            from clipforge.auth.health import _can_refresh, refresh_with_retry  # noqa: PLC0415
+
+            if _can_refresh(record, platform):
+                new_record, error = refresh_with_retry(
+                    platform,
+                    record,
+                    client_id=self.get_credential(platform, "client_id") or "",
+                    client_secret=self.get_credential(platform, "client_secret") or "",
+                    client=client,
+                    attempts=1,
+                )
+                if new_record is not None:
+                    TokenStore(self.secrets).save(new_record)
+                    record = new_record
+                else:
+                    assert error is not None
+                    return {
+                        "ok": False,
+                        "code": "token_expired",
+                        "message": (
+                            f"{spec.display_name} token expired, and automatic "
+                            f"refresh failed ({error.message}) — press Reconnect "
+                            f"on the Channels page."
+                        ),
+                        "next_step": (
+                            f"Press Reconnect for {spec.display_name} on the "
+                            f"Channels page to sign in again."
+                        ),
+                    }
+            else:
+                return {
+                    "ok": False,
+                    "code": "token_expired",
+                    "message": (
+                        f"{spec.display_name} token expired — press Reconnect on the Channels page."
+                    ),
+                    "next_step": f"Press Reconnect for {spec.display_name} on the Channels page.",
+                }
         result = check_health(platform, record.access_token, client=client)
         if result["ok"]:
             result.setdefault("code", "ok")

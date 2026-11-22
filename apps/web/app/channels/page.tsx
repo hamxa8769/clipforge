@@ -14,7 +14,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   apiGet, connectX, disconnectChannel, getAnalytics, getChannels, getXStatus,
-  latestSnapshotPerPlatform, refreshChannel, startOAuth,
+  latestSnapshotPerPlatform, reconnectChannel, refreshChannel, startOAuth,
   type AnalyticsSnapshot, type ChannelStatus, type XStatus,
 } from "@/lib/api";
 import { demoAnalytics } from "@/lib/mock";
@@ -40,6 +40,14 @@ const DEMO_CHANNELS: ChannelStatus[] = (["youtube", "instagram", "facebook", "ti
     : "",
   fallback: "Manual-post pack: download the clip + SEO copy and post it yourself.",
   can_refresh: false,
+  health: p === "youtube" ? "connected" : "not_connected",
+  health_reason: p === "youtube" ? "Token valid (demo)." : "Not connected yet (demo).",
+  health_next_step: "",
+  expires_in_s: null,
+  needs_refresh: false,
+  last_error: null,
+  last_checked_at: null,
+  checked_at: null,
 }));
 
 export default function ChannelsPage() {
@@ -99,6 +107,28 @@ export default function ChannelsPage() {
     await load();
   }
 
+  // Reconnect (v0.9.0): try a silent token refresh first — that fixes
+  // the common case (expired token, live refresh token) without making
+  // the user sign in again. Only when the server answers 409 (the
+  // stored grant is dead) fall through to the full OAuth sign-in.
+  async function reconnect(platform: string) {
+    setBusy(platform);
+    setNotice(null);
+    const res = await reconnectChannel(platform);
+    setBusy(null);
+    if (res.ok) {
+      setNotice(`${platformLabel(platform)} reconnected — token refreshed.`);
+      await load();
+      return;
+    }
+    if (res.status === 409) {
+      setNotice(`The saved ${platformLabel(platform)} sign-in has expired — opening the sign-in page to connect again.`);
+      await connect(platform);
+      return;
+    }
+    setNotice(res.error ?? "Reconnect failed.");
+  }
+
   async function disconnect(platform: string) {
     setBusy(platform);
     const res = await disconnectChannel(platform);
@@ -106,6 +136,27 @@ export default function ChannelsPage() {
     if (!res.ok) { setNotice(res.error ?? "Disconnect failed."); return; }
     setNotice(`${platformLabel(platform)} disconnected.`);
     await load();
+  }
+
+  // X Reconnect (v0.9.0): same silent-refresh-first rule as the other
+  // platforms — X refresh works now (HTTP Basic auth); only a dead
+  // grant falls through to the full PKCE sign-in.
+  async function reconnectXAccount() {
+    setBusy("x");
+    setNotice(null);
+    const res = await reconnectChannel("x");
+    setBusy(null);
+    if (res.ok) {
+      setNotice("X reconnected — token refreshed.");
+      await load();
+      return;
+    }
+    if (res.status === 409) {
+      setNotice("The saved X sign-in has expired — opening the X sign-in page to connect again.");
+      await connectXAccount();
+      return;
+    }
+    setNotice(res.error ?? "X reconnect failed.");
   }
 
   async function connectXAccount() {
@@ -166,10 +217,20 @@ export default function ChannelsPage() {
                     </h2>
                     <p className="truncate text-sm text-neutral-400">{card.account_name || card.account_ref || "Not connected yet"}</p>
                   </div>
-                  {card.status === "connected" ? <Badge tone="success">● Connected</Badge>
-                    : card.status === "expired" ? <Badge tone="danger">● Expired — reconnect</Badge>
+                  {card.health === "connected" ? <Badge tone="success">● Connected</Badge>
+                    : card.health === "expiring_soon" ? <Badge tone="warning">● Expiring soon</Badge>
+                    : card.health === "disconnected" ? <Badge tone="danger">● Disconnected</Badge>
                     : <Badge tone="warning">○ Not connected</Badge>}
                 </div>
+
+                {(card.health === "expiring_soon" || card.health === "disconnected") && (
+                  <div className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+                    <p className="text-xs leading-relaxed text-amber-100/90">{card.health_reason}</p>
+                    {card.health_next_step && (
+                      <p className="mt-1 text-xs leading-relaxed text-neutral-400">{card.health_next_step}</p>
+                    )}
+                  </div>
+                )}
 
                 <dl className="mt-3 space-y-1 text-sm">
                   <div className="flex justify-between gap-2"><dt className="text-neutral-400">Account</dt><dd className="truncate">{card.account_name || card.account_ref || "—"}</dd></div>
@@ -216,9 +277,9 @@ export default function ChannelsPage() {
                 )}
 
                 <div className="mt-4 flex flex-wrap gap-2">
-                  {connected || card.status === "expired" ? (
+                  {connected || card.status === "expired" || card.health === "disconnected" || card.health === "expiring_soon" ? (
                     <>
-                      <SecondaryButton onClick={() => connect(p)} disabled={busy === p}>
+                      <SecondaryButton onClick={() => reconnect(p)} disabled={busy === p}>
                         Reconnect
                       </SecondaryButton>
                       {card.can_refresh && (
@@ -262,7 +323,7 @@ export default function ChannelsPage() {
         </p>
         <div className="mt-4 flex flex-wrap gap-2">
           {xStatus?.connected ? (
-            <SecondaryButton onClick={connectXAccount} disabled={busy === "x"}>Reconnect X</SecondaryButton>
+            <SecondaryButton onClick={reconnectXAccount} disabled={busy === "x"}>Reconnect X</SecondaryButton>
           ) : (
             <PrimaryButton onClick={connectXAccount} disabled={busy === "x" || !live}>
               {busy === "x" ? "Opening…" : "Connect X"}

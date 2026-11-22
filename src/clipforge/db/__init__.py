@@ -285,6 +285,38 @@ class SocialAccount(Base):
     posts: Mapped[list[Post]] = relationship("Post", back_populates="account")
 
 
+class Notification(Base):
+    """One user-facing notification (v0.9.0, channel reliability).
+
+    Written when something needs the user's attention — above all a
+    channel disconnecting — and served by ``GET /api/notifications``.
+    ``dedupe_key`` (e.g. ``channel-disconnected:youtube``) lets the
+    emitter send at most one *unread* notification per key per day, so
+    a flapping channel cannot spam the list. ``action`` is a plain
+    in-app path the bell links to (``/channels``, ``/jobs/<id>``).
+    No secret ever lands here.
+    """
+
+    __tablename__ = "notifications"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_new_id)
+    level: Mapped[str] = mapped_column(String(10), default="info")  # info|warning|error|success
+    title: Mapped[str] = mapped_column(String(200))
+    message: Mapped[str] = mapped_column(Text, default="")
+    # v0.9.0: plain in-app path the bell links to ("/channels",
+    # "/jobs/<id>"). A dict action {"label", "url"} is normalised to
+    # its URL string by the clipforge.notifications adapter.
+    action: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    platform: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    dedupe_key: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    # v0.9.0 (Worker C): the job a job notification belongs to, so the
+    # activity centre can link to the job page. Null for non-job
+    # notifications (channel disconnects, installs, updates).
+    job_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    read: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
 class Post(Base):
     __tablename__ = "posts"
     __table_args__ = (UniqueConstraint("idempotency_key", name="uq_post_idempotency"),)
@@ -617,6 +649,7 @@ __all__ = [
     "SchedulerRun",
     "AutomationEvent",
     "AutomationRule",
+    "Notification",
     "CandidateSeo",
     "JobStatus",
     "CandidateStatus",

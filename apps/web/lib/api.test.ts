@@ -291,11 +291,37 @@ test("normalizeChannelStatus maps the backend channel card", () => {
     scopes: ["https://www.googleapis.com/auth/youtube.upload"], daily_cap: 6,
     expires_at: "2026-11-21T00:00:00Z", source: "oauth",
     review_notice: "n", fallback: "f", can_refresh: true,
+    health: "disconnected", health_reason: "Token expired 2 hours ago.",
+    health_next_step: "Press Refresh token for YouTube.",
+    expires_in_s: -7200, needs_refresh: true,
+    last_error: "refresh token revoked", last_checked_at: "2026-11-21T00:00:00Z",
+    checked_at: "2026-11-21T01:00:00Z",
   });
   assert.equal(card.status, "expired");
   assert.equal(card.daily_cap, 6);
   assert.equal(card.source, "oauth");
   assert.equal(card.can_refresh, true);
+  assert.equal(card.health, "disconnected");
+  assert.equal(card.health_reason, "Token expired 2 hours ago.");
+  assert.equal(card.health_next_step, "Press Refresh token for YouTube.");
+  assert.equal(card.expires_in_s, -7200);
+  assert.equal(card.needs_refresh, true);
+  assert.equal(card.last_error, "refresh token revoked");
+  assert.equal(card.checked_at, "2026-11-21T01:00:00Z");
+});
+
+test("normalizeChannelStatus maps health expiring_soon and distrusts unknown health", () => {
+  const soon = normalizeChannelStatus({
+    platform: "tiktok", status: "connected", health: "expiring_soon",
+    health_reason: "Token expires in 10 minutes.", expires_in_s: 600, needs_refresh: true,
+  });
+  assert.equal(soon.health, "expiring_soon");
+  assert.equal(soon.expires_in_s, 600);
+  const hacked = normalizeChannelStatus({ platform: "tiktok", status: "connected", health: "hacked" });
+  assert.equal(hacked.health, "not_connected");
+  assert.equal(hacked.expires_in_s, null);
+  assert.equal(hacked.needs_refresh, false);
+  assert.equal(hacked.last_error, null);
 });
 
 test("normalizeChannelStatus never trusts an unknown status or source", () => {

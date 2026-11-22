@@ -1022,17 +1022,23 @@ export function ytdlpInstallRunning(status: YtDlpInstallStatus | null): boolean 
 
 /** Channel status, exactly as GET /channels returns it (clipforge.auth.channels). */
 export type ChannelStatusValue = "connected" | "expired" | "not_connected";
+/** Connection health (v0.9.0, clipforge.auth.health): the honest state. */
+export type ChannelHealthValue = "connected" | "expiring_soon" | "disconnected" | "not_connected";
 export interface ChannelStatus {
   platform: string; display_name: string; status: ChannelStatusValue;
   account_name: string; avatar_url: string; account_ref: string;
   scopes: string[]; daily_cap: number; expires_at: string | null;
   source: "oauth" | "env" | "none"; review_notice: string; fallback: string;
   can_refresh: boolean;
+  health: ChannelHealthValue; health_reason: string; health_next_step: string;
+  expires_in_s: number | null; needs_refresh: boolean;
+  last_error: string | null; last_checked_at: string | null; checked_at: string | null;
 }
 
 export function normalizeChannelStatus(raw: unknown): ChannelStatus {
   const r = (raw ?? {}) as Record<string, unknown>;
   const status = String(r.status ?? "not_connected");
+  const health = String(r.health ?? "");
   return {
     platform: String(r.platform ?? ""),
     display_name: String(r.display_name ?? r.platform ?? ""),
@@ -1047,6 +1053,14 @@ export function normalizeChannelStatus(raw: unknown): ChannelStatus {
     review_notice: String(r.review_notice ?? ""),
     fallback: String(r.fallback ?? ""),
     can_refresh: r.can_refresh === true,
+    health: (health === "connected" || health === "expiring_soon" || health === "disconnected" ? health : "not_connected") as ChannelHealthValue,
+    health_reason: String(r.health_reason ?? ""),
+    health_next_step: String(r.health_next_step ?? ""),
+    expires_in_s: typeof r.expires_in_s === "number" ? r.expires_in_s : null,
+    needs_refresh: r.needs_refresh === true,
+    last_error: typeof r.last_error === "string" ? r.last_error : null,
+    last_checked_at: typeof r.last_checked_at === "string" ? r.last_checked_at : null,
+    checked_at: typeof r.checked_at === "string" ? r.checked_at : null,
   };
 }
 
@@ -1152,6 +1166,40 @@ export function explainConnectionError(message: string | undefined | null): { su
 /** POST /channels/{platform}/refresh — refresh / extend the stored token. */
 export async function refreshChannel(platform: string): Promise<ApiResult> {
   return apiPostJson(`/channels/${encodeURIComponent(platform)}/refresh`);
+}
+
+/**
+ * POST /channels/{platform}/reconnect — reconnect with backoff (v0.9.0).
+ * Tries a silent token refresh first; only when the stored grant is
+ * dead does it answer 409 (the caller then sends the user through the
+ * full Connect wizard). A network failure answers 502: try again.
+ */
+export async function reconnectChannel(platform: string): Promise<ApiResult> {
+  return apiPostJson(`/channels/${encodeURIComponent(platform)}/reconnect`);
+}
+
+/** GET /channels/health — per-platform health + summary (v0.9.0). */
+export interface ChannelsHealth {
+  checked_at: string;
+  platforms: ChannelStatus[];
+  summary: Record<ChannelHealthValue, number>;
+}
+export async function getChannelsHealth(): Promise<ChannelsHealth | null> {
+  const raw = await apiGet<unknown>("/channels/health");
+  if (raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  const platforms = Array.isArray(r.platforms) ? r.platforms.map(normalizeChannelStatus) : [];
+  const summary = (r.summary ?? {}) as Record<string, unknown>;
+  return {
+    checked_at: typeof r.checked_at === "string" ? r.checked_at : "",
+    platforms,
+    summary: {
+      connected: typeof summary.connected === "number" ? summary.connected : 0,
+      expiring_soon: typeof summary.expiring_soon === "number" ? summary.expiring_soon : 0,
+      disconnected: typeof summary.disconnected === "number" ? summary.disconnected : 0,
+      not_connected: typeof summary.not_connected === "number" ? summary.not_connected : 0,
+    },
+  };
 }
 
 /** POST /channels/{platform}/disconnect — delete the stored token. */

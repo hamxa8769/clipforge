@@ -121,6 +121,14 @@ export const demoChannels: ChannelStatus[] = (["youtube", "instagram", "facebook
     : "",
   fallback: "Manual-post pack: download the clip + SEO copy and post it yourself.",
   can_refresh: false,
+  health: p === "youtube" ? "connected" : "not_connected",
+  health_reason: p === "youtube" ? "Token valid (demo)." : "Not connected yet (demo).",
+  health_next_step: "",
+  expires_in_s: null,
+  needs_refresh: false,
+  last_error: null,
+  last_checked_at: null,
+  checked_at: null,
 }));
 
 /** Demo analytics snapshots — numbers match demoMonetization so the dashboard stays consistent. Labelled demo everywhere they are shown. */

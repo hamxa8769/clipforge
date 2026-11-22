@@ -101,7 +101,33 @@ http://127.0.0.1:8000/auth/callback/<platform>
    as a private draft to your TikTok inbox; open TikTok and post it from
    there. Nothing is posted publicly without the audit.
 
-## Where secrets live
+## Staying connected (v0.9.0)
+
+Channels stay connected on their own now — see
+`docs/channels-reliability.md` for the full root-cause list and
+design. In short:
+
+- **Automatic refresh:** a background monitor refreshes each token
+  before it expires (15 minutes early), with retry + backoff on
+  network failures. YouTube (1 h), X (2 h) and TikTok (24 h) tokens no
+  longer lapse just because nobody pressed a button.
+- **Meta:** connecting now exchanges the ~1-hour token for a 60-day
+  long-lived token immediately.
+- **Reconnect button:** tries a silent refresh first; only a dead
+  grant (409) sends you through the full sign-in again.
+- **Health:** every card shows `Connected` / `Expiring soon` /
+  `Disconnected` with the reason in plain words and what to do next
+  (`GET /channels/health` for the same data + a summary). The
+  Dashboard's "Needs attention" list shows disconnected / expiring
+  channels too.
+- **Never silent:** a disconnect writes a notification (header bell,
+  `GET /api/notifications`) — at most one per channel per day — and
+  the token is never deleted by a failed refresh.
+
+If a channel still shows Disconnected, press **Reconnect** on its
+card; if that asks you to sign in again, the stored grant is dead
+(revoked on the platform, or the app credentials changed) and only a
+fresh sign-in helps.
 
 | Secret | Storage |
 |---|---|

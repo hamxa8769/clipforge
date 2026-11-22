@@ -163,12 +163,13 @@ def _token_request(
     form: dict[str, str],
     *,
     client: httpx.Client | None = None,
+    auth: tuple[str, str] | None = None,
 ) -> dict:
     spec = get_provider(platform)
     own_client = client is None
     client = client or _new_client(30.0)
     try:
-        resp = client.post(spec.token_url, data=form)
+        resp = client.post(spec.token_url, data=form, auth=auth)
     except httpx.HTTPError as exc:
         raise OAuthError("network_error", f"Could not reach {spec.display_name}: {exc}") from exc
     finally:
@@ -220,8 +221,23 @@ def refresh_access_token(
     tokens: a short-lived user token is exchanged for a 60-day long-lived
     one (``fb_exchange_token``) — the same exchange the social-auto-engine
     refresh helper (MIT) performs — so "refresh" for Meta re-exchanges the
-    current access token and extends it.
+    current access token and extends it. X is a confidential client: its
+    token endpoint requires HTTP Basic auth (client_id:client_secret),
+    not credentials in the form body — the generic form-body refresh
+    used to fail against X, so X has its own branch here.
     """
+    if platform == "x":
+        if not refresh_token:
+            raise OAuthError(
+                "no_refresh_token",
+                "X gave no refresh token — reconnect the channel.",
+            )
+        form = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+        }
+        return _token_request(platform, form, client=client, auth=(client_id, client_secret))
     if platform in ("instagram", "facebook"):
         if not access_token:
             raise OAuthError(
@@ -308,13 +324,34 @@ def check_health(platform: str, access_token: str, *, client: httpx.Client | Non
     return {"ok": True, "message": f"{spec.display_name} token OK — {name}."}
 
 
+# ------------------------------------------------------------------ refresh retry
+#: Refresh failures that mean the grant itself is dead: retrying cannot
+#: help, so the monitor reports Disconnected instead of burning retries.
+DEFINITIVE_REFRESH_FAILURES = frozenset(
+    {"invalid_grant", "invalid_client", "no_refresh_token", "no_token"}
+)
+
+
+def is_retryable_refresh_error(error: OAuthError) -> bool:
+    """True when a refresh failure is worth retrying (transient network).
+
+    Only ``network_error`` is retryable: a provider refusal
+    (``invalid_grant`` et al.) means the stored grant is dead and the
+    user must reconnect, and a bare ``provider_error`` carries no
+    status, so retrying it blindly could hammer a 4xx.
+    """
+    return error.code == "network_error"
+
+
 __all__ = [
+    "DEFINITIVE_REFRESH_FAILURES",
     "OAuthError",
     "StateStore",
     "build_authorize_url",
     "check_health",
     "exchange_code",
     "fetch_profile",
+    "is_retryable_refresh_error",
     "map_provider_error",
     "refresh_access_token",
 ]

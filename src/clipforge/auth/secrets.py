@@ -23,6 +23,7 @@ import os
 import re
 import stat
 import threading
+import time
 from pathlib import Path
 
 _KEYRING_SERVICE = "clipforge"
@@ -83,8 +84,37 @@ class SecretStore:
         return "os-keyring" if self._keyring is not None else "encrypted-file"
 
     # ------------------------------------------------------------ file backend
+    def _write_key(self, path: Path, key: bytes) -> None:
+        path.write_bytes(key)
+        try:
+            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass  # Windows has no POSIX modes; ACLs are out of scope
+
+    @staticmethod
+    def _read_valid_key(path: Path):
+        """A Fernet key from ``path``, or None when missing / corrupt."""
+        from cryptography.fernet import Fernet  # noqa: PLC0415
+
+        try:
+            key = path.read_bytes().strip()
+            Fernet(key)  # validate
+            return key
+        except Exception:
+            return None
+
     def _get_fernet(self):
-        """Fernet instance keyed by the machine key (created once, 0600)."""
+        """Fernet instance keyed by the machine key (created once, 0600).
+
+        The key is kept in ``.machine.key`` with a backup copy in
+        ``.machine.key.bak``. A corrupt or missing primary key used to
+        be silently replaced with a fresh key — which orphaned every
+        token encrypted under the old key (the channel then showed
+        "Not connected" with no error anywhere). Now the backup is
+        tried first and restored; only when both copies are gone is a
+        new key generated, and a corrupt primary is preserved as
+        ``.machine.key.corrupt-<ts>`` instead of being overwritten.
+        """
         if self._fernet is not None:
             return self._fernet
         with self._fernet_lock:
@@ -94,17 +124,27 @@ class SecretStore:
 
             self.secrets_dir.mkdir(parents=True, exist_ok=True)
             key_path = self.secrets_dir / ".machine.key"
-            try:
-                raw = key_path.read_bytes()
-                key = raw.strip()
-                Fernet(key)  # validate
-            except Exception:
-                key = Fernet.generate_key()
-                key_path.write_bytes(key)
-                try:
-                    os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)
-                except OSError:
-                    pass  # Windows has no POSIX modes; ACLs are out of scope
+            backup_path = self.secrets_dir / ".machine.key.bak"
+            key = self._read_valid_key(key_path)
+            if key is not None:
+                # Self-heal: installs from before the backup existed
+                # gain one, so a later corruption is recoverable.
+                if not backup_path.is_file():
+                    self._write_key(backup_path, key)
+            else:
+                key = self._read_valid_key(backup_path)
+                if key is not None:
+                    self._write_key(key_path, key)
+                else:
+                    if key_path.is_file():
+                        corrupt = self.secrets_dir / (f".machine.key.corrupt-{int(time.time())}")
+                        try:
+                            key_path.rename(corrupt)
+                        except OSError:
+                            pass
+                    key = Fernet.generate_key()
+                    self._write_key(key_path, key)
+                    self._write_key(backup_path, key)
             self._fernet = Fernet(key)
             return self._fernet
 
