@@ -2,7 +2,7 @@
 import { useState } from "react";
 import type { Candidate, Job } from "@/lib/api";
 import { approveCandidate, attributionForClip, licenseBadgeLabel, regenerateThumbnail, rejectCandidate, selectThumbnailVariant } from "@/lib/api";
-import { Card, StatusPill } from "@/components/ui";
+import { Card, ExternalLink, StatusPill } from "@/components/ui";
 import ClipPlayer from "@/components/ClipPlayer";
 
 const PLATFORMS = ["youtube", "tiktok", "instagram", "facebook"] as const;
@@ -189,7 +189,7 @@ function CandidateCard({ c, job, demo }: { c: Candidate; job: Job; demo: boolean
                 <p className="text-xs font-semibold text-emerald-300">Attribution — always included for Creative Commons / public-domain sources (read-only)</p>
                 <p className="mt-1 text-sm text-neutral-200">{attribution}</p>
                 <p className="mt-1 text-xs text-neutral-500">
-                  Source: {c.source_title || job.source_title || "Creative Commons video"}{(c.source_channel || job.source_channel) ? ` by ${c.source_channel || job.source_channel}` : ""}{(c.source_url || job.source) ? <> · <a className="text-sky-300 underline" href={c.source_url || job.source} target="_blank" rel="noreferrer">source video</a></> : ""}. This credit stays in the published description.
+                  Source: {c.source_title || job.source_title || "Creative Commons video"}{(c.source_channel || job.source_channel) ? ` by ${c.source_channel || job.source_channel}` : ""}{(c.source_url || job.source) ? <> · <ExternalLink className="text-sky-300 underline" href={c.source_url || job.source}>source video</ExternalLink></> : ""}. This credit stays in the published description.
                 </p>
               </div>
             )}

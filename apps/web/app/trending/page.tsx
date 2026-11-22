@@ -56,6 +56,7 @@ import {
   Card, CardHeader, DemoBadge, EmptyState, ErrorBanner, PrimaryButton,
   ProgressBar, SecondaryButton, Skeleton, Toggle, fmtCompact,
 } from "@/components/ui";
+import { openExternal } from "@/lib/tauri";
 
 const GUARDRAIL =
   "Clips are made from YOUR videos or Creative Commons licensed videos — never from standard-licence videos by other creators.";
@@ -632,7 +633,7 @@ export default function TrendingPage() {
                         <div className="mt-2 flex flex-wrap items-center gap-2">
                           <LicenseBadge license={v.license} />
                           {v.license_url && (
-                            <a className="text-xs text-sky-300 underline" href={v.license_url} target="_blank" rel="noreferrer">Licence details</a>
+                            <button type="button" className="text-xs text-sky-300 underline" onClick={() => { const url = v.license_url; if (url) void openExternal(url); }}>Licence details</button>
                           )}
                         </div>
                         <ClipVerdict video={v} />
@@ -760,7 +761,7 @@ export default function TrendingPage() {
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     <LicenseBadge license={checkResult.license} />
                     {checkResult.license_url && (
-                      <a className="text-xs text-sky-300 underline" href={checkResult.license_url} target="_blank" rel="noreferrer">Licence details</a>
+                      <button type="button" className="text-xs text-sky-300 underline" onClick={() => { const url = checkResult.license_url; if (url) void openExternal(url); }}>Licence details</button>
                     )}
                   </div>
                   <p className={`mt-2 text-sm ${checkResult.can_clip ? "font-medium text-emerald-300" : "text-neutral-300"}`}>

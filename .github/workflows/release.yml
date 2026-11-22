@@ -172,6 +172,13 @@ jobs:
         run: cargo check
         working-directory: apps/desktop/src-tauri
 
+      # The startup-health tests (sidecar unit tests + source-level
+      # integration tests) only link on Windows — run them here on the
+      # exact release code, with the real sidecar staged above.
+      - name: Run desktop tests (Windows)
+        run: cargo test
+        working-directory: apps/desktop/src-tauri
+
       - name: Build desktop app
         run: cargo tauri build
         working-directory: apps/desktop/src-tauri
