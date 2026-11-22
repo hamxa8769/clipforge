@@ -13,7 +13,22 @@
 //! The server is always spawned hidden (no console window on Windows:
 //! `CREATE_NO_WINDOW`), bound to 127.0.0.1 only, with
 //! `CLIPFORGE_DATA_DIR` / `DATABASE_URL` pointed at the desktop app-data
-//! dir. Its stdout/stderr go to a rotating log file.
+//! dir. Its stdout/stderr go to a log file that is **rotated on every
+//! launch** (previous launch kept as `clipforge-server.log.1`) and
+//! headed by a `[shell] ==== ClipForge start <timestamp>, port <port>
+//! ====` separator, with every line timestamped — so the splash page
+//! can never again show a stale `/yt-dlp/status` line from a previous
+//! run as if the current server were alive (v0.8.2).
+//!
+//! Startup health wait (v0.8.2): the frozen PyInstaller one-file exe
+//! extracts its whole archive on every launch, so a cold start can
+//! take well over 30 s. The shell therefore waits up to
+//! [`HEALTH_WAIT_TIMEOUT`] (120 s) and distinguishes the cases: a
+//! server process that is alive but not answering yet keeps being
+//! waited on (with progress), while a process that *exited* fails
+//! fast with its exit code and the bind-error / traceback from the
+//! log — never the generic "did not answer within 30 s" message, and
+//! never by killing a slow-but-healthy server.
 //!
 //! Shutdown kills the WHOLE process tree, never just the direct child:
 //! `clipforge-server` is a PyInstaller one-file binary that spawns an
@@ -35,11 +50,11 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How the sidecar will be launched.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +67,56 @@ pub enum SidecarSource {
 
 /// Ports: prefer 8000, otherwise take whatever the OS hands us.
 pub const PREFERRED_PORT: u16 = 8000;
+
+/// How long the shell waits for a freshly spawned server to answer
+/// `/health` before giving up. The frozen PyInstaller one-file exe
+/// extracts its whole archive to `%TEMP%` on every launch and imports
+/// under Defender scanning, so a cold start on a slow machine can
+/// take well over the old 30 s — and killing a healthy-but-slow
+/// server at 30 s just repeated the same doomed cycle on Retry.
+/// 120 s is the wait; a server that *exits* still fails fast (see
+/// [`wait_for_health_running`]) — the timeout only bounds waiting on
+/// a process that is still alive.
+pub const HEALTH_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Marker fragment of the separator line [`begin_launch_log`] writes
+/// at the top of a fresh log on every launch. [`tail_log_since_launch`]
+/// uses it to show only this launch's lines.
+pub const LAUNCH_MARKER: &str = "==== ClipForge start ";
+
+/// Format seconds since the Unix epoch as an ISO-8601 UTC timestamp
+/// (`2026-11-23T02:55:10Z`). Std-only (no chrono dependency):
+/// civil-from-days conversion. Pure, so it is unit-testable.
+pub fn format_utc_timestamp(secs_since_epoch: u64) -> String {
+    let days = (secs_since_epoch / 86_400) as i64;
+    let secs_of_day = secs_since_epoch % 86_400;
+    // Howard Hinnant's civil-from-days algorithm.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        secs_of_day / 3600,
+        (secs_of_day % 3600) / 60,
+        secs_of_day % 60
+    )
+}
+
+/// Current UTC timestamp for log lines.
+pub fn timestamp_now() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format_utc_timestamp(secs)
+}
 
 /// Pick a free loopback port. Tries `preferred` first; if it is taken,
 /// binds port 0 and returns the port the OS assigned.
@@ -335,10 +400,48 @@ fn remove_pid_file_for(pid_file: &Path) -> std::io::Result<()> {
     fs::remove_file(pid_file)
 }
 
-/// Append one `[shell] …` line to the server log (best effort).
+/// Append one `[shell] <timestamp> …` line to the server log (best
+/// effort). Every shell line carries a UTC timestamp so a stale line
+/// can never be mistaken for a live one. Callers pass messages
+/// starting with `"[shell] "`; the timestamp goes after that prefix.
 pub fn log_line(log_path: &Path, msg: &str) {
     if let Ok(mut f) = open_log_file(log_path) {
-        let _ = writeln!(f, "{msg}");
+        let line = match msg.strip_prefix("[shell] ") {
+            Some(rest) => format!("[shell] {} {rest}", timestamp_now()),
+            None => format!("[shell] {} {msg}", timestamp_now()),
+        };
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Rotate the log for a new launch and head it with a separator:
+///
+/// ```text
+/// [shell] ==== ClipForge start 2026-11-23T02:55:10Z, port 8000 ====
+/// ```
+///
+/// The previous launch's log is kept as one backup
+/// (`clipforge-server.log.1`, replacing any older backup) — the old
+/// lines are never mixed into the new launch's view. Call this once
+/// per launch, *before* the stale cleanup, so the cleanup lines land
+/// in the fresh log. Best effort: a failure is not fatal to the
+/// launch (the old append-only behaviour is the fallback).
+pub fn begin_launch_log(log_path: &Path, port: u16) {
+    if log_path.is_file() {
+        let bak = log_path.with_extension("log.1");
+        let _ = fs::remove_file(&bak);
+        let _ = fs::rename(log_path, &bak);
+    }
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = fs::File::create(log_path) {
+        let _ = writeln!(
+            f,
+            "[shell] {LAUNCH_MARKER}{}, port {port} ====",
+            timestamp_now()
+        );
+        let _ = f.flush();
     }
 }
 
@@ -574,6 +677,37 @@ pub mod win {
             .status();
     }
 
+    /// Pid of the process listening on `127.0.0.1:port` (TCP), via
+    /// `netstat -ano`. `None` when nothing listens there or the
+    /// output cannot be parsed. Used by the stale cleanup to
+    /// attribute a listener to a pid before killing it — the
+    /// Windows equivalent of the Unix `/proc` scan.
+    pub fn pid_listening_on_port(port: u16) -> Option<u32> {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let out = std::process::Command::new("netstat")
+            .args(["-ano", "-p", "TCP"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let wanted = format!("127.0.0.1:{port}");
+        for line in text.lines() {
+            // "  TCP    127.0.0.1:8000    0.0.0.0:0    LISTENING    1234"
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 5
+                && parts[0] == "TCP"
+                && parts[1] == wanted
+                && parts[3] == "LISTENING"
+            {
+                return parts[4].parse().ok();
+            }
+        }
+        None
+    }
+
     /// True when the process exists (`OpenProcess(SYNCHRONIZE)`).
     pub fn process_alive(pid: u32) -> bool {
         use windows_sys::Win32::Foundation::CloseHandle;
@@ -722,11 +856,47 @@ fn health_body(base_url: &str) -> Option<String> {
     }
 }
 
+/// True when something accepts a plain TCP connection on
+/// `127.0.0.1:port` — no HTTP involved, so it also fires for a
+/// server whose `/health` hangs. This is the fallback signal for
+/// the stale cleanup (v0.8.2): a stale server whose `/health` never
+/// answers must not be left holding the port just because the
+/// `/health` probe timed out. It is also the "listening but not
+/// ready yet" signal for the startup progress display.
+pub fn port_is_open(port: u16) -> bool {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok()
+}
+
+/// Pid of the ClipForge server listening on `port`, if we can find
+/// it. Unix: scan `/proc` for the `--port` argument (see
+/// [`find_clipforge_pid_for_port`]). Windows has no `/proc`, so the
+/// pid file is the only port→pid map — and only when it names a live
+/// `clipforge-server.exe` for exactly this port.
+pub fn clipforge_pid_for_port(port: u16, data_dir: &Path) -> Option<u32> {
+    #[cfg(unix)]
+    {
+        let _ = data_dir;
+        find_clipforge_pid_for_port(port)
+    }
+    #[cfg(windows)]
+    {
+        match read_pid_file(data_dir) {
+            Some((pid, p)) if p == port && pid_alive(pid) && pid_is_clipforge_server(pid) => {
+                Some(pid)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Stop a stale server left by a previous run, before a new sidecar
 /// is spawned. Two independent checks, both logged to the server log:
 ///
 /// 1. Pid file: if the recorded pid is alive AND is a ClipForge
-///    server process, terminate its whole tree. Otherwise the pid
+///    server process, terminate its whole tree — regardless of
+///    whether `/health` answers (v0.8.2: a stale server whose
+///    `/health` hangs is still a stale server). Otherwise the pid
 ///    file is just removed (stale pid, or pid reuse by another
 ///    program — never killed on a pid alone).
 /// 2. Port probe: for each candidate port, if something answers
@@ -734,7 +904,14 @@ fn health_body(base_url: &str) -> Option<String> {
 ///    that is not ours — find it (Unix: `/proc` scan for the
 ///    `--port` argument; Windows: the `clipforge-server.exe` image
 ///    name) and terminate it, then wait until the port stops
-///    answering.
+///    answering. A port that merely accepts TCP connections but
+///    never answers `/health` as ClipForge is treated the same way
+///    when its pid can be verified as a ClipForge server (v0.8.2:
+///    the old code only acted when `/health` answered, so a stale
+///    server with a hung `/health` kept the port forever). When no
+///    pid can be verified, the listener is left alone and the
+///    failure is logged — killing an unverified process would be
+///    worse than a bind error the new server reports honestly.
 ///
 /// Nothing is killed unless it is verifiably a ClipForge server.
 pub fn cleanup_stale_sidecar(data_dir: &Path, ports: &[u16], log_path: &Path) {
@@ -773,15 +950,29 @@ pub fn cleanup_stale_sidecar(data_dir: &Path, ports: &[u16], log_path: &Path) {
 
     for &port in ports {
         let base = format!("http://127.0.0.1:{port}");
-        if !health_is_clipforge(&base) {
+        let healthy = health_is_clipforge(&base);
+        // TCP fallback (v0.8.2): a stale server whose /health hangs
+        // never answers the probe above, but it still holds the port
+        // — a plain connect is the only signal left.
+        let listening = !healthy && port_is_open(port);
+        if !healthy && !listening {
             continue;
         }
-        log_line(
-            log_path,
-            &format!(
-                "[shell] a ClipForge server is already answering /health on port {port} — stopping it before starting a new one"
-            ),
-        );
+        if healthy {
+            log_line(
+                log_path,
+                &format!(
+                    "[shell] a ClipForge server is already answering /health on port {port} — stopping it before starting a new one"
+                ),
+            );
+        } else {
+            log_line(
+                log_path,
+                &format!(
+                    "[shell] something is listening on port {port} but is not answering /health as ClipForge — checking whether it is a stale clipforge-server"
+                ),
+            );
+        }
         #[cfg(unix)]
         {
             match find_clipforge_pid_for_port(port) {
@@ -797,23 +988,52 @@ pub fn cleanup_stale_sidecar(data_dir: &Path, ports: &[u16], log_path: &Path) {
                 None => log_line(
                     log_path,
                     &format!(
-                        "[shell] WARNING: could not find the pid of the stale server on port {port}; leaving it alone"
+                        "[shell] WARNING: could not find the pid of the server on port {port}; leaving it alone — the new server may fail to bind"
                     ),
                 ),
             }
         }
         #[cfg(windows)]
         {
-            // Image name is the identity check: only our exe matches.
-            win::taskkill_clipforge_server_image();
-            log_line(
-                log_path,
-                &format!("[shell] sent taskkill to clipforge-server.exe for port {port}"),
-            );
+            // Attribute the listener before killing: `netstat -ano`
+            // maps the listening socket to its pid, and the pid is
+            // only killed when it is verifiably our exe. When
+            // attribution fails but /health answered with our payload,
+            // the listener IS a ClipForge server, so the image-name
+            // kill is the fallback; when it merely listens and cannot
+            // be attributed, it is left alone — killing an unrelated
+            // process would be worse than a bind error the new server
+            // then reports honestly.
+            match win::pid_listening_on_port(port) {
+                Some(pid) if pid_is_clipforge_server(pid) => {
+                    win::taskkill_tree(pid);
+                    log_line(
+                        log_path,
+                        &format!(
+                            "[shell] stale server on port {port} (pid {pid}) stopped via taskkill"
+                        ),
+                    );
+                }
+                _ if healthy => {
+                    // Image name is the identity check: only our exe matches.
+                    win::taskkill_clipforge_server_image();
+                    log_line(
+                        log_path,
+                        &format!("[shell] sent taskkill to clipforge-server.exe for port {port}"),
+                    );
+                }
+                _ => log_line(
+                    log_path,
+                    &format!(
+                        "[shell] WARNING: could not attribute the listener on port {port} to a clipforge-server process; leaving it alone — the new server may fail to bind"
+                    ),
+                ),
+            }
         }
-        // Wait until the port stops answering as our server.
+        // Wait until the port stops answering as our server AND stops
+        // accepting TCP connections.
         let stopped = wait_until(
-            || !health_is_clipforge(&base),
+            || !health_is_clipforge(&base) && !port_is_open(port),
             50,
             Duration::from_millis(100),
         );
@@ -821,7 +1041,7 @@ pub fn cleanup_stale_sidecar(data_dir: &Path, ports: &[u16], log_path: &Path) {
             log_line(
                 log_path,
                 &format!(
-                    "[shell] WARNING: a ClipForge server is still answering /health on port {port} after cleanup"
+                    "[shell] WARNING: something is still listening on port {port} after cleanup — the new server may fail to bind"
                 ),
             );
         }
@@ -851,7 +1071,9 @@ fn pipe_to_log<R: std::io::Read + Send + 'static>(reader: R, log_path: PathBuf, 
         let buf = BufReader::new(reader);
         for line in buf.lines() {
             if let Ok(line) = line {
-                let _ = writeln!(file, "[{tag}] {line}");
+                // Timestamped, so a line from a previous run can never
+                // be mistaken for this run's output.
+                let _ = writeln!(file, "[{tag}] {} {line}", timestamp_now());
                 let _ = file.flush();
             }
         }
@@ -943,7 +1165,8 @@ pub fn start_sidecar(
     if let Ok(mut f) = open_log_file(log_path) {
         let _ = writeln!(
             f,
-            "[shell] starting sidecar: {program} {} (port {port}, pid {pid})",
+            "[shell] {} starting sidecar: {program} {} (port {port}, pid {pid})",
+            timestamp_now(),
             args.join(" ")
         );
     }
@@ -980,15 +1203,108 @@ pub fn wait_until<F: FnMut() -> bool>(mut check: F, max_attempts: u32, interval:
     check()
 }
 
-/// Poll `/health` until it answers or `timeout` elapses.
-pub fn wait_for_health(base_url: &str, timeout: Duration, interval: Duration) -> bool {
-    let attempts = (timeout.as_millis() / interval.as_millis().max(1)) as u32;
+/// What waiting for a freshly spawned server to answer `/health`
+/// ended in. The old code collapsed all three cases into one bool
+/// and one generic "did not answer within 30 s" message — which is
+/// exactly the message that hid a crashed server behind a
+/// slow-start story (v0.8.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HealthWaitOutcome {
+    /// `/health` answered 200 with `status: ok`.
+    Ready,
+    /// The server process exited before ever answering `/health`:
+    /// fail fast, with its exit code and the most useful line(s)
+    /// from its log — never a timeout message for a dead process.
+    Exited {
+        code: Option<i32>,
+        hint: Option<String>,
+    },
+    /// The whole [`HEALTH_WAIT_TIMEOUT`] passed with the process
+    /// still alive but `/health` still unanswered: a genuinely slow
+    /// (or stuck) start, not a crash. The caller must NOT kill the
+    /// server on this outcome — it may still come up, and Retry
+    /// re-waits on it instead of restarting it.
+    TimedOut { elapsed_secs: u64 },
+}
+
+/// Pull the most useful failure line(s) out of a server log tail, so
+/// a failed start can say *why* instead of "did not answer".
+/// Pure, so it is unit-testable. `None` when the tail says nothing
+/// specific — the caller then falls back to the generic hint.
+pub fn extract_failure_hint(log_tail: &str, port: u16) -> Option<String> {
+    let lower = log_tail.to_lowercase();
+    if lower.contains("address already in use") {
+        return Some(format!(
+            "The server could not bind port {port}: address already in use — \
+             another process is holding the port. Close it (or pick a \
+             different port in the splash page's status panel) and press Retry."
+        ));
+    }
+    if lower.contains("traceback") {
+        // The last traceback block: the exception line at its end is
+        // the actual error; keep at most the last 4 lines so the
+        // splash stays readable.
+        let lines: Vec<&str> = log_tail.lines().collect();
+        let start = lines
+            .iter()
+            .rposition(|l| l.to_lowercase().contains("traceback"))
+            .unwrap_or(0);
+        let block = &lines[start..];
+        let keep = block.len().saturating_sub(4);
+        return Some(format!(
+            "The server crashed during startup:\n{}",
+            block[keep..].join("\n")
+        ));
+    }
+    None
+}
+
+/// Poll `/health` until it answers, the server process exits, or
+/// `timeout` elapses — the three outcomes are kept apart (see
+/// [`HealthWaitOutcome`]).
+///
+/// `on_progress` is called about once per `interval` with the
+/// elapsed wait and whether the port already accepts TCP connections
+/// (`listening`): the splash uses it to show honest progress —
+/// "server is listening, waiting for it to finish starting" vs
+/// "server process is running, waiting for it to listen".
+pub fn wait_for_health_running(
+    running: &mut RunningSidecar,
+    timeout: Duration,
+    interval: Duration,
+    on_progress: &mut dyn FnMut(Duration, bool),
+) -> HealthWaitOutcome {
+    let base_url = format!("http://127.0.0.1:{}", running.port);
     let start = Instant::now();
-    wait_until(
-        || health_ok(base_url) || start.elapsed() >= timeout,
-        attempts.max(1),
-        interval,
-    ) && health_ok(base_url)
+    loop {
+        if health_ok(&base_url) {
+            return HealthWaitOutcome::Ready;
+        }
+        match running.child.try_wait() {
+            Ok(Some(status)) => {
+                // Fail FAST: the process is dead; no point waiting
+                // out the timeout for a server that will never answer.
+                let hint = extract_failure_hint(&tail_log(&running.log_path, 40), running.port);
+                return HealthWaitOutcome::Exited {
+                    code: status.code(),
+                    hint,
+                };
+            }
+            Ok(None) => {}
+            Err(_) => {
+                let hint = extract_failure_hint(&tail_log(&running.log_path, 40), running.port);
+                return HealthWaitOutcome::Exited { code: None, hint };
+            }
+        }
+        let elapsed = start.elapsed();
+        if elapsed >= timeout {
+            return HealthWaitOutcome::TimedOut {
+                elapsed_secs: elapsed.as_secs(),
+            };
+        }
+        on_progress(elapsed, port_is_open(running.port));
+        std::thread::sleep(interval);
+    }
 }
 
 /// Stop a running sidecar — the WHOLE process tree, never just the
@@ -1083,6 +1399,29 @@ pub fn tail_log(log_path: &Path, lines: usize) -> String {
     let all: Vec<&str> = text.lines().collect();
     let start = all.len().saturating_sub(lines);
     all[start..].join("\n")
+}
+
+/// Read the last `lines` lines **of the current launch only**: lines
+/// from the last [`LAUNCH_MARKER`] separator onward (falling back to
+/// the last `[shell] … starting sidecar` line for logs written before
+/// v0.8.2, and to [`tail_log`] when there is no marker at all). This
+/// is what the splash page shows — a `/yt-dlp/status` line from a
+/// previous run can never again look like a live server (v0.8.2).
+pub fn tail_log_since_launch(log_path: &Path, lines: usize) -> String {
+    let Ok(text) = fs::read_to_string(log_path) else {
+        return String::new();
+    };
+    let all: Vec<&str> = text.lines().collect();
+    let start = all
+        .iter()
+        .rposition(|l| l.contains(LAUNCH_MARKER))
+        .or_else(|| all.iter().rposition(|l| l.contains("starting sidecar:")));
+    let Some(start) = start else {
+        return tail_log(log_path, lines);
+    };
+    let section = &all[start..];
+    let skip = section.len().saturating_sub(lines);
+    section[skip..].join("\n")
 }
 
 trait AsPosix {
@@ -1271,6 +1610,318 @@ mod tests {
         // A missing file cannot be opened for writing either — but the
         // updater only ever probes the real exe path, which exists.
         assert!(!wait_until_file_unlocked(&path, Duration::from_millis(300)));
+    }
+
+    #[test]
+    fn format_utc_timestamp_known_dates() {
+        // Values verified against `date -u -d @<secs>`.
+        assert_eq!(format_utc_timestamp(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_utc_timestamp(1_700_000_000), "2023-11-14T22:13:20Z");
+        assert_eq!(format_utc_timestamp(1_763_940_000), "2025-11-23T23:20:00Z");
+        // Leap days, including the divisible-by-400 century rule.
+        assert_eq!(format_utc_timestamp(1_709_164_800), "2024-02-29T00:00:00Z");
+        assert_eq!(format_utc_timestamp(951_782_400), "2000-02-29T00:00:00Z");
+    }
+
+    #[test]
+    fn begin_launch_log_rotates_and_marks_launch() {
+        let dir =
+            std::env::temp_dir().join(format!("clipforge-test-launch-log-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("clipforge-server.log");
+        let bak = dir.join("clipforge-server.log.1");
+        fs::write(&log, "stale line from a previous run\n").unwrap();
+
+        begin_launch_log(&log, 8123);
+        assert_eq!(
+            fs::read_to_string(&bak).unwrap(),
+            "stale line from a previous run\n"
+        );
+        let fresh = fs::read_to_string(&log).unwrap();
+        assert!(fresh.starts_with("[shell] ==== ClipForge start "));
+        assert!(fresh.contains(", port 8123 ===="));
+
+        // A second launch rotates the first launch's log into the backup.
+        begin_launch_log(&log, 8123);
+        assert!(fs::read_to_string(&bak)
+            .unwrap()
+            .contains("==== ClipForge start "));
+        assert!(fs::read_to_string(&log)
+            .unwrap()
+            .starts_with("[shell] ==== ClipForge start "));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tail_log_since_launch_ignores_stale_lines() {
+        let path = std::env::temp_dir().join("clipforge-test-since-launch.log");
+        fs::write(
+            &path,
+            "[server] 2026-01-01T00:00:00Z GET /yt-dlp/status 200\n\
+             [shell] ==== ClipForge start 2026-11-23T02:00:00Z, port 8000 ====\n\
+             [shell] 2026-11-23T02:00:01Z starting sidecar: clipforge-server --port 8000 (port 8000, pid 1)\n\
+             [server] 2026-11-23T02:00:02Z new line 1\n\
+             [server] 2026-11-23T02:00:03Z new line 2\n",
+        )
+        .unwrap();
+        // The stale /yt-dlp/status line from the previous run is gone.
+        let tail = tail_log_since_launch(&path, 99);
+        assert!(!tail.contains("yt-dlp/status"));
+        assert!(tail.contains("==== ClipForge start "));
+        assert!(tail.contains("new line 2"));
+        assert_eq!(
+            tail_log_since_launch(&path, 2),
+            "[server] 2026-11-23T02:00:02Z new line 1\n[server] 2026-11-23T02:00:03Z new line 2"
+        );
+        // No separator at all: falls back to a plain tail.
+        fs::write(&path, "a\nb\nc\n").unwrap();
+        assert_eq!(tail_log_since_launch(&path, 2), "b\nc");
+        // Pre-v0.8.2 log: no separator, but a starting-sidecar line.
+        fs::write(
+            &path,
+            "old line\n[shell] starting sidecar: clipforge-server --port 8000 (port 8000, pid 1)\nnew line\n",
+        )
+        .unwrap();
+        assert_eq!(
+            tail_log_since_launch(&path, 99),
+            "[shell] starting sidecar: clipforge-server --port 8000 (port 8000, pid 1)\nnew line"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn extract_failure_hint_bind_error() {
+        let tail = "[server-err] OSError: [Errno 98] Address already in use\n";
+        let hint = extract_failure_hint(tail, 8123).expect("bind error must be recognised");
+        assert!(hint.contains("address already in use"));
+        assert!(hint.contains("8123"));
+    }
+
+    #[test]
+    fn extract_failure_hint_traceback() {
+        let tail = "INFO: Started server process\n\
+             Traceback (most recent call last):\n  \
+             File \"clipforge_api/__main__.py\", line 42, in main\n    \
+             raise ValueError(\"bad config\")\n\
+             ValueError: bad config\n";
+        let hint = extract_failure_hint(tail, 8000).expect("traceback must be recognised");
+        assert!(hint.contains("ValueError: bad config"));
+        assert!(hint.contains("crashed during startup"));
+    }
+
+    #[test]
+    fn extract_failure_hint_none_for_plain_log() {
+        assert_eq!(
+            extract_failure_hint("INFO: Started server process [123]\n", 8000),
+            None
+        );
+        assert_eq!(extract_failure_hint("", 8000), None);
+    }
+
+    #[test]
+    fn port_is_open_true_for_listener_and_false_for_closed() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(port_is_open(port));
+        drop(listener);
+        // Port 1 on loopback should refuse (or be closed) in practice.
+        assert!(!port_is_open(1));
+    }
+
+    /// Regression test for the v0.8.1 startup failure: a server that
+    /// exits immediately must fail FAST (exit code + log hint), not
+    /// after the whole 120 s health timeout with a generic message.
+    #[test]
+    fn wait_for_health_running_fails_fast_when_child_exits() {
+        let dir =
+            std::env::temp_dir().join(format!("clipforge-test-fail-fast-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("clipforge-server.log");
+        fs::write(
+            &log,
+            "[server-err] OSError: [Errno 98] Address already in use\n",
+        )
+        .unwrap();
+        // A port with nothing listening on it.
+        let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        #[cfg(unix)]
+        let mut cmd = {
+            use std::os::unix::process::CommandExt;
+            let mut cmd = std::process::Command::new("/bin/sh");
+            cmd.args(["-c", "exit 3"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+            cmd
+        };
+        #[cfg(windows)]
+        let mut cmd = {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let mut cmd = std::process::Command::new("cmd");
+            cmd.args(["/C", "exit 3"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            cmd
+        };
+        let child = cmd.spawn().expect("spawn exiting child");
+        let mut running = RunningSidecar {
+            child,
+            log_path: log.clone(),
+            source: SidecarSource::DevPython {
+                repo_root: PathBuf::from("/tmp"),
+            },
+            port,
+            pid_file: dir.join("clipforge-server.pid"),
+            #[cfg(windows)]
+            job: None,
+        };
+        let started = Instant::now();
+        let outcome = wait_for_health_running(
+            &mut running,
+            Duration::from_secs(120),
+            Duration::from_millis(50),
+            &mut |_, _| {},
+        );
+        // Fail-fast: milliseconds, not the 120 s timeout.
+        assert!(started.elapsed() < Duration::from_secs(10));
+        match outcome {
+            HealthWaitOutcome::Exited { code, hint } => {
+                assert_eq!(code, Some(3));
+                let hint = hint.expect("bind-error hint from the log");
+                assert!(hint.contains("address already in use"));
+            }
+            other => panic!("expected Exited, got {other:?}"),
+        }
+        stop_sidecar(&mut running);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Regression test for the other half of the v0.8.1 failure: a
+    /// server that takes a while to answer must be waited on — and
+    /// the progress callback must report it as *listening* before
+    /// `/health` answers, so the splash can say "listening, waiting
+    /// for it to finish starting" instead of looking hung.
+    #[test]
+    fn wait_for_health_running_ready_when_server_appears_late() {
+        use std::io::Read;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        // Fake server: binds immediately (so the port is open) but
+        // only answers /health 700 ms after the first request, the
+        // way a slow PyInstaller cold start behaves.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let first_request = Arc::new(AtomicBool::new(false));
+        let first_request_thread = first_request.clone();
+        std::thread::spawn(move || {
+            let start = Instant::now();
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                first_request_thread.store(true, Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let elapsed = start.elapsed();
+                if elapsed < Duration::from_millis(700) {
+                    std::thread::sleep(Duration::from_millis(700) - elapsed);
+                }
+                let body = "{\"status\": \"ok\", \"version\": \"0.8.1\"}";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        // A long-lived child standing in for the server process, in
+        // its own process group so stopping it cannot touch the test
+        // runner's group.
+        #[cfg(unix)]
+        let mut cmd = {
+            use std::os::unix::process::CommandExt;
+            let mut cmd = std::process::Command::new("/bin/sleep");
+            cmd.arg("30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+            cmd
+        };
+        #[cfg(windows)]
+        let mut cmd = {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let mut cmd = std::process::Command::new("cmd");
+            cmd.args(["/C", "timeout", "/T", "30", "/NOBREAK"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            cmd
+        };
+        let child = cmd.spawn().expect("spawn sleep child");
+        let dir =
+            std::env::temp_dir().join(format!("clipforge-test-slow-start-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("clipforge-server.log");
+        fs::write(&log, "").unwrap();
+        let mut running = RunningSidecar {
+            child,
+            log_path: log.clone(),
+            source: SidecarSource::DevPython {
+                repo_root: PathBuf::from("/tmp"),
+            },
+            port,
+            pid_file: dir.join("clipforge-server.pid"),
+            #[cfg(windows)]
+            job: None,
+        };
+        let saw_listening = Arc::new(AtomicBool::new(false));
+        let saw_listening_cb = saw_listening.clone();
+        let started = Instant::now();
+        let outcome = wait_for_health_running(
+            &mut running,
+            Duration::from_secs(30),
+            Duration::from_millis(50),
+            &mut |_, listening| {
+                if listening {
+                    saw_listening_cb.store(true, Ordering::SeqCst);
+                }
+            },
+        );
+        assert_eq!(outcome, HealthWaitOutcome::Ready);
+        assert!(started.elapsed() < Duration::from_secs(20));
+        assert!(
+            first_request.load(Ordering::SeqCst),
+            "the fake server should have been probed"
+        );
+        assert!(
+            saw_listening.load(Ordering::SeqCst),
+            "progress must report the port as listening before /health answers"
+        );
+        stop_sidecar(&mut running);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A process whose argv[0] is `clipforge-server` and whose args

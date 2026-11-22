@@ -33,6 +33,15 @@
   pre { background: #10101c; border: 1px solid #2c2c40; border-radius: 8px;
     padding: 10px; max-height: 220px; overflow: auto; font-size: 12px;
     white-space: pre-wrap; word-break: break-word; color: #c9c9dd; }
+  #shell-panel { border: 1px solid #33334d; border-radius: 10px; padding: 14px;
+    margin: 14px 0; background: #141422; }
+  #shell-panel h2 { font-size: 16px; margin: 0 0 10px; }
+  #shell-panel pre { max-height: 140px; }
+  .row { margin: 8px 0; font-size: 14px; color: #d5d5e6; }
+  .row input[type="number"] { background: #10101c; color: #f3f3f8;
+    border: 1px solid #44445e; border-radius: 6px; padding: 6px 8px;
+    width: 110px; margin-left: 6px; }
+  .hint { font-size: 12px; color: #8a8aa3; }
   .meta { font-size: 12px; color: #8a8aa3; margin-top: 16px; line-height: 1.6; }
   .hidden { display: none; }
 </style>
@@ -55,7 +64,25 @@
     <div class="banner err" id="error-text"></div>
     <pre id="log"></pre>
     <button id="retry">Retry</button>
-    <button id="open-shell" class="secondary">Server status &amp; settings</button>
+  </div>
+
+  <button id="open-shell" class="secondary">Server status &amp; settings</button>
+
+  <div id="shell-panel" class="hidden">
+    <h2>Server status &amp; settings</h2>
+    <pre id="panel-status">Loading…</pre>
+    <div class="row">
+      <label><input type="radio" name="port-mode" id="port-auto" value="auto"> Automatic port (prefers 8000)</label>
+    </div>
+    <div class="row">
+      <label><input type="radio" name="port-mode" id="port-manual" value="manual"> Fixed port:</label>
+      <input type="number" id="manual-port" min="1024" max="65535" step="1">
+    </div>
+    <p class="hint">Port changes take effect on the next start — press Retry to restart with the new port. A healthy server already on the port is reused, not restarted.</p>
+    <button id="save-panel-settings">Save settings</button>
+    <button id="open-data-folder" class="secondary">Open data folder</button>
+    <button id="close-panel" class="secondary">Close</button>
+    <p class="hint" id="panel-msg"></p>
   </div>
 
   <div class="meta" id="meta"></div>
@@ -100,19 +127,28 @@
     try {
       const st = await invoke("get_server_status");
       $("meta").textContent = "Server: " + st.source + "  •  Data: " + st.data_dir;
-      if (st.phase === "ready" || (st.phase && st.phase.phase === "ready")) {
-        // Tauri v2 serialises the flattened enum as { phase: "ready", url, port }
-        const url = st.phase.url || st.url;
+      // Tauri v2 serialises the flattened enum as { phase: "ready", url, port }
+      // (and { phase: "starting", elapsed_secs, detail } while starting).
+      const phase = (st.phase && st.phase.phase) ? st.phase.phase : st.phase;
+      if (phase === "ready") {
+        const url = (st.phase && st.phase.url) || st.url;
         window.location.href = url;
         return;
       }
-      if (st.phase === "failed" || (st.phase && st.phase.phase === "failed")) {
-        const err = st.phase.error || st.error || "Server failed to start.";
+      if (phase === "failed") {
+        const err = (st.phase && st.phase.error) || st.error || "Server failed to start.";
         $("starting").classList.add("hidden");
         $("error-text").textContent = err;
         $("error").classList.remove("hidden");
         try { $("log").textContent = await invoke("get_server_logs", { lines: 120 }); } catch (e) {}
         return;
+      }
+      // Still starting: show what the shell is waiting for and how
+      // long it has waited, so a slow cold start never looks hung.
+      if (phase === "starting") {
+        const detail = st.detail || "Starting the ClipForge server…";
+        const elapsed = (st.elapsed_secs != null) ? " (" + st.elapsed_secs + " s)" : "";
+        $("status-text").textContent = detail + elapsed;
       }
       setTimeout(poll, 500);
     } catch (e) {
@@ -124,10 +160,67 @@
   $("retry").onclick = async () => {
     $("error").classList.add("hidden");
     $("starting").classList.remove("hidden");
-    try { await invoke("retry_server"); } catch (e) {}
+    $("status-text").textContent = "Starting the ClipForge server…";
+    try { await invoke("retry_server"); } catch (e) {
+      // e.g. "Server start already in progress." — say so instead
+      // of silently spinning.
+      $("status-text").textContent = "Could not restart the server: " + e;
+      return;
+    }
     setTimeout(poll, 500);
   };
-  $("open-shell").onclick = async () => { try { await invoke("open_shell_window"); } catch (e) {} };
+
+  // "Server status & settings": an inline panel on this page (the
+  // app is one window only — there is no second shell window). It
+  // shows the live server status and the port setting, and opens the
+  // data folder. Previously this button invoked a command that did
+  // not exist, and the click was swallowed silently.
+  async function refreshPanel() {
+    try {
+      const st = await invoke("get_server_status");
+      const phase = (st.phase && st.phase.phase) ? st.phase.phase : st.phase;
+      $("panel-status").textContent =
+        "Status: " + phase + "\nServer: " + st.source + "\nData: " + st.data_dir + "\nLog: " + st.log_path;
+      const s = await invoke("get_settings");
+      const manual = s.port_mode === "manual";
+      $("port-auto").checked = !manual;
+      $("port-manual").checked = manual;
+      $("manual-port").value = s.manual_port;
+      $("manual-port").disabled = !manual;
+    } catch (e) {
+      $("panel-status").textContent = "Could not load status: " + e;
+    }
+  }
+  $("open-shell").onclick = async () => {
+    const panel = $("shell-panel");
+    const show = panel.classList.contains("hidden");
+    panel.classList.toggle("hidden", !show);
+    if (show) await refreshPanel();
+  };
+  $("close-panel").onclick = () => $("shell-panel").classList.add("hidden");
+  $("port-auto").onchange = () => { $("manual-port").disabled = true; };
+  $("port-manual").onchange = () => { $("manual-port").disabled = false; };
+  $("save-panel-settings").onclick = async () => {
+    const manual = $("port-manual").checked;
+    const port = parseInt($("manual-port").value, 10);
+    if (manual && !(port >= 1024 && port <= 65535)) {
+      $("panel-msg").textContent = "Fixed port must be between 1024 and 65535.";
+      return;
+    }
+    try {
+      const s = await invoke("get_settings");
+      s.port_mode = manual ? "manual" : "auto";
+      if (manual) s.manual_port = port;
+      await invoke("save_settings", { settings: s });
+      $("panel-msg").textContent = "Saved — press Retry to restart with the new port.";
+    } catch (e) {
+      $("panel-msg").textContent = "Could not save settings: " + e;
+    }
+  };
+  $("open-data-folder").onclick = async () => {
+    try { await invoke("open_data_folder_app"); }
+    catch (e) { $("panel-msg").textContent = "Could not open the data folder: " + e; }
+  };
 
   showFfmpeg();
   poll();

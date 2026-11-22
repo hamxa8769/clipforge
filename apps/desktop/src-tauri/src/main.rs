@@ -5,12 +5,21 @@
 //! * waits for `GET /health`, then navigates the main window to the
 //!   server, which serves the static web UI itself,
 //! * on startup, stops any stale server left by a previous run
-//!   (pid file + `/health` probe — see `sidecar.rs`),
+//!   (pid file + `/health` probe + TCP connect — see `sidecar.rs`),
 //! * closing the main window STOPS the sidecar and quits the app
 //!   completely. Nothing keeps running in the background: there is
 //!   no hide-to-tray-on-close. The tray icon only exists while the
 //!   app is running; Quit from the tray also stops the sidecar and
 //!   exits.
+//!
+//! Startup health wait (v0.8.2): the frozen exe can take well over
+//! 30 s to answer `/health` on a cold start, so the shell waits up
+//! to 120 s and tells the splash what it is waiting for (with
+//! elapsed time). A server process that *exits* fails fast with its
+//! exit code and the bind-error / traceback from its log; a process
+//! that is still alive after 120 s is NOT killed — it keeps running
+//! and Retry re-waits on it instead of restarting it. A healthy
+//! server already on the port is reused, never restarted.
 //!
 //! On Windows the binary is built with `windows_subsystem = "windows"`
 //! (no console window) and the sidecar is spawned with
@@ -26,7 +35,9 @@ mod sidecar;
 mod updater;
 
 use settings::DesktopSettings;
-use sidecar::{pick_port, resolve_sidecar, start_sidecar, stop_sidecar, SidecarSource};
+use sidecar::{
+    pick_port, resolve_sidecar, start_sidecar, stop_sidecar, HealthWaitOutcome, SidecarSource,
+};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -40,9 +51,20 @@ use tauri::{
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 enum ServerPhase {
-    Starting,
-    Ready { url: String, port: u16 },
-    Failed { error: String },
+    /// Still starting. `detail` says what the shell is waiting for
+    /// and `elapsed_secs` how long it has waited — the splash shows
+    /// both, so a slow cold start never looks like a hang (v0.8.2).
+    Starting {
+        elapsed_secs: u64,
+        detail: String,
+    },
+    Ready {
+        url: String,
+        port: u16,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -63,6 +85,12 @@ struct AppState {
     /// Where the Tauri app-data dir is (settings file lives here).
     app_data_dir: PathBuf,
     sidecar: sidecar::SidecarState,
+    /// A healthy server this shell did not spawn but adopted because
+    /// it was already answering `/health` on the port (see
+    /// `launch_sidecar_thread`). The shell still owns stopping it on
+    /// quit / before an update: a server adopted at startup must not
+    /// outlive the app.
+    adopted: Mutex<Option<AdoptedSidecar>>,
     /// True while a launch thread is running — prevents double-spawn
     /// (two sidecars, one orphaned) if Retry is hit while starting.
     launching: Mutex<bool>,
@@ -72,11 +100,28 @@ struct AppState {
     tray: Mutex<Option<tauri::tray::TrayIcon>>,
 }
 
+/// A ClipForge server adopted from a previous run (or started by
+/// hand) instead of spawned by this shell. `pid` is `None` on
+/// Windows when no pid file attributes the server to a pid — the
+/// image name is then the only way to stop it.
+#[allow(dead_code)] // port is diagnostic info, kept for the status view.
+#[derive(Debug, Clone, Copy)]
+struct AdoptedSidecar {
+    pid: Option<u32>,
+    port: u16,
+}
+
 impl AppState {
     fn set_phase(&self, phase: ServerPhase) {
         if let Ok(mut s) = self.status.lock() {
             s.phase = phase;
         }
+    }
+    fn set_starting(&self, elapsed_secs: u64, detail: &str) {
+        self.set_phase(ServerPhase::Starting {
+            elapsed_secs,
+            detail: detail.to_string(),
+        });
     }
     fn snapshot(&self) -> ServerStatus {
         self.status.lock().unwrap().clone()
@@ -85,6 +130,14 @@ impl AppState {
 
 /// The thread that owns the sidecar: resolve, spawn, wait for /health,
 /// then publish the result. Retried from the splash page via `retry_server`.
+/// Startup order (v0.8.2 — the v0.8.1 failure was killing a slow server
+/// at 30 s and then repeating the same doomed cycle on Retry):
+/// 0. a sidecar we already spawned and are still waiting on (a previous
+///    launch timed out while it was still starting) is re-waited on —
+///    never spawned twice, never killed for being slow;
+/// 1. a healthy ClipForge server already on the port is adopted, not
+///    killed and restarted;
+/// 2. only then: fresh log + stale cleanup + spawn + 120 s health wait.
 fn launch_sidecar_thread(app: AppHandle) {
     {
         let state = app.state::<AppState>();
@@ -97,12 +150,66 @@ fn launch_sidecar_thread(app: AppHandle) {
     }
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
+
+        // Step 0: re-wait on a sidecar we already spawned. Its log is
+        // NOT rotated — rotating would wipe the lines that explain
+        // what it is doing.
+        let in_flight = state.sidecar.lock().ok().and_then(|mut guard| guard.take());
+        if let Some(mut running) = in_flight {
+            let outcome = await_server_health(&state, &mut running);
+            finish_launch(&state, running, outcome);
+            if let Ok(mut launching) = state.launching.lock() {
+                *launching = false;
+            };
+            return;
+        }
+
         let cfg = DesktopSettings::load(&state.app_data_dir);
         let data_dir = cfg.effective_data_dir(&state.app_data_dir);
         let port = match cfg.effective_manual_port() {
             Some(p) => p,
             None => pick_port(sidecar::PREFERRED_PORT),
         };
+
+        // Step 1: reuse. A healthy ClipForge server already on the
+        // port (stale from a previous run, or started by hand) is
+        // adopted instead of killed and restarted. In auto mode the
+        // preferred port is probed too: a stale-but-healthy server on
+        // 8000 beats starting a second server on a random port.
+        let mut probe_ports = vec![port];
+        if port != sidecar::PREFERRED_PORT {
+            probe_ports.push(sidecar::PREFERRED_PORT);
+        }
+        for &p in &probe_ports {
+            let url = format!("http://127.0.0.1:{p}");
+            if sidecar::health_is_clipforge(&url) {
+                let pid = sidecar::clipforge_pid_for_port(p, &data_dir);
+                if let Ok(mut guard) = state.adopted.lock() {
+                    *guard = Some(AdoptedSidecar { pid, port: p });
+                }
+                sidecar::log_line(
+                    &state.log_path,
+                    &format!(
+                        "[shell] reusing healthy clipforge-server already on port {p} (pid {}) instead of starting a new one",
+                        pid.map(|p| p.to_string())
+                            .unwrap_or_else(|| "?".to_string())
+                    ),
+                );
+                state.set_phase(ServerPhase::Ready { url, port: p });
+                if let Ok(mut launching) = state.launching.lock() {
+                    *launching = false;
+                };
+                return;
+            }
+        }
+
+        state.set_starting(0, "Starting the ClipForge server…");
+
+        // Step 2: fresh log for this launch (previous launch kept as
+        // `.log.1`), so the splash can never show a stale line as if
+        // the current server were alive — then the stale cleanup,
+        // whose lines land in the fresh log.
+        sidecar::begin_launch_log(&state.log_path, port);
 
         let resource_dir = app
             .path()
@@ -120,10 +227,6 @@ fn launch_sidecar_thread(app: AppHandle) {
         // stop that stale server first, or it would keep the port and
         // the exe file locked. Probes the preferred port and the
         // configured manual port, if different.
-        let mut probe_ports = vec![sidecar::PREFERRED_PORT];
-        if port != sidecar::PREFERRED_PORT {
-            probe_ports.push(port);
-        }
         sidecar::cleanup_stale_sidecar(&data_dir, &probe_ports, &state.log_path);
 
         // Static web export for the server to serve at /: the bundled one
@@ -168,29 +271,9 @@ fn launch_sidecar_thread(app: AppHandle) {
             &state.log_path,
             web_out.as_deref(),
         ) {
-            Ok(running) => {
-                let url = format!("http://127.0.0.1:{port}");
-                let healthy = sidecar::wait_for_health(
-                    &url,
-                    Duration::from_secs(30),
-                    Duration::from_millis(250),
-                );
-                if healthy {
-                    if let Ok(mut guard) = state.sidecar.lock() {
-                        *guard = Some(running);
-                    }
-                    state.set_phase(ServerPhase::Ready { url, port });
-                } else {
-                    let mut running = running;
-                    stop_sidecar(&mut running);
-                    state.set_phase(ServerPhase::Failed {
-                        error: format!(
-                            "clipforge-server did not answer /health within 30 s on port {port}. \
-                             See the log below (or {log}) for the server's own error.",
-                            log = state.log_path.display()
-                        ),
-                    });
-                }
+            Ok(mut running) => {
+                let outcome = await_server_health(&state, &mut running);
+                finish_launch(&state, running, outcome);
             }
             Err(e) => {
                 state.set_phase(ServerPhase::Failed {
@@ -209,11 +292,119 @@ fn launch_sidecar_thread(app: AppHandle) {
     });
 }
 
-/// Stop the sidecar if one is running. Returns what was stopped
-/// (pid + exe path) so callers that need proof the process is really
-/// gone — the updater, before launching the installer — can wait on
-/// it. `None` when no sidecar was running.
+/// Wait for a spawned server to answer `/health`, updating the splash
+/// with honest progress while waiting (see
+/// [`sidecar::wait_for_health_running`]). Only sets the phase — the
+/// caller owns what happens to the child afterwards (see
+/// `finish_launch`).
+fn await_server_health(
+    state: &AppState,
+    running: &mut sidecar::RunningSidecar,
+) -> HealthWaitOutcome {
+    let port = running.port;
+    let pid = running.child.id();
+    let outcome = sidecar::wait_for_health_running(
+        running,
+        sidecar::HEALTH_WAIT_TIMEOUT,
+        Duration::from_millis(250),
+        &mut |elapsed, listening| {
+            let detail = if listening {
+                format!("Server is listening on port {port} — waiting for it to finish starting…")
+            } else {
+                format!("Server process is running (pid {pid}) — waiting for it to answer /health…")
+            };
+            state.set_starting(elapsed.as_secs(), &detail);
+        },
+    );
+    match &outcome {
+        HealthWaitOutcome::Ready => {
+            let url = format!("http://127.0.0.1:{port}");
+            state.set_phase(ServerPhase::Ready { url, port });
+        }
+        HealthWaitOutcome::Exited { code, hint } => {
+            let code = match code {
+                Some(c) => format!("exit code {c}"),
+                None => "killed by a signal".to_string(),
+            };
+            let mut error = format!(
+                "clipforge-server exited during startup ({code}) on port {port} — it will never answer /health. "
+            );
+            if let Some(hint) = hint {
+                error.push_str(hint);
+                error.push(' ');
+            }
+            error.push_str(&format!(
+                "See the log below (or {}) for the full server output.",
+                state.log_path.display()
+            ));
+            state.set_phase(ServerPhase::Failed { error });
+        }
+        HealthWaitOutcome::TimedOut { elapsed_secs } => {
+            state.set_phase(ServerPhase::Failed {
+                error: format!(
+                    "clipforge-server is still starting after {elapsed_secs} s on port {port} \
+                     (process {pid} is alive, but /health has not answered yet). It may still \
+                     come up — press Retry to check again; Retry will not restart it while it \
+                     is still running. See the log below (or {}) for what the server is doing.",
+                    state.log_path.display()
+                ),
+            });
+        }
+    }
+    outcome
+}
+
+/// Settle a spawned child after the health wait:
+/// * `Ready` — keep it in `state.sidecar` so quit / update can stop it.
+/// * `TimedOut` — keep it RUNNING in `state.sidecar`. Killing a
+///   slow-but-alive server is the v0.8.1 failure: Retry re-waits on
+///   this child instead of spawning a second server.
+/// * `Exited` — already dead: reap it and remove the pid file.
+fn finish_launch(
+    state: &AppState,
+    mut running: sidecar::RunningSidecar,
+    outcome: HealthWaitOutcome,
+) {
+    match outcome {
+        HealthWaitOutcome::Ready | HealthWaitOutcome::TimedOut { .. } => {
+            if let Ok(mut guard) = state.sidecar.lock() {
+                *guard = Some(running);
+            }
+        }
+        HealthWaitOutcome::Exited { .. } => {
+            stop_sidecar(&mut running);
+        }
+    }
+}
+
+/// Stop the sidecar if one is running — spawned or adopted (see
+/// `AdoptedSidecar`). Returns what was stopped (pid + exe path) so
+/// callers that need proof the process is really gone — the updater,
+/// before launching the installer — can wait on it. `None` when no
+/// sidecar was running. An adopted server with no known pid is
+/// stopped by image name on Windows.
 fn stop_sidecar_if_running(state: &AppState) -> Option<sidecar::StoppedSidecar> {
+    let mut adopted_info = None;
+    if let Ok(mut guard) = state.adopted.lock() {
+        if let Some(adopted) = guard.take() {
+            match adopted.pid {
+                Some(pid) => {
+                    sidecar::kill_process_tree(pid, sidecar::SIDECAR_STOP_GRACE);
+                    adopted_info = Some(sidecar::StoppedSidecar {
+                        pid,
+                        exe_path: None,
+                    });
+                }
+                #[cfg(windows)]
+                None => {
+                    sidecar::win::taskkill_clipforge_server_image();
+                }
+                #[cfg(not(windows))]
+                None => {}
+            }
+            sidecar::remove_pid_file(&state.data_dir);
+        }
+    }
     if let Ok(mut guard) = state.sidecar.lock() {
         if let Some(mut running) = guard.take() {
             let info = running.stopped_info();
@@ -221,7 +412,7 @@ fn stop_sidecar_if_running(state: &AppState) -> Option<sidecar::StoppedSidecar> 
             return Some(info);
         }
     }
-    None
+    adopted_info
 }
 
 // ---------------------------------------------------------------- commands
@@ -233,7 +424,9 @@ fn get_server_status(state: State<'_, AppState>) -> ServerStatus {
 
 #[tauri::command]
 fn get_server_logs(state: State<'_, AppState>, lines: Option<usize>) -> String {
-    sidecar::tail_log(&state.log_path, lines.unwrap_or(120))
+    // Current launch only: stale lines from a previous run must never
+    // look like a live server (v0.8.2).
+    sidecar::tail_log_since_launch(&state.log_path, lines.unwrap_or(120))
 }
 
 #[tauri::command]
@@ -243,8 +436,28 @@ fn retry_server(app: AppHandle, state: State<'_, AppState>) -> Result<(), String
             return Err("Server start already in progress.".into());
         }
     }
-    stop_sidecar_if_running(&state);
-    state.set_phase(ServerPhase::Starting);
+    // If our sidecar is still alive (a previous launch timed out
+    // while it was still starting), do NOT kill it: the launch thread
+    // re-waits on it, and only a dead child is reaped. Killing a
+    // slow-but-live server is the v0.8.1 failure this fix removes —
+    // Retry must re-check a live server, not restart the same doomed
+    // cycle. A healthy server already on the port is likewise reused
+    // by the launch thread instead of restarted.
+    let spawned_alive = match state.sidecar.lock() {
+        Ok(mut guard) => match guard.as_mut() {
+            Some(running) => running
+                .child
+                .try_wait()
+                .map(|s| s.is_none())
+                .unwrap_or(false),
+            None => false,
+        },
+        Err(_) => false,
+    };
+    if !spawned_alive {
+        stop_sidecar_if_running(&state);
+    }
+    state.set_starting(0, "Starting the ClipForge server…");
     launch_sidecar_thread(app);
     Ok(())
 }
@@ -550,7 +763,10 @@ fn main() {
 
             let state = AppState {
                 status: Mutex::new(ServerStatus {
-                    phase: ServerPhase::Starting,
+                    phase: ServerPhase::Starting {
+                        elapsed_secs: 0,
+                        detail: "Starting the ClipForge server…".into(),
+                    },
                     source: "resolving…".into(),
                     data_dir: data_dir.to_string_lossy().into_owned(),
                     log_path: log_path.to_string_lossy().into_owned(),
@@ -560,6 +776,7 @@ fn main() {
                 log_path,
                 app_data_dir,
                 sidecar: Mutex::new(None),
+                adopted: Mutex::new(None),
                 launching: Mutex::new(false),
                 update: Mutex::new(updater::UpdaterState::default()),
                 tray: Mutex::new(None),

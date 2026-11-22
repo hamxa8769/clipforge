@@ -25,36 +25,44 @@ sidecar's lifecycle, port, data dir, logs, FFmpeg check, tray and settings.
   (Windows: `CREATE_NO_WINDOW`; the shell itself is built with
   `windows_subsystem = "windows"`, so no console window ever appears),
   with `CLIPFORGE_DATA_DIR` + `DATABASE_URL` pointed at the app-data dir.
-  Polls `/health` every 250 ms for up to 30 s, then loads the main window.
-  Stdout/stderr go to `<data>/logs/clipforge-server.log` (rotated past 5 MiB,
-  one backup kept); the last lines are visible from the splash page and the
-  status window. On quit the sidecar gets SIGTERM (Unix) / terminate
+  Polls `/health` every 250 ms for up to 120 s, then loads the main window.
+  A server that exits fails fast with its exit code and the bind-error /
+  traceback from the log; a server that is still alive after 120 s is left
+  running and Retry re-waits on it instead of restarting it, and a healthy
+  server already on the port is reused, never restarted. Stdout/stderr go
+  to `<data>/logs/clipforge-server.log` (rotated on every launch, previous
+  launch kept as `clipforge-server.log.1`, plus a 5 MiB backstop; every line
+  timestamped and headed by a launch separator); only the current launch's
+  lines are shown on the splash page. On quit the sidecar gets SIGTERM (Unix) / terminate
   (Windows), a 5 s grace period, then a force-kill — it is never orphaned.
   That covers forced kills too: a `ctrlc` handler (with the `termination`
   feature — without it, `ctrlc` only catches SIGINT, not SIGTERM) stops the
   sidecar on SIGINT/SIGTERM/SIGHUP, in addition to the clean-exit hook.
   Verified under Xvfb: SIGTERM to the app stops the sidecar within ~1 s
   and leaves no `clipforge-server` process behind.
-- **Tray**: Show / Server status & settings / Open data folder / Quit.
-  Closing the main window hides to tray (first time, the status window opens
-  once with a hint). Quit from the tray stops the sidecar and exits.
+- **Tray**: Show / Open data folder / Quit. Closing the main window stops
+  the sidecar and quits the app completely (no hide-to-tray). Quit from the
+  tray does the same.
 - **FFmpeg check** (`src-tauri/src/ffmpeg.rs`): runs `ffmpeg -version`
   (PATH, plus common Windows install locations). If missing, the splash page
   shows a banner with the download link
   (https://ffmpeg.org/download.html) and a "Continue without clipping
   (review / SEO only)" path. The app never blocks on a missing FFmpeg and
   never fails silently.
-- **Settings** (`src-tauri/src/settings.rs`, shell window): data-folder
+- **Settings** (`src-tauri/src/settings.rs`, splash page panel): data-folder
   location, server port (auto / manual), API key **names** only. Key *values*
   are never written by the shell — put them in a `.env` file next to the
   `clipforge-server` binary (the server loads it on start) or in the
-  environment. Data-folder / port changes apply after a restart.
+  environment. Data-folder / port changes apply on the next start (press
+  Retry on the splash page to restart with a new port).
 - **Shell frontend** (`src/`): plain HTML/CSS/JS, no build step, no npm
-  dependencies. `index.html` is the loading/splash page; `shell.html` is the
-  status / logs / settings window. Note the honest trade-off: once the main
+  dependencies. `index.html` is the loading/splash page, which also hosts the
+  inline Server status & settings panel (live status, current-launch log
+  tail, port setting, data folder). There is no second shell window (removed
+  in v0.4.0). Note the honest trade-off: once the main
   window navigates to the server URL, the Tauri JS bridge is no longer
-  available inside the web UI — shell features (tray, status window,
-  settings) live in Rust and in the separate shell window.
+  available inside the web UI — shell features (tray, settings) live in Rust
+  and in the splash page.
 
 **Sidecar resolution order** (see `sidecar.rs`)
 
@@ -202,6 +210,9 @@ cargo test    # port-picking, sidecar resolution, health-wait timeout,
               # log tailing, FFmpeg version parsing, settings round-trip
 cargo check   # typecheck without linking the WebKit shell
 ```
+On a bare Linux VM `cargo test` cannot link (no WebKitGTK — see
+`src-tauri/tests/startup_health_wait.rs` for how to run the source-level
+tests directly with `rustc --test`); the full suite runs in CI on Windows.
 
 **Where logs / data live**
 
@@ -211,4 +222,4 @@ cargo check   # typecheck without linking the WebKit shell
 | Server log | `<data>\logs\clipforge-server.log` | `<data>/logs/clipforge-server.log` |
 | Settings file | `<data>\clipforge-desktop.json` | `<data>/clipforge-desktop.json` |
 
-The data folder can be overridden in the settings window (applies on restart).
+The data folder can be overridden in the splash page's Server status & settings panel (applies on the next start).
