@@ -58,6 +58,16 @@ failed — the backend reports `error` (string) but no failed stage.
   (lets the Automation history show real durations instead of only the
   created date), and `duration_s: number | null`.
 - `GET /jobs/{id}/logs` → `{logs: [{ts, stage, level, message}]}`.
+- v0.9.0 queue + plain-language errors: `queue_position: number | null`
+  (1-based position among waiting jobs; `null` when not queued),
+  `queue_priority: number` (1 = user-started, 0 = batch/agent),
+  `error_title: string | null`, `error_action: string | null`,
+  `error_code: string | null` — the failed job shows `error_title`
+  plus the plain-language `error` and a Retry button; no raw
+  traceback is ever returned. `POST /jobs/{id}/run?wait=` and
+  `POST /jobs/{id}/retry?wait=` enqueue at priority 1 and, with
+  `wait=true` (default), block until the job finishes; `wait=false`
+  returns at once with the job's `queue_position`.
 
 The job page can now mark the failed stage and show the per-stage log
 instead of only the single `error` string. The detail also carries
@@ -122,15 +132,14 @@ All three are IMPLEMENTED on the server and wired in the dashboard
   platform, job_id, read, created_at}` shape; `POST
   /api/notifications/{id}/read`, `/read-all` (`{marked_read, unread}`)
   and `/clear` (`{cleared, unread}`). `POST /api/notifications
-  {level, title, message, action?, platform?, dedupe_key?}` creates
-  one (201); `action` is a path (`/channels`) or a
-  `reconnect:<platform>` hint.
-- WARNING — duplicate, unmounted router: the standalone file
-  `apps/api/clipforge_api/notifications.py` (Worker C) defines the
-  same routes with `unread_count` in the GET response, but it is
-  NEVER included in `app.py` — only the app.py handlers above serve
-  traffic. The frontend must use the shapes above, not the router
-  file's. (Flag for Worker C / coordinator: mount it or delete it.)
+  {level, title, message, action?, job_id?, platform?, dedupe_key?}`
+  creates one (201); `action` is a path (`/channels`) or a
+  `reconnect:<platform>` hint. One store serves both shapes:
+  `src/clipforge/auth/notifications.py` (the `notifications` table +
+  `emit_notification`, 24 h dedupe) is canonical; the thin adapter
+  `src/clipforge/notifications.py` (Worker C) reuses it. The earlier
+  standalone router file `apps/api/clipforge_api/notifications.py`
+  was deleted as a duplicate — do not recreate it.
 - Events worth notifying about: a job finished / failed, a clip is
   waiting for approval, a channel token is about to expire / expired,
   an update is available. The header bell polls every 60s.

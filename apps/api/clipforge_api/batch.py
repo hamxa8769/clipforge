@@ -50,14 +50,19 @@ def _is_youtube_url(source: str) -> bool:
 def _real_processor(item: dict, set_progress, is_paused) -> dict:
     """Run one batch item through the real pipeline (not simulated).
 
-    Creates a Job for the source and runs ``worker.run_job`` on it with
-    a fresh DB session. Local files and YouTube links are accepted;
-    anything else fails with a plain-language message. The queue marks
-    the item done/failed from the outcome; the returned dict lands in
+    Creates a Job for the source and runs it through the shared job
+    queue (``clipforge.job_queue``) — never ``worker.run_job``
+    directly, so a batch item can never render in parallel with a
+    user-started job on the same ffmpeg. The batch's own pause is
+    honoured too: while the batch is paused the underlying job pauses
+    as well (``pause_check=is_paused``), and resumes with it.
+    Local files and YouTube links are accepted; anything else fails
+    with a plain-language message. The queue marks the item
+    done/failed from the outcome; the returned dict lands in
     ``item.result`` (job id + clip count) so the UI can link to the job.
     """
     from clipforge.db import ClipCandidate, Job, JobStatus, get_session
-    from clipforge.worker import run_job
+    from clipforge.job_queue import get_job_queue
 
     source = str(item.get("source") or "").strip()
     own_content = bool(item.get("own_content"))
@@ -87,7 +92,9 @@ def _real_processor(item: dict, set_progress, is_paused) -> dict:
         set_progress(10)
         if is_paused():
             return {"job_id": job.id, "clips": 0, "status": job.status}
-        summary = run_job(session, job.id, data_dir=_data_dir())
+        summary = get_job_queue().enqueue_and_wait(
+            session, job.id, priority=0, pause_check=is_paused
+        )
         session.refresh(job)
         clips = session.query(ClipCandidate).filter_by(job_id=job.id).count()
         return {

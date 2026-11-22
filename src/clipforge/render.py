@@ -24,23 +24,53 @@ from pathlib import Path
 from clipforge.broll import BrollOverlay, build_broll_filter
 from clipforge.captions import write_ass
 from clipforge.highlights import Candidate
+from clipforge.job_control import JobControl, popen_kwargs, wait_for_process
 from clipforge.reframe import ReframePlan
 from clipforge.transcribe import Word
 from clipforge.workflow import ffmpeg_missing_message
 
 
-def _run(cmd: list[str], *, timeout: int, tool: str) -> subprocess.CompletedProcess[str]:
+def _run(
+    cmd: list[str],
+    *,
+    timeout: int,
+    tool: str,
+    control: JobControl | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Run an ffmpeg/ffprobe command, or raise a plain-language error.
 
     A missing binary raises ``FileNotFoundError`` from ``subprocess``;
     without this wrapper the caller would surface a bare
     ``[Errno 2] No such file or directory`` instead of telling the user
     FFmpeg is missing and where to install it.
+
+    With a ``control`` (v0.9.0 job queue) the process runs under
+    :func:`clipforge.job_control.wait_for_process`: a user cancel kills
+    the ffmpeg process instead of waiting for a 1-hour render to
+    finish, and :class:`JobCancelled` is raised.
     """
+    if control is None:
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except FileNotFoundError:
+            raise RenderError(ffmpeg_missing_message(tool)) from None
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            **popen_kwargs(),
+        )
     except FileNotFoundError:
         raise RenderError(ffmpeg_missing_message(tool)) from None
+    control.register_process(proc)
+    try:
+        returncode = wait_for_process(proc, control, timeout=timeout)
+    finally:
+        control.register_process(None)
+    stdout, stderr = proc.communicate()
+    return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
 
 
 TARGET_WIDTH = 1080
@@ -70,7 +100,7 @@ class RenderError(RuntimeError):
     """Raised when FFmpeg fails or verification does not match."""
 
 
-def ffprobe_verify(path: Path) -> RenderResult:
+def ffprobe_verify(path: Path, control: JobControl | None = None) -> RenderResult:
     """Probe a rendered file and verify 1080x1920; raises on mismatch."""
     cmd = [
         "ffprobe",
@@ -84,7 +114,7 @@ def ffprobe_verify(path: Path) -> RenderResult:
         "json",
         str(path),
     ]
-    proc = _run(cmd, timeout=120, tool="ffprobe")
+    proc = _run(cmd, timeout=120, tool="ffprobe", control=control)
     if proc.returncode != 0:
         raise RenderError(f"ffprobe failed for {path}: {proc.stderr.strip()}")
     info = json.loads(proc.stdout)
@@ -206,6 +236,7 @@ def render_clip(
     ass_path: str | Path | None = None,
     loudness_lufs: float = TARGET_LUFS,
     broll: list[BrollOverlay] | None = None,
+    control: JobControl | None = None,
 ) -> RenderResult:
     """Render one candidate to 1080x1920 MP4; returns verified result.
 
@@ -220,6 +251,10 @@ def render_clip(
     combined with ``blurred_background`` (the two modes both rebuild
     the frame). Each overlay must have a positive duration
     (``clip_end_s`` or ``source_end_s`` set).
+
+    ``control`` (v0.9.0 job queue): when the user cancels the job the
+    ffmpeg process is killed mid-render and :class:`JobCancelled` is
+    raised instead of waiting for the render to finish.
     """
     source = Path(source)
     out = Path(out_path)
@@ -245,6 +280,7 @@ def render_clip(
             ],
             timeout=120,
             tool="ffprobe",
+            control=control,
         )
         dims = json.loads(probe.stdout)["streams"][0]
         src_w, src_h = int(dims["width"]), int(dims["height"])
@@ -352,12 +388,12 @@ def render_clip(
         "+faststart",
         str(out),
     ]
-    proc = _run(cmd, timeout=3600, tool="ffmpeg")
+    proc = _run(cmd, timeout=3600, tool="ffmpeg", control=control)
     if proc.returncode != 0:
         raise RenderError(f"ffmpeg render failed for {out}: {proc.stderr.strip()[-800:]}")
     if not out.exists() or out.stat().st_size == 0:
         raise RenderError(f"ffmpeg produced no output at {out}")
-    result = ffprobe_verify(out)
+    result = ffprobe_verify(out, control=control)
     if abs(result.duration_s - duration) > 1.5:
         raise RenderError(
             f"rendered duration {result.duration_s:.2f}s differs from "

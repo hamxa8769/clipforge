@@ -13,9 +13,9 @@
 // old candidates are dropped and re-derived, stage history is kept.
 "use client";
 import { useEffect, useState } from "react";
-import { getJob, apiGet, normalizeCandidates, normalizeJob, pipelineProgress, PROCESSING_STATUSES, retryJob, type Candidate, type Job } from "@/lib/api";
+import { getJob, apiGet, cancelJob, normalizeCandidates, normalizeJob, pauseJob, pipelineProgress, PROCESSING_STATUSES, resumeJob, retryJob, type Candidate, type Job } from "@/lib/api";
 import { demoCandidates, demoJobs } from "@/lib/mock";
-import { Card, ErrorBanner, PrimaryButton, ProgressBar, SecondaryButton } from "@/components/ui";
+import { Card, DangerButton, ErrorBanner, PrimaryButton, ProgressBar, SecondaryButton } from "@/components/ui";
 import PipelineSteps from "@/components/PipelineSteps";
 import ReviewClient from "./ReviewClient";
 
@@ -29,6 +29,7 @@ export default function JobReviewClient({ id }: { id: string }) {
   const [live, setLive] = useState(false);
   const [retryNote, setRetryNote] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
+  const [controlling, setControlling] = useState(false);
   const [logs, setLogs] = useState<LogLine[] | null>(null);
 
   useEffect(() => {
@@ -96,7 +97,43 @@ export default function JobReviewClient({ id }: { id: string }) {
     setRetryNote("Job re-queued — the same job is running again (old candidates dropped and re-derived; stage history kept).");
   }
 
+  // v0.9.0 job control: pause / resume / cancel that actually take
+  // effect (API-CONTRACT.md §6b). A running job pauses between stages
+  // / clips; a cancel kills the render and the job lands in
+  // `cancelled` (the response carries `cancelling: true` until the
+  // worker confirms it). After any control action the job is re-fetched
+  // so the page shows the real state.
+  async function onControl(action: "pause" | "resume" | "cancel") {
+    if (!live) {
+      setRetryNote(`Demo mode — ${action} needs the server. Connect ClipForge to use job controls.`);
+      return;
+    }
+    setControlling(true);
+    setRetryNote(null);
+    const res = action === "pause" ? await pauseJob(job.id) : action === "resume" ? await resumeJob(job.id) : await cancelJob(job.id);
+    setControlling(false);
+    if (!res.ok) {
+      setRetryNote(`${action[0].toUpperCase() + action.slice(1)} failed: ${res.error ?? `HTTP ${res.status}`}.`);
+      return;
+    }
+    if (res.data) setJob(normalizeJob(res.data));
+    const cancelling = (res.data as Record<string, unknown> | null)?.cancelling === true;
+    setRetryNote(
+      action === "pause"
+        ? "Paused — resume when ready, nothing is lost. The job continues from the next stage / clip."
+        : action === "resume"
+          ? "Resumed — the job continues from where it stopped."
+          : cancelling
+            ? "Cancelling — the worker is stopping the job now."
+            : "Job cancelled.",
+    );
+  }
+
   const failed = job.status === "failed";
+  const paused = job.status === "paused";
+  const queued = job.status === "queued" || job.status === "pending";
+  const running = ["running", "transcribing", "scoring", "rendering"].includes(job.status);
+  const cancellable = !["review", "ready", "cancelled"].includes(job.status);
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
@@ -104,6 +141,9 @@ export default function JobReviewClient({ id }: { id: string }) {
         <span className="ml-auto flex gap-2">
           <SecondaryButton href={`/pipeline?job=${encodeURIComponent(job.id)}`}>Full pipeline view</SecondaryButton>
           <SecondaryButton href="/automation">Automation</SecondaryButton>
+          {paused && <PrimaryButton onClick={() => void onControl("resume")} disabled={controlling || !live}>{controlling ? "Working…" : "Resume"}</PrimaryButton>}
+          {(queued || running) && <PrimaryButton onClick={() => void onControl("pause")} disabled={controlling || !live}>{controlling ? "Working…" : "Pause"}</PrimaryButton>}
+          {cancellable && <DangerButton onClick={() => void onControl("cancel")} disabled={controlling || !live}>{controlling ? "Working…" : "Cancel"}</DangerButton>}
           {failed && <PrimaryButton onClick={onRetry} disabled={retrying}>{retrying ? "Retrying…" : "Retry job"}</PrimaryButton>}
         </span>
       </div>
@@ -124,7 +164,7 @@ export default function JobReviewClient({ id }: { id: string }) {
               <>
                 <ProgressBar value={failed ? 0 : progress} tone={failed ? "danger" : progress >= 100 ? "success" : "default"} />
                 <p className="mt-1.5 text-xs text-neutral-500">
-                  {failed ? "Failed — see the error below." : `${progress}% complete · ${job.candidates} clip candidate(s) so far`}
+                  {failed ? "Failed — see the error below." : paused ? "Paused — resume to continue from where it stopped, nothing is re-done." : queued ? (job.queue_position ? `Queued — position ${job.queue_position}, waiting for the worker. Only one job runs at a time.` : "Queued — waiting for the worker. Only one job runs at a time.") : `${progress}% complete · ${job.candidates} clip candidate(s) so far`}
                   {live && PROCESSING_STATUSES.includes(job.status) ? " · live, updating every 10s" : ""}
                 </p>
               </>
@@ -133,7 +173,10 @@ export default function JobReviewClient({ id }: { id: string }) {
         </div>
         {failed && job.error && (
           <div className="mt-4">
-            <ErrorBanner message={`Job failed: ${job.error}`} />
+            <ErrorBanner message={`Job failed: ${job.error_title ? `${job.error_title} — ${job.error}` : job.error}`} />
+            {job.error_action && (
+              <p className="mt-2 text-sm text-neutral-300">{job.error_action}</p>
+            )}
             <p className="mt-2 text-xs text-neutral-500">
               {job.failed_stage ? `Failed stage: ${job.failed_stage}. ` : ""}
               {job.duration_s !== null && job.duration_s !== undefined ? `Last run took ${Math.round(job.duration_s)}s. ` : ""}

@@ -549,6 +549,25 @@ class YtDlpInstaller:
             for key, value in updates.items():
                 setattr(self._state, key, value)
             snapshot = self._state.to_dict()
+            failed = "state" in updates and updates["state"] == "failed"
+            failed_step = self._state.failed_step
+            failed_error = self._state.error
+        if failed:
+            # v0.9.0: a failed install is a notification, not a silent
+            # red state the user has to stumble on (see
+            # clipforge.notifications). Best-effort: never breaks the
+            # installer when the DB is unavailable.
+            from clipforge.notifications import notify_best_effort  # noqa: PLC0415
+
+            step = f" ({failed_step})" if failed_step else ""
+            notify_best_effort(
+                "error",
+                "yt-dlp install failed",
+                f"yt-dlp could not be installed{step}: {failed_error or 'unknown error'} "
+                "Press 'Install yt-dlp' in Settings to try again.",
+                action={"label": "Open Settings", "url": "/settings"},
+                dedupe_key="install-failed:yt-dlp",
+            )
         # Progress callbacks fire per 256 KiB chunk; writing the state
         # file every time would hammer the disk, so throttle file writes
         # to ~2/s (state changes always write).

@@ -54,8 +54,10 @@ from clipforge.db import (
     get_session,
     init_db,
 )
+from clipforge.errors import JobCancelled, plain_error
 from clipforge.highlights import Candidate, find_candidates
 from clipforge.ingest import IngestError, ingest_local, ingest_youtube
+from clipforge.job_control import JobControl, drop_control, get_control
 from clipforge.licensing import build_attribution_text, merge_records, record_from_obj
 from clipforge.live import (
     LIVE_DEFAULT_DURATION_S,
@@ -66,6 +68,7 @@ from clipforge.live import (
     clear_live_cancel,
     live_cancel_event,
 )
+from clipforge.notifications import notify
 from clipforge.reframe import compute_crop_path
 from clipforge.render import RenderError, render_clip
 from clipforge.retention import adjust_candidate_scores, feedback_from_points
@@ -73,6 +76,7 @@ from clipforge.seo import generate_all as generate_all_seo
 from clipforge.thumbnails import ThumbnailError, generate_thumbnails
 from clipforge.transcribe import Transcript, transcribe
 from clipforge.workflow import (
+    _STAGE_STATUS,
     FFMPEG_DOWNLOAD_URL,
     MIN_SCORE_THRESHOLD,
     MissingDependencyError,
@@ -84,10 +88,48 @@ from clipforge.workflow import (
 RUNNABLE_STATUSES = {
     JobStatus.PENDING.value,
     JobStatus.QUEUED.value,
+    # The dispatcher (clipforge.job_queue) claims a job by setting it
+    # to "running" before calling run_job — a direct run_job call on a
+    # claimed job is the dispatcher itself, not a duplicate.
+    JobStatus.RUNNING.value,
     JobStatus.FAILED.value,
     JobStatus.BLOCKED.value,
 }
 TERMINAL_RUN_STATUSES = ("done", "failed", "blocked", "cancelled")
+
+# Job statuses that mean "this job is actively being worked on"
+# (claimed by the dispatcher or inside a stage). The queue treats
+# these as the single active job; nothing else may start.
+ACTIVE_JOB_STATUSES = {
+    JobStatus.RUNNING.value,
+    JobStatus.TRANSCRIBING.value,
+    JobStatus.SCORING.value,
+    JobStatus.RENDERING.value,
+}
+
+
+def queue_order_key(job: Job) -> tuple:
+    """Queue order: user-started runs first, then oldest first.
+
+    ``queue_priority`` (1 = user-started via POST /jobs/{id}/run or
+    /worker/run-next, 0 = batch / agent) lives in ``meta_json`` so the
+    order survives a server restart — it is DB state, not memory.
+    """
+    meta = dict(job.meta_json or {})
+    # created_at comes back naive from SQLite but aware from a
+    # freshly-built object (the Python-side default is UTC-aware) —
+    # and None when the row was never flushed. Normalise to naive so
+    # sorting never raises "can't compare offset-naive and
+    # offset-aware datetimes".
+    created = job.created_at
+    if created is None:
+        created = datetime.min
+    elif created.tzinfo is not None:
+        created = created.replace(tzinfo=None)
+    return (
+        -int(meta.get("queue_priority") or 0),
+        created,
+    )
 
 
 def _utcnow() -> datetime:
@@ -134,16 +176,27 @@ def _run_out(run: WorkerRun, job: Job) -> dict:
 
 
 def queue_summary(session: Session, limit_runs: int = 10) -> dict:
-    """What the worker is doing, what is queued, what ran last."""
+    """What the worker is doing, what is queued, what ran last.
+
+    ``queued`` entries carry their honest ``queue_position`` (1-based,
+    user-started runs first, then oldest first) so the UI can say
+    "Queued — position N" instead of pretending the job is running.
+    """
     running = (
         session.query(WorkerRun)
         .filter_by(status="running")
         .order_by(WorkerRun.started_at.asc())
         .all()
     )
-    queued = (
+    queued = sorted(
         session.query(Job)
         .filter(Job.status.in_([JobStatus.PENDING.value, JobStatus.QUEUED.value]))
+        .all(),
+        key=queue_order_key,
+    )
+    paused = (
+        session.query(Job)
+        .filter_by(status=JobStatus.PAUSED.value)
         .order_by(Job.created_at.asc())
         .all()
     )
@@ -162,13 +215,84 @@ def queue_summary(session: Session, limit_runs: int = 10) -> dict:
                 "title": j.title,
                 "source_type": j.source_type,
                 "status": j.status,
+                "queue_position": i + 1,
+                "priority": int(dict(j.meta_json or {}).get("queue_priority") or 0),
                 "created_at": j.created_at.isoformat() if j.created_at else None,
             }
-            for j in queued
+            for i, j in enumerate(queued)
+        ],
+        "paused": [
+            {
+                "id": j.id,
+                "title": j.title,
+                "source_type": j.source_type,
+                "status": j.status,
+                "created_at": j.created_at.isoformat() if j.created_at else None,
+            }
+            for j in paused
         ],
         "next": ({"id": queued[0].id, "title": queued[0].title} if queued else None),
         "recent_runs": [_run_out(r, session.get(Job, r.job_id)) for r in recent],
     }
+
+
+def _gate(session: Session, job: Job, control: JobControl, stage: str) -> None:
+    """Pause / cancel checkpoint between stages (and between clips).
+
+    While paused the job carries status ``paused`` and a ``paused``
+    stage event, so the UI shows the real state instead of a frozen
+    progress bar. On resume the job goes back to its stage status and
+    the run continues from the next stage — nothing is re-done. A
+    cancel raises :class:`JobCancelled`, which the caller turns into
+    a ``cancelled`` job (not a failure).
+    """
+    if control.is_paused:
+        job.status = JobStatus.PAUSED.value
+        session.add(
+            JobStageEvent(
+                job_id=job.id,
+                stage=stage,
+                status="paused",
+                progress_pct=float(dict(job.meta_json or {}).get("progress_pct") or 0.0),
+                message="Paused by the user — resume to continue from here.",
+            )
+        )
+        session.commit()
+    control.wait_if_paused()
+    if job.status == JobStatus.PAUSED.value:
+        job.status = _STAGE_STATUS.get(stage, JobStatus.RUNNING.value)
+        session.commit()
+
+
+def _set_job_error(session: Session, job: Job, error: dict) -> None:
+    """Store a plain-language failure on the job (no tracebacks).
+
+    ``job.error`` is the plain message; ``error_title`` /
+    ``error_action`` in ``meta_json`` let the UI show the reason and
+    what to do next without parsing anything.
+    """
+    job.error = error["message"]
+    meta = dict(job.meta_json or {})
+    meta["error_title"] = error["title"]
+    meta["error_action"] = error["action"]
+    meta["error_code"] = error["code"]
+    job.meta_json = meta
+    session.commit()
+
+
+def _notify_job(session: Session, job: Job, level: str, title: str, message: str) -> None:
+    """Best-effort notification: a failed notify must never fail a job."""
+    try:
+        notify(
+            session,
+            level,
+            title,
+            message,
+            action={"label": "Open job", "url": f"/jobs/{job.id}"},
+            job_id=job.id,
+        )
+    except Exception:
+        pass
 
 
 def run_next_queued(session: Session, data_dir: str | Path | None = None) -> dict | None:
@@ -184,7 +308,12 @@ def run_next_queued(session: Session, data_dir: str | Path | None = None) -> dic
     return run_job(session, job.id, data_dir=data_dir)
 
 
-def run_job(session: Session, job_id: str, data_dir: str | Path | None = None) -> dict:
+def run_job(
+    session: Session,
+    job_id: str,
+    data_dir: str | Path | None = None,
+    control: JobControl | None = None,
+) -> dict:
     """Run one job synchronously through every stage. Returns a summary.
 
     Raises :class:`ValueError` if the job does not exist or is not in a
@@ -192,6 +321,17 @@ def run_job(session: Session, job_id: str, data_dir: str | Path | None = None) -
     Stage failures are recorded on the job, not raised — except a
     missing-dependency block, which is also recorded (status
     ``blocked``) and then returned in the summary.
+
+    ``control`` (v0.9.0 job queue) carries the pause / cancel flags
+    and the live ffmpeg / yt-dlp process. When the queue runs the job
+    it passes the job's control object; a direct call creates one, so
+    the pipeline always honours pause / cancel the same way.
+
+    Every terminal outcome writes a notification (job failed /
+    blocked / cancelled / finished) so nothing fails silently, and
+    every failure stores a plain-language ``job.error`` (what failed,
+    why, what to do next) — never a traceback or ``ClassName:``
+    prefix.
     """
     job = session.get(Job, job_id)
     if job is None:
@@ -200,6 +340,7 @@ def run_job(session: Session, job_id: str, data_dir: str | Path | None = None) -
         raise ValueError(
             f"job {job_id} is '{job.status}' — only {sorted(RUNNABLE_STATUSES)} jobs can run"
         )
+    control = control or get_control(job.id)
 
     data = _data_dir(data_dir)
     job_dir = _job_dir(data, job.id)
@@ -208,13 +349,17 @@ def run_job(session: Session, job_id: str, data_dir: str | Path | None = None) -
     caption_style = meta.get("caption_style") or "bold-pop"
     transcript_text = meta.get("transcript_text")
     started = time.time()
+    title = job.title or job.id
 
     run = WorkerRun(job_id=job.id, status="running", outcome="started")
     session.add(run)
     session.commit()
     tracker = StageTracker(session, job, data_dir=data)
+    job.status = JobStatus.RUNNING.value
     job.error = None
     meta.pop("blocked_by", None)
+    for key in ("error_title", "error_action", "error_code"):
+        meta.pop(key, None)
     job.meta_json = meta
     session.commit()
 
@@ -230,23 +375,26 @@ def run_job(session: Session, job_id: str, data_dir: str | Path | None = None) -
             caption_style,
             transcript_text,
             summary,
+            control,
         )
-    except LiveCaptureCancelled as exc:
-        # The user cancelled a live capture mid-recording: the run is
-        # cancelled (not failed) and the partial recording was deleted.
+    except (LiveCaptureCancelled, JobCancelled) as exc:
+        # The user cancelled: the run is cancelled (not failed) and a
+        # partial live recording was deleted by the capture step.
+        job.status = JobStatus.CANCELLED.value
+        job.error = str(exc)
+        session.commit()
         _close_run(session, run, "cancelled", str(exc), started)
-        summary.update(
-            {
-                "status": JobStatus.CANCELLED.value,
-                "error": str(exc),
-            }
-        )
+        _notify_job(session, job, "info", "Job cancelled", f"“{title}” was cancelled.")
+        summary.update({"status": JobStatus.CANCELLED.value, "error": str(exc)})
         return summary
     except LiveCaptureError as exc:
         # Already recorded as failed on the job with the plain message
         # by _run_stages — keep the message plain (no exception type
         # prefix) and close the run the same way.
         _close_run(session, run, "failed", str(exc), started)
+        _notify_job(
+            session, job, "error", "Job failed", f"“{title}” failed: {job.error or exc}"
+        )
         summary.update(
             {
                 "status": JobStatus.FAILED.value,
@@ -257,6 +405,13 @@ def run_job(session: Session, job_id: str, data_dir: str | Path | None = None) -
     except MissingDependencyError as exc:
         # Already recorded as blocked on the job + stage by _run_stages.
         _close_run(session, run, "blocked", str(exc), started)
+        _notify_job(
+            session,
+            job,
+            "warning",
+            "Job blocked — something is missing",
+            f"“{title}” is waiting: {exc.dependency} is missing. {exc.required_action}",
+        )
         summary.update(
             {
                 "status": JobStatus.BLOCKED.value,
@@ -266,12 +421,17 @@ def run_job(session: Session, job_id: str, data_dir: str | Path | None = None) -
         )
         return summary
     except Exception as exc:  # unexpected failure — job failed, run failed
+        error = plain_error(exc)
         job.status = JobStatus.FAILED.value
-        job.error = f"{type(exc).__name__}: {exc}"
-        session.commit()
+        _set_job_error(session, job, error)
         _close_run(session, run, "failed", job.error, started)
+        _notify_job(
+            session, job, "error", "Job failed", f"“{title}” failed: {error['message']}"
+        )
         summary.update({"status": JobStatus.FAILED.value, "error": job.error})
         return summary
+    finally:
+        drop_control(job.id)
 
     _close_run(
         session,
@@ -280,6 +440,13 @@ def run_job(session: Session, job_id: str, data_dir: str | Path | None = None) -
         f"rendered {summary.get('rendered_count', 0)}/"
         f"{summary.get('candidate_count', 0)} clips; job in review",
         started,
+    )
+    _notify_job(
+        session,
+        job,
+        "success",
+        "Job finished",
+        f"“{title}” finished: {summary.get('rendered_count', 0)} clip(s) ready for review.",
     )
     summary["status"] = job.status
     return summary
@@ -305,9 +472,11 @@ def _run_stages(
     caption_style: str,
     transcript_text: str | None,
     summary: dict,
+    control: JobControl,
 ) -> tuple[object, Transcript, list[Candidate]]:
     """The six stages. Raises MissingDependencyError on a blocked step."""
     # ---------------------------------------------------------- 1. ingest
+    _gate(session, job, control, "ingest")
     tracker.begin("ingest", f"ingest {job.source_type} source")
     try:
         if job.source_type == "youtube":
@@ -323,6 +492,7 @@ def _run_stages(
                 own_content=bool(job.own_content),
                 out_dir=data / "uploads",
                 data_dir=data,
+                control=control,
             )
         elif job.source_type == "live":
             # Live capture (v0.7.0): record a bounded segment of the
@@ -398,7 +568,7 @@ def _run_stages(
     except IngestError as exc:
         tracker.fail("ingest", str(exc), error_code="ingest_failed")
         job.status = JobStatus.FAILED.value
-        job.error = str(exc)
+        _set_job_error(session, job, plain_error(exc, "ingest"))
         session.commit()
         raise
     tracker.finish(
@@ -410,6 +580,7 @@ def _run_stages(
     session.commit()
 
     # ------------------------------------------------------ 2. transcribe
+    _gate(session, job, control, "transcribe")
     tracker.begin("transcribe", "transcribe to word-level transcript")
     demo = False
     try:
@@ -442,6 +613,10 @@ def _run_stages(
             demo = transcript.engine == "fallback-text"
     except MissingDependencyError as exc:
         tracker.block("transcribe", exc, detail={"engine": "none"})
+        raise
+    except JobCancelled:
+        # Cancel must never be re-labelled as a failure: the caller
+        # turns it into a "cancelled" job, not a failed one.
         raise
     except RuntimeError as exc:
         # transcribe() raises RuntimeError when no backend is available.
@@ -480,7 +655,7 @@ def _run_stages(
             raise dep
         tracker.fail("transcribe", str(exc), error_code="transcribe_failed")
         job.status = JobStatus.FAILED.value
-        job.error = str(exc)
+        _set_job_error(session, job, plain_error(exc, "transcribe"))
         session.commit()
         raise
     _write_artifact(
@@ -501,6 +676,7 @@ def _run_stages(
     )
 
     # ---------------------------------------------------------- 3. score
+    _gate(session, job, control, "score")
     tracker.begin("score", "score viral moments")
     stored = session.query(ClipCandidate).filter_by(job_id=job.id).all()
     artifact = _read_artifact(job_dir, "candidates.json")
@@ -643,6 +819,7 @@ def _run_stages(
         summary["auto_approved"] = auto_approved
 
     # --------------------------------------------------------- 4. render
+    _gate(session, job, control, "render")
     tracker.begin("render", f"render {len(candidates)} clips to 9:16")
     try:
         require_tool(
@@ -663,6 +840,10 @@ def _run_stages(
         session.query(ClipCandidate).filter_by(job_id=job.id).order_by(ClipCandidate.n.asc()).all()
     )
     for row in stored_rows:
+        # Pause / cancel between clips: a clip already rendering
+        # finishes first (ffmpeg cannot be paused mid-render), then
+        # the job waits here until resumed — or stops if cancelled.
+        _gate(session, job, control, "render")
         cand = Candidate(
             start_word_index=0,
             end_word_index=0,
@@ -690,11 +871,16 @@ def _run_stages(
                 style=caption_style,
                 words=transcript.words,
                 plan=plan,
+                control=control,
             )
             row.file_path = str(result.path)
             session.commit()
             rendered += 1
             render_detail.append({"n": row.n, "status": "rendered", "file": str(result.path)})
+        except JobCancelled:
+            # Cancel mid-render (ffmpeg killed): stop the whole job,
+            # not just this clip — the caller records "cancelled".
+            raise
         except (RenderError, Exception) as exc:
             render_detail.append({"n": row.n, "status": "failed", "error": str(exc)})
     summary["rendered_count"] = rendered
@@ -706,8 +892,16 @@ def _run_stages(
             detail={"clips": render_detail},
         )
         job.status = JobStatus.FAILED.value
-        job.error = "all clips failed to render: " + "; ".join(
-            d.get("error", "?") for d in render_detail
+        _set_job_error(
+            session,
+            job,
+            {
+                "title": "Rendering failed",
+                "message": "All clips failed to render: "
+                + "; ".join(d.get("error", "?") for d in render_detail),
+                "action": "Retry the job. If it keeps failing, try a shorter clip.",
+                "code": "render_failed",
+            },
         )
         session.commit()
         raise RuntimeError(job.error)
@@ -752,6 +946,7 @@ def _run_stages(
     summary["thumbnails"] = thumb_detail
 
     # ------------------------------------------------------------ 5. seo
+    _gate(session, job, control, "seo")
     tracker.begin("seo", "generate per-platform SEO variants")
     seo_count = 0
     keyword = (job.title or "").split(":")[0].strip() or "clip"
@@ -854,6 +1049,8 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "ACTIVE_JOB_STATUSES",
+    "queue_order_key",
     "run_job",
     "run_next_queued",
     "queue_summary",

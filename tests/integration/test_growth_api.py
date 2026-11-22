@@ -175,9 +175,18 @@ def test_growth_populated_from_published_posts(client, monkeypatch):
     assert body["totals"]["clips_with_stats"] == 6
     assert body["totals"]["total_views"] == 21000
     rows = {r["posted_video_id"]: r for r in body["posted_clips"]}
-    # 6000 views over ~2 days -> ~3000 views/day (exact value depends on
-    # the real clock at test time, so check the range, not the digit).
-    assert 2800.0 < rows["vid-5"]["views_per_day"] < 3300.0
+    # The seed freezes NOW at 2026-11-21, but the endpoint divides by
+    # the REAL clock — so the expected value must be derived from the
+    # real now, not hardcoded: a fixed 2800–3300 range decays as days
+    # pass (6000 views over ~2 days on Nov 21 is ~1900/day by Nov 22).
+    # vid-5 was posted at (NOW - 2 days) with hour 20.
+    posted_at = (NOW - timedelta(days=2)).replace(
+        hour=20, minute=0, second=0, microsecond=0
+    )
+    elapsed_days = max(
+        (datetime.now(UTC) - posted_at).total_seconds() / 86400.0, 1.0 / 24.0
+    )
+    assert rows["vid-5"]["views_per_day"] == round(6000 / elapsed_days, 1)
     assert rows["vid-5"]["engagement_pct"] == 5.0
     assert rows["vid-5"]["stats_status"] == "live"
     # No previous snapshot yet -> trend is "new", not invented.

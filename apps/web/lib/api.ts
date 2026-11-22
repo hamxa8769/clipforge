@@ -158,6 +158,11 @@ export interface Job {
   stage: string | null; progress_pct: number; eta_s: number | null; demo: boolean; blocked_by: string | null;
   /** Failed stage + run timing (null when the job never ran). */ failed_stage: string | null;
   started_at: string | null; finished_at: string | null; duration_s: number | null;
+  /** v0.9.0 job queue: honest queue position (null unless pending /
+   * queued), user-priority flag, and the plain-language failure
+   * (title / what-to-do / code) when the job failed. */
+  queue_position: number | null; queue_priority: number;
+  error_title: string | null; error_action: string | null; error_code: string | null;
   stages: StageEvent[]; worker_runs: WorkerRun[];
   /** Licence record of the job's source (v0.7.0): canonical key, original
    * title/channel, and the ready-made attribution credit (null for own
@@ -341,6 +346,11 @@ export function normalizeJob(raw: unknown): Job {
     started_at: asOptString(r.started_at),
     finished_at: asOptString(r.finished_at),
     duration_s: asOptNumber(r.duration_s),
+    queue_position: typeof r.queue_position === "number" ? r.queue_position : null,
+    queue_priority: typeof r.queue_priority === "number" ? r.queue_priority : 0,
+    error_title: asOptString(r.error_title),
+    error_action: asOptString(r.error_action),
+    error_code: asOptString(r.error_code),
     stages: Array.isArray(r.stages) ? r.stages.map(normalizeStageEvent) : [],
     worker_runs: Array.isArray(r.worker_runs) ? r.worker_runs.map(normalizeWorkerRun) : [],
     source_license: normalizeVideoLicense(r.source_license),

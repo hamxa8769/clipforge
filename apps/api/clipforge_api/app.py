@@ -177,6 +177,7 @@ from clipforge.db import (
     session_factory,
 )
 from clipforge.ffmpeg_install import FfmpegInstaller, ensure_bundled_on_path
+from clipforge.job_queue import get_job_queue
 from clipforge.licensing import (
     append_attribution,
     build_attribution_text,
@@ -194,6 +195,7 @@ from clipforge.llm import (
 )
 from clipforge.monetization import progress as monetization_progress
 from clipforge.niches import PRESET_NAMES
+from clipforge.notifications import notify_best_effort
 from clipforge.publishing import meta as meta_adapter
 from clipforge.publishing import tiktok as tiktok_adapter
 from clipforge.publishing import youtube as youtube_adapter
@@ -213,7 +215,10 @@ from clipforge.thumbnails import (
     generate_thumbnails,
     regenerate_thumbnail,
 )
-from clipforge.worker import RUNNABLE_STATUSES, queue_summary, run_job, run_next_queued
+from clipforge.worker import (
+    RUNNABLE_STATUSES,
+    queue_order_key,
+)
 from clipforge.workflow import (
     check_dependencies,
     estimate_eta_s,
@@ -496,6 +501,26 @@ app.include_router(monetization_router)
 app.include_router(publish_router)
 
 
+def _queue_position(db: Session, job: Job) -> int | None:
+    """1-based queue position for a pending / queued job, else None.
+
+    Same order as the dispatcher (user-started runs first, then
+    oldest first — see clipforge.worker.queue_order_key).
+    """
+    if job.status not in {JobStatus.PENDING.value, JobStatus.QUEUED.value}:
+        return None
+    queued = sorted(
+        db.query(Job)
+        .filter(Job.status.in_([JobStatus.PENDING.value, JobStatus.QUEUED.value]))
+        .all(),
+        key=queue_order_key,
+    )
+    for i, queued_job in enumerate(queued):
+        if queued_job.id == job.id:
+            return i + 1
+    return None
+
+
 def _job_out(job: Job, db: Session, detail: bool = False) -> dict:
     """Job summary. ``detail=True`` adds the live-workflow view: stage
     history, worker runs, alternates below the score threshold."""
@@ -527,6 +552,13 @@ def _job_out(job: Job, db: Session, detail: bool = False) -> dict:
         "eta_s": estimate_eta_s(db, job),
         "demo": bool(meta.get("demo", False)),
         "blocked_by": meta.get("blocked_by"),
+        # v0.9.0 job queue: honest queue position + the plain-language
+        # failure (title / what-to-do) when the job failed.
+        "queue_position": _queue_position(db, job),
+        "queue_priority": int(meta.get("queue_priority") or 0),
+        "error_title": meta.get("error_title"),
+        "error_action": meta.get("error_action"),
+        "error_code": meta.get("error_code"),
     }
     if detail:
         events = stage_events_for(db, job.id)
@@ -1025,13 +1057,20 @@ def get_job_logs(job_id: str, db: Session = Depends(get_db)):
 
 
 @app.post("/jobs/{job_id}/run")
-def run_job_endpoint(job_id: str, db: Session = Depends(get_db)):
-    """Run a job through the worker now (synchronous) and return its detail.
+def run_job_endpoint(job_id: str, wait: bool = Query(default=True), db: Session = Depends(get_db)):
+    """Queue a job and run it through the worker (v0.9.0 job queue).
 
-    Only pending / queued / failed / blocked jobs can run; anything
-    else is 409. A missing dependency leaves the job ``blocked`` with
-    ``blocked_by`` naming it — the response is still 200 with the job
-    detail, because the block is a state, not a request error.
+    The job is enqueued with user priority (1) and the dispatcher
+    runs it as soon as the currently active job finishes — a second
+    job started while one runs QUEUES, never runs in parallel on the
+    same ffmpeg / yt-dlp. ``wait=true`` (default) blocks until the job
+    finishes and returns its detail, exactly like the old synchronous
+    endpoint; ``wait=false`` returns 202 at once with the job's
+    ``queue_position`` ("Queued — position N"). Only pending / queued /
+    failed / blocked jobs can run; anything else is 409. A missing
+    dependency leaves the job ``blocked`` with ``blocked_by`` naming
+    it — the response is still 200 with the job detail, because the
+    block is a state, not a request error.
     """
     job = _get_or_404(db, Job, job_id, "job")
     if job.status not in RUNNABLE_STATUSES:
@@ -1039,13 +1078,21 @@ def run_job_endpoint(job_id: str, db: Session = Depends(get_db)):
             409,
             f"job is '{job.status}' — only {sorted(RUNNABLE_STATUSES)} jobs can run",
         )
-    run_job(db, job_id)
+    queue = get_job_queue()
+    try:
+        queue.enqueue(db, job_id, priority=1)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not wait:
+        db.refresh(job)
+        return _job_out(job, db, detail=True)
+    queue.wait_for(job_id)
     db.refresh(job)
     return _job_out(job, db, detail=True)
 
 
 @app.post("/jobs/{job_id}/retry")
-def retry_job(job_id: str, db: Session = Depends(get_db)):
+def retry_job(job_id: str, wait: bool = Query(default=True), db: Session = Depends(get_db)):
     """Reset a failed / blocked job to pending and run it again.
 
     Old candidates + stored SEO are dropped (they are re-derived);
@@ -1053,6 +1100,8 @@ def retry_job(job_id: str, db: Session = Depends(get_db)):
     resumes scoring from the stage artifact when one exists
     (``data/jobs/<id>/candidates.json``) and transcription from the
     sha256 transcript cache — it never re-does completed work blindly.
+    The retry goes through the same queue as a fresh run (user
+    priority); ``wait=false`` returns at once with the queue position.
     """
     job = _get_or_404(db, Job, job_id, "job")
     if job.status not in {JobStatus.FAILED.value, JobStatus.BLOCKED.value}:
@@ -1074,33 +1123,76 @@ def retry_job(job_id: str, db: Session = Depends(get_db)):
         if k in {"top_n", "caption_style", "transcript_text"}
     }
     db.commit()
-    run_job(db, job_id)
+    queue = get_job_queue()
+    queue.enqueue(db, job_id, priority=1)
+    if not wait:
+        db.refresh(job)
+        return _job_out(job, db, detail=True)
+    queue.wait_for(job_id)
     db.refresh(job)
     return _job_out(job, db, detail=True)
 
 
-@app.post("/jobs/{job_id}/cancel")
-def cancel_job(job_id: str, db: Session = Depends(get_db)):
-    """Cancel a job that has not started (or that failed / blocked).
+@app.post("/jobs/{job_id}/pause")
+def pause_job(job_id: str, db: Session = Depends(get_db)):
+    """Pause a queued or running job (v0.9.0 job control).
 
-    A running in-process job cannot be interrupted mid-request; cancel
-    applies to pending / queued / failed / blocked jobs. Any orphan
-    ``running`` worker run for the job is closed as cancelled.
+    A running job pauses between stages / between clips — a clip
+    already rendering finishes first, then the job waits in
+    ``paused`` until resumed. A queued job waits in ``paused`` and
+    the dispatcher skips it. 409 when the job is not queued / running.
     """
     job = _get_or_404(db, Job, job_id, "job")
-    if job.status not in {
-        JobStatus.PENDING.value,
-        JobStatus.QUEUED.value,
-        JobStatus.FAILED.value,
-        JobStatus.BLOCKED.value,
-    }:
-        raise HTTPException(409, f"job is '{job.status}' — cannot cancel from here")
-    job.status = JobStatus.CANCELLED.value
-    db.query(WorkerRun).filter_by(job_id=job.id, status="running").update(
-        {"status": "cancelled", "outcome": "cancelled by user"}
-    )
-    db.commit()
-    return _job_out(job, db, detail=True)
+    try:
+        result = get_job_queue().pause(db, job_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    db.refresh(job)
+    out = _job_out(job, db, detail=True)
+    out["control"] = result
+    return out
+
+
+@app.post("/jobs/{job_id}/resume")
+def resume_job(job_id: str, db: Session = Depends(get_db)):
+    """Resume a paused job (v0.9.0 job control).
+
+    A job paused mid-run continues from the next stage / clip —
+    nothing is re-done. A job paused while queued goes back to
+    ``queued`` and the dispatcher picks it up in order. 409 when the
+    job is not paused.
+    """
+    job = _get_or_404(db, Job, job_id, "job")
+    try:
+        result = get_job_queue().resume(db, job_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    db.refresh(job)
+    out = _job_out(job, db, detail=True)
+    out["control"] = result
+    return out
+
+
+@app.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str, db: Session = Depends(get_db)):
+    """Cancel a job — queued, paused, or running (v0.9.0 job control).
+
+    A queued / paused / failed / blocked job is cancelled at once. A
+    running job is told to stop: the ffmpeg / yt-dlp process is
+    killed and the job lands in ``cancelled`` as soon as the current
+    step unwinds — the response carries ``cancelling: true`` until
+    the worker confirms it (poll ``GET /jobs/{id}``). A job in review
+    / ready cannot be cancelled from here (409).
+    """
+    job = _get_or_404(db, Job, job_id, "job")
+    try:
+        result = get_job_queue().cancel(db, job_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    db.refresh(job)
+    out = _job_out(job, db, detail=True)
+    out["cancelling"] = result["status"] == "cancelling"
+    return out
 
 
 @app.get("/jobs/{job_id}/candidates")
@@ -2252,6 +2344,14 @@ def ffmpeg_install(force: bool = Query(default=False)):
     """
     result = _ffmpeg_installer().start_install(force=force)
     if result["state"] == "unsupported":
+        notify_best_effort(
+            "error",
+            "FFmpeg install failed",
+            "FFmpeg cannot be installed automatically on this computer: "
+            f"{result['error'] or result['message']} Install it manually "
+            "from ffmpeg.org, then retry.",
+            action={"label": "Open Settings", "url": "/settings"},
+        )
         raise HTTPException(422, result["error"] or result["message"])
     return result
 
@@ -2310,6 +2410,14 @@ def ytdlp_install(force: bool = Query(default=False)):
     """
     result = _ytdlp_installer().start_install(force=force)
     if result["state"] == "unsupported":
+        notify_best_effort(
+            "error",
+            "yt-dlp install failed",
+            "yt-dlp cannot be installed automatically on this computer: "
+            f"{result['error'] or result['message']} Install it manually, "
+            "then retry.",
+            action={"label": "Open Settings", "url": "/settings"},
+        )
         raise HTTPException(422, result["error"] or result["message"])
     return result
 
@@ -2417,25 +2525,30 @@ def get_scheduler_status(db: Session = Depends(get_db)):
 # ------------------------------------------------------------------ worker queue
 @app.get("/worker/queue")
 def get_worker_queue(db: Session = Depends(get_db)):
-    """Background worker state: running jobs, queued jobs, what is next,
-    and recent runs with outcome + duration. The queue is the jobs
-    table itself (DB-backed, not in-process) — see clipforge.worker."""
-    return queue_summary(db)
+    """Background worker state: the active job, queued jobs with honest
+    positions (user-started runs first, then oldest first), paused
+    jobs, what is next, and recent runs with outcome + duration. The
+    queue is the jobs table itself (DB-backed, not in-process) — see
+    clipforge.job_queue; the dispatcher runs one job at a time."""
+    return get_job_queue().queue_state(db)
 
 
 @app.post("/worker/run-next")
 def run_next_job_endpoint(db: Session = Depends(get_db)):
     """Run the oldest queued/pending job now (synchronous).
 
-    Returns the job detail when a job ran, or ``{"ran": null}`` when
-    the queue is empty. A missing dependency leaves the job ``blocked``
-    with ``blocked_by`` — still a 200, the block is a state.
+    The job goes through the same queue as a user-started run (user
+    priority) and this call waits until it finishes. Returns the job
+    detail when a job ran, or ``{"ran": null}`` when the queue is
+    empty. A missing dependency leaves the job ``blocked`` with
+    ``blocked_by`` — still a 200, the block is a state.
     """
-    result = run_next_queued(db)
+    queue = get_job_queue()
+    result = queue.run_next(db)
     if result is None:
-        return {"ran": None, "queue": queue_summary(db)}
+        return {"ran": None, "queue": queue.queue_state(db)}
     job = _get_or_404(db, Job, result["job_id"], "job")
-    return {"ran": _job_out(job, db, detail=True), "queue": queue_summary(db)}
+    return {"ran": _job_out(job, db, detail=True), "queue": queue.queue_state(db)}
 
 
 # ------------------------------------------------------------------ automation

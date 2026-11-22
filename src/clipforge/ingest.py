@@ -27,6 +27,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from clipforge.job_control import JobControl, popen_kwargs, wait_for_process
 from clipforge.workflow import ffmpeg_missing_message
 from clipforge.ytdlp_install import resolve_yt_dlp_path, ytdlp_missing_message
 
@@ -197,6 +198,7 @@ def ingest_youtube(
     out_dir: str | Path = "data/uploads",
     cookies_from_browser: str | None = None,
     data_dir: str | Path | None = None,
+    control: JobControl | None = None,
 ) -> SourceInfo:
     """Download a YouTube video **only for the caller's own content**.
 
@@ -236,9 +238,23 @@ def ingest_youtube(
     if cookies_from_browser:
         cmd += ["--cookies-from-browser", cookies_from_browser]
     cmd.append(url)
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
-    if proc.returncode != 0:
-        raise IngestError(f"yt-dlp failed for {url!r}: {proc.stderr.strip()[-500:]}")
+    if control is None:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+        returncode, stderr = proc.returncode, proc.stderr
+    else:
+        # v0.9.0: cancellable download — a user cancel kills yt-dlp
+        # mid-download and raises JobCancelled instead of waiting.
+        popen = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **popen_kwargs()
+        )
+        control.register_process(popen)
+        try:
+            returncode = wait_for_process(popen, control, timeout=3600)
+        finally:
+            control.register_process(None)
+        _, stderr = popen.communicate()
+    if returncode != 0:
+        raise IngestError(f"yt-dlp failed for {url!r}: {stderr.strip()[-500:]}")
     # Newest mp4 in out_dir from this run.
     candidates = sorted(dest.glob("*.mp4"), key=lambda p: p.stat().st_mtime)
     if not candidates:

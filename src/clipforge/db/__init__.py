@@ -54,6 +54,12 @@ def _new_id() -> str:
 class JobStatus(enum.StrEnum):
     PENDING = "pending"
     QUEUED = "queued"
+    # v0.9.0 job queue (see clipforge.job_queue): a job the dispatcher
+    # has claimed carries "running" until the first stage sets its
+    # stage status (transcribing / scoring / rendering); "paused" is
+    # set while the user has paused it (running or queued).
+    RUNNING = "running"
+    PAUSED = "paused"
     TRANSCRIBING = "transcribing"
     SCORING = "scoring"
     RENDERING = "rendering"
@@ -576,6 +582,9 @@ def _ensure_columns(engine) -> None:
     """
     # table -> {column: SQL type}
     missing: dict[str, dict[str, str]] = {
+        "notifications": {
+            "job_id": "VARCHAR(32)",
+        },
         "jobs": {
             "source_license": "VARCHAR(60)",
             "source_title": "TEXT",
