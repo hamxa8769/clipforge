@@ -100,9 +100,9 @@ for _candidate in (
     if (_candidate / "clipforge").is_dir() and str(_candidate) not in sys.path:
         sys.path.insert(0, str(_candidate))
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
@@ -515,6 +515,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# ------------------------------------------------------------------ hardening
+# v0.9.3: one bad request must never kill the server. Starlette
+# already turns an unhandled handler exception into a 500, but this
+# handler makes that explicit and safe: it logs the full traceback
+# (to stderr, which the desktop shell pipes into
+# clipforge-server.log — the log the splash page shows) and answers a
+# JSON 500, so the process stays up and the next request works.
+# HTTPException / validation errors keep their own handlers — this
+# only catches what nothing else handled. The handler itself is
+# guarded: a logging failure must never turn a 500 into a second
+# crash.
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    try:
+        _log.exception("unhandled error on %s %s", request.method, request.url.path)
+    except Exception:  # noqa: BLE001  (logging must never raise here)
+        pass
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Internal server error. The server is still running — "
+            "see the server log for details.",
+            "error": "internal_error",
+        },
+    )
+
 # --- v0.5.0 worker 3: setup-wizard state router (NEW FILE
 # apps/api/clipforge_api/setup.py — GET/POST /api/setup/state only).
 # It owns its own setup.json; it does NOT touch the agent engine or the
@@ -861,7 +888,7 @@ def _effective_dry_run() -> bool:
 
 
 @app.get("/health")
-def health():
+async def health():
     """Liveness probe only — no keyring, settings file, or database.
 
     Polled every 250 ms while the desktop waits for the server (and
@@ -870,6 +897,14 @@ def health():
     saved (PUT /settings). The field names are part of the contract:
     the Rust shell checks for ``"status"`` + ``ok`` and ``"version"``,
     the web status bar reads ``dry_run``.
+
+    Async on purpose (v0.9.3): a sync endpoint runs on uvicorn's
+    40-thread pool, and a pool starved by long ``wait=true`` job calls
+    would stop answering /health even though the process is alive —
+    the "server looks dead while it is alive" partial outage. An
+    async endpoint runs on the event loop instead, so it keeps
+    answering while pool threads are busy. The body does no I/O, so
+    async is safe here.
     """
     return {
         "status": "ok",
@@ -997,6 +1032,11 @@ def media_upload(filename: str):
 
 
 # ------------------------------------------------------------------ jobs
+# v0.9.3: upload streaming chunk (see ``upload_job``) — the whole
+# file is never held in RAM, so peak upload memory is one chunk.
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+
 @app.post("/jobs", status_code=201)
 def create_job(payload: JobCreate, db: Session = Depends(get_db)):
     """Create a clip job — and start it (v0.9.0 auto-run).
@@ -1075,6 +1115,14 @@ async def upload_job(
     ``source_path`` points at it. YouTube uploads are not accepted
     here — use POST /jobs with source_type=youtube + the declaration.
 
+    Streamed to disk in 1 MiB chunks (v0.9.3): the old code did
+    ``raw = await file.read()`` and held the WHOLE upload in RAM — a
+    multi-GB upload on a low-RAM Windows machine could OOM-kill the
+    whole server process with no traceback. Peak memory here is one
+    chunk. The size cap is enforced while streaming (the partial file
+    is deleted when it trips), so an over-cap upload never creates a
+    job and never leaves a partial file behind.
+
     Like POST /jobs, the job is enqueued at once (v0.9.0 auto-run).
     """
     from clipforge.ingest import MAX_SOURCE_BYTES
@@ -1082,15 +1130,28 @@ async def upload_job(
     name = Path(file.filename or "upload").name
     if Path(name).suffix.lower() not in {".mp4", ".mov"}:
         raise HTTPException(422, "only .mp4 / .mov uploads are accepted")
-    raw = await file.read()
-    if len(raw) > MAX_SOURCE_BYTES:
-        raise HTTPException(422, "file exceeds the 10 GiB source cap")
     import uuid as _uuid
 
     uploads = _data_dir() / "uploads"
     uploads.mkdir(parents=True, exist_ok=True)
     stored = uploads / f"{_uuid.uuid4().hex[:12]}_{name}"
-    stored.write_bytes(raw)
+    written = 0
+    try:
+        with open(stored, "wb") as out:
+            while True:
+                chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > MAX_SOURCE_BYTES:
+                    raise HTTPException(422, "file exceeds the 10 GiB source cap")
+                out.write(chunk)
+    except HTTPException:
+        stored.unlink(missing_ok=True)
+        raise
+    except Exception:
+        stored.unlink(missing_ok=True)
+        raise
     meta: dict = {"top_n": max(1, min(10, top_n)), "caption_style": "bold-pop"}
     if transcript_text:
         meta["transcript_text"] = transcript_text
@@ -1185,6 +1246,15 @@ def run_job_endpoint(job_id: str, wait: bool = Query(default=True), db: Session 
     dependency leaves the job ``blocked`` with ``blocked_by`` naming
     it — the response is still 200 with the job detail, because the
     block is a state, not a request error.
+
+    NOTE (v0.9.3): capping this wait was tried and reverted — a cap
+    breaks the synchronous contract (a real render takes minutes, and
+    ``test_job_run_end_to_end_demo`` asserts wait=true returns the
+    finished job). The starvation half of diagnosis fix 9 is instead
+    handled by making /health async: it answers from the event loop
+    even when pool threads are busy waiting. A real cap (return 202 +
+    poll) would need a contract change with the UI, and is a
+    follow-up for the coordinator, not a quiet change here.
 
     Idempotent (v0.9.0 auto-run): a job that is already queued or
     running — e.g. auto-started on creation — is NOT an error. The

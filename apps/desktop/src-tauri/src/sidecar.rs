@@ -79,6 +79,102 @@ pub const PREFERRED_PORT: u16 = 8000;
 /// a process that is still alive.
 pub const HEALTH_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 
+// ---------------------------------------------------------------- supervisor
+// v0.9.3: the server must stay up while the app is running. The Rust
+// shell supervises the sidecar (see `start_supervisor` in `main.rs`):
+// if the child exits — or stops answering `/health` while still
+// alive (hung) — it is restarted on the SAME port with the SAME data
+// dir, with backoff, until it stays up or fails too often too fast.
+// The policy below is pure, so it is unit-testable without a Tauri
+// app. The supervisor never restarts after the user quits: every
+// intentional stop bumps the supervisor generation and sets the stop
+// flag first (see `stop_supervisor` in `main.rs`).
+
+/// Backoff between supervisor restarts, in seconds, by attempt
+/// (1-based): 1 s, 2 s, 5 s, then 10 s, capped at 10 s. A crash
+/// loop therefore retries quickly at first — the common case (a
+/// transient failure) recovers in about a second — but does not
+/// hammer a server that cannot start.
+pub const SUPERVISOR_RESTART_BACKOFF_SECS: &[u64] = &[1, 2, 5, 10];
+
+/// Give up after this many failures inside [`SUPERVISOR_RAPID_WINDOW`]:
+/// a server that dies five times in a minute is not going to come up
+/// on attempt six, and an unbounded restart loop would spin the CPU,
+/// rewrite the log forever, and hide the real error. On give-up the
+/// splash shows a plain-language error with the log path and Retry.
+pub const SUPERVISOR_MAX_RAPID_FAILURES: usize = 5;
+
+/// Window for [`SUPERVISOR_MAX_RAPID_FAILURES`]. A server that stays
+/// up longer than this between crashes has its history forgotten —
+/// an occasional crash months apart is not a crash loop.
+pub const SUPERVISOR_RAPID_WINDOW: Duration = Duration::from_secs(60);
+
+/// A live server that stops answering `/health` for this long is
+/// hung, not running, and is restarted like a crashed one. 60 s is
+/// deliberately generous: a long job render or a slow dependency
+/// probe must never look like a hang.
+pub const SUPERVISOR_HEALTH_OUTAGE_SECS: u64 = 60;
+
+/// An adopted server (one this shell did not spawn) that stops
+/// answering `/health` for this long — or whose pid is gone — is
+/// replaced by a fresh server instead of waited on.
+pub const SUPERVISOR_ADOPTED_OUTAGE_SECS: u64 = 10;
+
+/// Backoff delay for restart attempt `attempt` (1-based), capped at
+/// the last entry of [`SUPERVISOR_RESTART_BACKOFF_SECS`].
+pub fn restart_delay_for_attempt(attempt: u32) -> Duration {
+    let idx = attempt.saturating_sub(1) as usize;
+    let secs = SUPERVISOR_RESTART_BACKOFF_SECS
+        .get(idx)
+        .copied()
+        .unwrap_or(*SUPERVISOR_RESTART_BACKOFF_SECS.last().unwrap());
+    Duration::from_secs(secs)
+}
+
+/// Counts recent server failures and decides when the supervisor
+/// must give up instead of restart-looping forever.
+#[derive(Debug, Default)]
+pub struct RestartTracker {
+    failures: Vec<Instant>,
+}
+
+impl RestartTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a failure at `now`. Returns `true` when the supervisor
+    /// must give up: [`SUPERVISOR_MAX_RAPID_FAILURES`] failures
+    /// inside [`SUPERVISOR_RAPID_WINDOW`]. Failures older than the
+    /// window are forgotten first, so a server that stays up between
+    /// occasional crashes never trips the give-up.
+    pub fn record_failure(&mut self, now: Instant) -> bool {
+        self.failures
+            .retain(|t| now.duration_since(*t) < SUPERVISOR_RAPID_WINDOW);
+        self.failures.push(now);
+        self.failures.len() >= SUPERVISOR_MAX_RAPID_FAILURES
+    }
+
+    /// Failures inside the current window (0 when the window has
+    /// moved past all of them — see `record_failure`).
+    pub fn failure_count(&self) -> usize {
+        self.failures.len()
+    }
+}
+
+/// Everything the supervisor needs to respawn the sidecar exactly
+/// as the launch thread did: same source, SAME port, SAME data dir,
+/// same static web export. Stored in `AppState` at launch time so a
+/// restart never re-resolves (and can never pick a different port —
+/// the UI reconnects to the same URL it already has).
+#[derive(Debug, Clone)]
+pub struct SidecarLaunchConfig {
+    pub source: SidecarSource,
+    pub port: u16,
+    pub data_dir: PathBuf,
+    pub web_out: Option<PathBuf>,
+}
+
 /// Marker fragment of the separator line [`begin_launch_log`] writes
 /// at the top of a fresh log on every launch. [`tail_log_since_launch`]
 /// uses it to show only this launch's lines.
@@ -844,8 +940,16 @@ pub fn health_is_clipforge(base_url: &str) -> bool {
 }
 
 fn health_body(base_url: &str) -> Option<String> {
+    health_body_timeout(base_url, Duration::from_millis(1000))
+}
+
+/// `GET <base>/health` body with an explicit timeout. The 1 s
+/// default is for the hot paths (startup wait, supervisor polls);
+/// the slow variant below is for one careful re-probe before
+/// deciding a server is dead.
+fn health_body_timeout(base_url: &str, timeout: Duration) -> Option<String> {
     let url = format!("{base_url}/health");
-    match ureq::get(&url).timeout(Duration::from_millis(1000)).call() {
+    match ureq::get(&url).timeout(timeout).call() {
         Ok(resp) => {
             if resp.status() != 200 {
                 return None;
@@ -853,6 +957,19 @@ fn health_body(base_url: &str) -> Option<String> {
             resp.into_string().ok()
         }
         Err(_) => None,
+    }
+}
+
+/// Like [`health_is_clipforge`], but with a 5 s timeout for one
+/// slow re-probe: a live server under load (Defender-scanned spawn,
+/// a stalled threadpool) can miss the 1 s probe and must not be
+/// mistaken for dead — killing it is the second-launch hazard (D5).
+pub fn health_is_clipforge_slow(base_url: &str) -> bool {
+    match health_body_timeout(base_url, Duration::from_secs(5)) {
+        Some(body) => {
+            body.contains("\"status\"") && body.contains("ok") && body.contains("\"version\"")
+        }
+        None => false,
     }
 }
 
@@ -1984,5 +2101,65 @@ mod tests {
         assert!(!pid_alive(pid));
         assert_eq!(find_clipforge_pid_for_port(port), None);
         let _ = child.wait();
+    }
+
+    // --- v0.9.3 supervisor policy ---------------------------------
+    #[test]
+    fn restart_delay_backs_off_then_caps_at_ten_seconds() {
+        assert_eq!(restart_delay_for_attempt(0), Duration::from_secs(1));
+        assert_eq!(restart_delay_for_attempt(1), Duration::from_secs(1));
+        assert_eq!(restart_delay_for_attempt(2), Duration::from_secs(2));
+        assert_eq!(restart_delay_for_attempt(3), Duration::from_secs(5));
+        assert_eq!(restart_delay_for_attempt(4), Duration::from_secs(10));
+        assert_eq!(restart_delay_for_attempt(5), Duration::from_secs(10));
+        assert_eq!(restart_delay_for_attempt(100), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn restart_tracker_gives_up_after_five_rapid_failures() {
+        let mut tracker = RestartTracker::new();
+        let start = Instant::now();
+        for i in 0..4 {
+            assert!(
+                !tracker.record_failure(start + Duration::from_secs(i * 10)),
+                "failure {} of 5 must not give up yet",
+                i + 1
+            );
+        }
+        assert_eq!(tracker.failure_count(), 4);
+        assert!(
+            tracker.record_failure(start + Duration::from_secs(40)),
+            "the 5th failure inside 60 s must give up"
+        );
+    }
+
+    #[test]
+    fn restart_tracker_forgets_failures_older_than_the_window() {
+        let mut tracker = RestartTracker::new();
+        let start = Instant::now();
+        // Four failures, then silence for over a minute: the window
+        // has moved past all of them, so the next failure is #1, not #5.
+        for i in 0..4 {
+            assert!(!tracker.record_failure(start + Duration::from_secs(i * 5)));
+        }
+        assert!(!tracker.record_failure(start + Duration::from_secs(76)));
+        assert_eq!(tracker.failure_count(), 1);
+        // And four more rapid failures after that still give up — the
+        // give-up is about density, not lifetime totals.
+        for i in 1..4 {
+            assert!(!tracker.record_failure(start + Duration::from_secs(76 + i)));
+        }
+        assert!(tracker.record_failure(start + Duration::from_secs(80)));
+    }
+
+    #[test]
+    fn restart_tracker_boundary_failure_at_exactly_60s_is_forgotten() {
+        let mut tracker = RestartTracker::new();
+        let start = Instant::now();
+        assert!(!tracker.record_failure(start));
+        // Exactly one window later the first failure is no longer
+        // "within" the window (retain keeps only < 60 s).
+        assert!(!tracker.record_failure(start + Duration::from_secs(60)));
+        assert_eq!(tracker.failure_count(), 1);
     }
 }
