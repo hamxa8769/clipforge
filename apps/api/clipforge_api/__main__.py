@@ -349,9 +349,44 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  Dry run:  {settings.dry_run}  (nothing publishes live while true)", flush=True)
     print("  Press Ctrl+C to stop.", flush=True)
 
+    import logging
+
     import uvicorn
 
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    # v0.9.3: make crash logging survive. The desktop shell pipes
+    # this process's stdout/stderr into clipforge-server.log, so the
+    # root logger writes there (stderr) with a timestamped format —
+    # a handler crash logged anywhere in the app (see the global
+    # exception handler in clipforge_api/app.py, and the dispatcher /
+    # monitor threads, which already log tracebacks instead of dying)
+    # lands in the same log file the splash page shows. Configured
+    # here, before uvicorn.run applies its own logging config: uvicorn
+    # only configures its own loggers, so this root handler stays.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
+
+    # Single worker, explicitly: the job queue, the dispatcher thread
+    # and the SQLite database are all in-process state — a second
+    # worker would be a second queue and a second writer. And a
+    # handler crash cannot kill this worker: Starlette turns it into
+    # a 500 (plus the global handler in app.py), the worker keeps
+    # serving, and the Rust supervisor restarts the process if it
+    # ever does die.
+    try:
+        uvicorn.run(app, host=host, port=port, log_level="info", workers=1)
+    except OSError as exc:
+        # Plain-language bind failure, with the "Address already in
+        # use" text the desktop shell extracts from the log to tell
+        # the user which port is held — instead of a bare traceback.
+        print(
+            f"ERROR: could not start the ClipForge server on {host}:{port}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
     return 0
 
 

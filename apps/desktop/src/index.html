@@ -143,12 +143,17 @@
         try { $("log").textContent = await invoke("get_server_logs", { lines: 120 }); } catch (e) {}
         return;
       }
-      // Still starting: show what the shell is waiting for and how
-      // long it has waited, so a slow cold start never looks hung.
-      if (phase === "starting") {
-        const detail = st.detail || "Starting the ClipForge server…";
-        const elapsed = (st.elapsed_secs != null) ? " (" + st.elapsed_secs + " s)" : "";
-        $("status-text").textContent = detail + elapsed;
+      // Still starting — or restarting after a crash (v0.9.3): show
+      // what the shell is waiting for and how long it has waited
+      // (starting) or which restart attempt this is (restarting), so
+      // a slow cold start — or a server that died and is coming back
+      // — never looks hung. Any other phase just keeps polling.
+      if (phase === "starting" || phase === "restarting") {
+        const detail = st.detail || (phase === "restarting" ? "Server restarting…" : "Starting the ClipForge server…");
+        const extra = phase === "restarting"
+          ? ((st.attempt != null) ? " — attempt " + st.attempt : "")
+          : ((st.elapsed_secs != null) ? " (" + st.elapsed_secs + " s)" : "");
+        $("status-text").textContent = detail + extra;
       }
       setTimeout(poll, 500);
     } catch (e) {
