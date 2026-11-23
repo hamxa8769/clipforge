@@ -327,7 +327,12 @@ def test_pause_queued_job_skips_it_until_resumed(queue):
     session = get_session()
     try:
         q.resume(session, second)
-        assert _get_job(second).status == JobStatus.QUEUED.value
+        # Queued again — or already claimed by the dispatcher (it wakes
+        # on resume); either way the job is going, not stuck paused.
+        assert _get_job(second).status in {
+            JobStatus.QUEUED.value,
+            JobStatus.RUNNING.value,
+        }
     finally:
         session.close()
     _wait_for(
