@@ -301,9 +301,24 @@ def test_blocked_youtube_job_surfaces_plain_error_and_logs(monkeypatch):
     plain-language error naming yt-dlp + the next step, on the job,
     in blocked_by, and in the per-stage log — the job never sits in
     pending/queued looking idle, and nothing shows a traceback."""
-    real_which = shutil.which
+    # v0.9.2: the worker gate uses the verified probe
+    # (clipforge.requirements.probe_yt_dlp — the binary must *run*),
+    # not shutil.which: a bare which-stub no longer hides a real
+    # yt-dlp (e.g. ~/.local/bin), so stub the probe to report
+    # "missing" instead.
+    import clipforge.requirements as requirements_mod
+
     monkeypatch.setattr(
-        shutil, "which", lambda name: None if name == "yt-dlp" else real_which(name)
+        requirements_mod,
+        "probe_yt_dlp",
+        lambda *args, **kwargs: {
+            "found": False,
+            "path": "",
+            "version": "",
+            "broken": False,
+            "broken_reason": "",
+            "source": "",
+        },
     )
     resp = client.post(
         "/jobs",

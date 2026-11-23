@@ -52,6 +52,14 @@ approved Post record, explicit credentials, and ``dry_run=false``):
                                       PATH updated on Windows; recheck
                                       re-probes for a manually installed
                                       yt-dlp with no restart)
+  GET  /requirements/status | POST /requirements/recheck
+                                     (v0.9.2 pre-flight: every requirement
+                                      verified by running it — yt-dlp,
+                                      FFmpeg, ffprobe, Whisper — each
+                                      Installed (version + path) or
+                                      Missing / Broken with its fix;
+                                      verified at server startup and
+                                      re-checked before any job/agent run)
   GET  /monetization                 (tracker; ?platform=&subs=&...)
   GET  /analytics | GET /analytics/{account_id}
   POST /scheduler/run                (run due posts; dry-run default)
@@ -75,6 +83,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -452,7 +461,52 @@ def get_db():
         db.close()
 
 
-app = FastAPI(title="ClipForge API", version=_VERSION)
+# ------------------------------------------------- requirements (v0.9.2)
+# Startup pre-flight: the server verifies every requirement once at
+# startup (yt-dlp / FFmpeg / ffprobe by running them, Whisper by
+# proving a backend exists — see clipforge.requirements) and keeps
+# the snapshot so GET /requirements/status can show what startup
+# saw. A missing/broken tool never stops the server — the UI shows
+# the fix, and a job/agent run blocks at its gate with the
+# plain-language message instead of failing mid-download.
+_STARTUP_REQUIREMENTS: dict | None = None
+
+
+def _requirements_payload() -> dict:
+    """Live requirements check + the startup snapshot (if any)."""
+    from clipforge.requirements import check_requirements  # noqa: PLC0415
+
+    try:
+        settings_now = _settings_store().load()
+        stored_ffmpeg = settings_now.ffmpeg_path or None
+        stored_ytdlp = settings_now.yt_dlp_path or None
+    except Exception:  # noqa: BLE001  (stored paths are a nicety, not required)
+        stored_ffmpeg = stored_ytdlp = None
+    payload = check_requirements(
+        _data_dir(),
+        stored_ffmpeg_path=stored_ffmpeg,
+        stored_yt_dlp_path=stored_ytdlp,
+    )
+    payload["startup"] = _STARTUP_REQUIREMENTS
+    return payload
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    global _STARTUP_REQUIREMENTS
+    try:
+        _STARTUP_REQUIREMENTS = _requirements_payload()
+        blocking = _STARTUP_REQUIREMENTS.get("blocking") or []
+        if blocking:
+            _log.warning("requirements missing/broken at startup: %s", ", ".join(blocking))
+        else:
+            _log.info("requirements verified at startup: all ready")
+    except Exception:  # noqa: BLE001  (the check must never stop startup)
+        _log.warning("requirements check failed at startup", exc_info=True)
+    yield
+
+
+app = FastAPI(title="ClipForge API", version=_VERSION, lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -829,12 +883,16 @@ def health():
 def get_dependencies():
     """Doctor check: every tool / package / key the pipeline may need.
 
-    Presence only — no secret *value* is ever returned. A job blocked
-    on a missing dependency names the same ``code`` you see here
-    (e.g. ``ffmpeg_missing``, ``transcription_backend_missing``), so
-    the UI can point at exactly what to install or set. The
-    ``doctor``-command equivalent from artbyjazi/autoclip and
-    ghost1412/shortsflow (see docs/REUSE.md).
+    Verified (v0.9.2), not just presence — each tool is *run*
+    (``--version`` / ``-version``), so a binary that exists but does
+    not run is reported unavailable with the broken reason. No secret
+    *value* is ever returned. A job blocked on a missing dependency
+    names the same ``code`` you see here (e.g. ``ffmpeg_missing``,
+    ``transcription_backend_missing``), so the UI can point at exactly
+    what to install or set. The ``doctor``-command equivalent from
+    artbyjazi/autoclip and ghost1412/shortsflow (see docs/REUSE.md).
+    For the full pre-flight (yt-dlp / FFmpeg / ffprobe / Whisper with
+    versions, paths and fix actions) use ``GET /requirements/status``.
     """
     deps = [d.to_dict() for d in check_dependencies()]
     return {
@@ -842,6 +900,36 @@ def get_dependencies():
         "missing": [d for d in deps if not d["available"]],
         "all_available": all(d["available"] for d in deps),
     }
+
+
+@app.get("/requirements/status")
+def requirements_status():
+    """Pre-flight: every requirement verified by actually running it.
+
+    yt-dlp (``--version``), FFmpeg / ffprobe (``-version``) and the
+    Whisper backend (local faster-whisper + model cache, or the
+    Whisper API key). Each requirement is ``Installed`` (version +
+    path + where it was found) or ``Missing`` / ``Broken`` with a
+    plain-language reason and the one-click fix, so the Dashboard can
+    show the state before any job starts — a run must never start a
+    download it cannot finish. ``all_ready`` is False when anything
+    is missing or broken; ``startup`` is the snapshot taken when the
+    server started (null when the check has not run yet, e.g. in
+    tests that never started the server).
+    """
+    return _requirements_payload()
+
+
+@app.post("/requirements/recheck")
+def requirements_recheck():
+    """Re-run the whole pre-flight check live, right now.
+
+    Same shape as ``GET /requirements/status``. On Windows the probes
+    first merge the registry PATH into the server process, so a tool
+    installed after startup (PowerShell / pip / winget) is picked up
+    with no restart. Use this after installing a requirement by hand.
+    """
+    return _requirements_payload()
 
 
 # ------------------------------------------------------------------ media

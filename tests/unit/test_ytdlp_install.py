@@ -358,7 +358,9 @@ def test_binary_that_does_not_run_fails_cleanly(
     import clipforge.ytdlp_install as mod
 
     monkeypatch.setattr(YtDlpInstaller, "_check_binary_magic", lambda self, binary: None)
-    monkeypatch.setattr(mod, "ytdlp_version", lambda binary: "")
+    # The probe calls ytdlp_version(path, timeout=...) — the stub must
+    # accept the keyword (v0.9.2: same call shape as v0.9.1).
+    monkeypatch.setattr(mod, "ytdlp_version", lambda binary, *args, **kwargs: "")
     installer = YtDlpInstaller(tmp_path, downloader=_fake_downloader(b"\x7fELF" + b"\x00" * 100))
     installer.start_install(force=True)
     status = _wait_done(installer)
@@ -555,6 +557,9 @@ def test_ingest_youtube_without_yt_dlp_names_the_install_button(
 
     monkeypatch.setenv("CLIPFORGE_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("PATH", "")
+    # HOME too: v0.9.1 detection also checks ~/.local/bin, so a real
+    # yt-dlp there would otherwise be found and the download attempted.
+    monkeypatch.setenv("HOME", str(tmp_path))
     with pytest.raises(IngestError) as excinfo:
         ingest_youtube(
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
@@ -572,6 +577,9 @@ def test_check_dependencies_counts_bundled_yt_dlp(
 
     monkeypatch.setenv("CLIPFORGE_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("PATH", "")
+    # HOME too: v0.9.1 detection also checks ~/.local/bin, so a real
+    # yt-dlp there would otherwise count as installed before the test.
+    monkeypatch.setenv("HOME", str(tmp_path))
     before = {d.name: d.available for d in check_dependencies()}
     assert before["yt-dlp"] is False
     installer = _installer(tmp_path)
@@ -709,16 +717,19 @@ def test_recheck_refreshes_path_from_windows_registry(
     dir after the server started. Re-check merges it into the running
     process's PATH and finds the binary — the old code needed a full
     app restart for this."""
-    import clipforge.ytdlp_install as mod
-
     new_dir = tmp_path / "newbin"
     fake = _fake_windows_exe(new_dir)
     installer = YtDlpInstaller(tmp_path)
     assert installer.status()["found"] is False
     assert str(new_dir) not in os.environ["PATH"].split(os.pathsep)
     # The user installs yt-dlp; the registry PATH gains the new dir
-    # (the running process's PATH does not).
-    monkeypatch.setattr(mod, "_read_windows_registry_path", lambda: [str(new_dir)])
+    # (the running process's PATH does not). v0.9.2: the registry
+    # reader lives in clipforge.ffmpeg_install (shared with the FFmpeg
+    # probe) — stub it there, where refresh_process_path_from_registry
+    # looks it up.
+    import clipforge.ffmpeg_install as ffmpeg_mod
+
+    monkeypatch.setattr(ffmpeg_mod, "_read_windows_registry_path", lambda: [str(new_dir)])
     status = installer.recheck()
     assert status["found"] is True, status
     assert status["version"] == FAKE_VERSION

@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import shutil
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -39,7 +38,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from clipforge.db import Job, JobStageEvent, JobStatus, WorkerRun
-from clipforge.ytdlp_install import resolve_yt_dlp_path, ytdlp_missing_message
+from clipforge.ytdlp_install import ytdlp_missing_message
 
 # ---------------------------------------------------------------- stages
 # (name, weight % of total progress, JobStatus while the stage runs)
@@ -152,44 +151,41 @@ class Dependency:
 def check_dependencies() -> list[Dependency]:
     """Check every tool / package / key the pipeline may need.
 
-    Presence only — key *values* are never read or returned. This is
-    the ``doctor`` command other clippers ship (artbyjazi/autoclip,
+    Verified, not just presence (v0.9.2): each tool is *run*
+    (``--version`` / ``-version``) via
+    :mod:`clipforge.requirements` — a binary that exists but does not
+    run is reported unavailable with the broken reason in ``detail``,
+    never as installed. Key *values* are never read or returned. This
+    is the ``doctor`` command other clippers ship (artbyjazi/autoclip,
     ghost1412/shortsflow); the API exposes it at ``GET /dependencies``.
     """
     out: list[Dependency] = []
 
     def _tool(name: str, detail: str) -> Dependency:
-        # ffmpeg/ffprobe also count when the one-click installer put them
-        # in <data_dir>/ffmpeg/bin (no PATH edit / restart needed there);
-        # yt-dlp likewise counts when its installer put it in
-        # <data_dir>/yt-dlp.
-        found = shutil.which(name) is not None
-        if not found and name in ("ffmpeg", "ffprobe"):
-            from clipforge.ffmpeg_install import (  # noqa: PLC0415
-                bundled_ffmpeg_path,
-                bundled_ffprobe_path,
-            )
+        # v0.9.2: verified detection — stored path, bundled install,
+        # PATH (registry-merged on Windows), standard install
+        # locations — and the binary must actually run. A bare
+        # shutil.which() / is_file() misses installs made after this
+        # process started and cannot tell a broken binary from a
+        # working one (see clipforge.requirements).
+        from clipforge.requirements import probe_tool  # noqa: PLC0415
 
-            data_dir = os.environ.get("CLIPFORGE_DATA_DIR") or "./data"
-            bundled = (
-                bundled_ffmpeg_path(data_dir)
-                if name == "ffmpeg"
-                else bundled_ffprobe_path(data_dir)
+        data_dir = os.environ.get("CLIPFORGE_DATA_DIR") or "./data"
+        probe = probe_tool(name, data_dir)
+        if probe["found"]:
+            return Dependency(name=name, kind="tool", available=True, detail=detail)
+        if probe["broken"]:
+            return Dependency(
+                name=name,
+                kind="tool",
+                available=False,
+                detail=probe["broken_reason"],
             )
-            found = bundled.is_file()
-        if not found and name == "yt-dlp":
-            # v0.9.1: yt-dlp counts wherever detection finds it — PATH,
-            # the bundled install, or a standard install location (pip
-            # user Scripts, winget shim, …), including installs made
-            # after this process started. A bare shutil.which() misses
-            # those (see clipforge.ytdlp_install).
-            data_dir = os.environ.get("CLIPFORGE_DATA_DIR") or "./data"
-            found = resolve_yt_dlp_path(data_dir) is not None
         return Dependency(
             name=name,
             kind="tool",
-            available=found,
-            detail=detail if found else f"{name} not found on PATH — {detail}",
+            available=False,
+            detail=f"{name} not found on PATH — {detail}",
         )
 
     out.append(_tool("ffmpeg", "renders clips, extracts audio, burns captions"))
@@ -238,32 +234,36 @@ def check_dependencies() -> list[Dependency]:
 
 
 def require_tool(name: str, detail: str, required_action: str) -> None:
-    found = shutil.which(name) is not None
-    if not found and name in ("ffmpeg", "ffprobe"):
-        from clipforge.ffmpeg_install import (  # noqa: PLC0415
-            bundled_ffmpeg_path,
-            bundled_ffprobe_path,
-        )
+    """Raise :class:`MissingDependencyError` unless ``name`` works.
 
-        data_dir = os.environ.get("CLIPFORGE_DATA_DIR") or "./data"
-        bundled = (
-            bundled_ffmpeg_path(data_dir) if name == "ffmpeg" else bundled_ffprobe_path(data_dir)
-        )
-        found = bundled.is_file()
-    if not found and name == "yt-dlp":
-        # v0.9.1: same full detection as check_dependencies above —
-        # a pip/winget install made after this process started still
-        # counts (see clipforge.ytdlp_install).
-        data_dir = os.environ.get("CLIPFORGE_DATA_DIR") or "./data"
-        found = resolve_yt_dlp_path(data_dir) is not None
-    if not found:
+    Verified (v0.9.2): the tool must *run* (``--version`` /
+    ``-version``), not merely exist — a binary that exists but does
+    not run raises with code ``<name>_broken`` and the plain-language
+    broken reason, so a job blocks at the gate instead of failing
+    mid-download / mid-render with a raw tool error. A genuinely
+    missing tool raises with code ``<name>_missing`` as before.
+    """
+    from clipforge.requirements import probe_tool  # noqa: PLC0415
+
+    data_dir = os.environ.get("CLIPFORGE_DATA_DIR") or "./data"
+    probe = probe_tool(name, data_dir)
+    if probe["found"]:
+        return
+    if probe["broken"]:
         raise MissingDependencyError(
-            code=f"{name.replace('-', '_')}_missing",
+            code=f"{name.replace('-', '_')}_broken",
             dependency=name,
             kind="tool",
-            detail=detail,
+            detail=probe["broken_reason"],
             required_action=required_action,
         )
+    raise MissingDependencyError(
+        code=f"{name.replace('-', '_')}_missing",
+        dependency=name,
+        kind="tool",
+        detail=detail,
+        required_action=required_action,
+    )
 
 
 def require_transcription_backend() -> None:

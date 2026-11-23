@@ -25,6 +25,7 @@ import {
 import { UpdateSection } from "@/components/Updater";
 import { FfmpegInstallSection } from "@/components/FfmpegInstaller";
 import { YtDlpInstallSection } from "@/components/YtDlpInstaller";
+import { RequirementsPanel } from "@/components/RequirementsPanel";
 import GeminiSetup from "@/components/GeminiSetup";
 import { REPLAY_EVENT } from "@/components/Onboarding";
 import Link from "next/link";
@@ -354,7 +355,8 @@ export default function SettingsPage() {
 
           <Card>
             <h2 className="mb-2 text-lg font-semibold">This app</h2>
-            <dl className="space-y-1 text-sm">
+            <RequirementsPanel />
+            <dl className="mt-4 space-y-1 text-sm">
               <div className="flex justify-between gap-2"><dt className="text-neutral-400">Data folder</dt><dd className="truncate font-mono text-xs">{view.data_dir}</dd></div>
               <div className="flex justify-between gap-2"><dt className="text-neutral-400">Secret storage</dt><dd>{view.secret_backend === "os-keyring" ? "OS keyring" : "Encrypted file (no OS keyring found — see docs)"}</dd></div>
               <div className="flex justify-between gap-2">

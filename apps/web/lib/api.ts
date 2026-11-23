@@ -1068,6 +1068,81 @@ export function ytdlpInstallRunning(status: YtDlpInstallStatus | null): boolean 
   return status !== null && ["downloading", "verifying", "installing"].includes(status.state);
 }
 
+/** Pre-flight requirements check (v0.9.2), exactly as
+ *  GET /requirements/status returns it. Each requirement is verified
+ *  by running it — a binary that exists but does not run is "broken",
+ *  never "installed". */
+export type RequirementStatusValue = "ok" | "missing" | "broken" | "degraded";
+export interface RequirementItem {
+  id: string;
+  label: string;
+  status: RequirementStatusValue;
+  version: string;
+  path: string;
+  source: string;
+  detail: string;
+  /** One-click fix the UI can offer: "install-yt-dlp" | "install-ffmpeg"
+   *  | "settings" (open Settings, e.g. for an API key) | "" (none). */
+  fix_action: string;
+  fix_label: string;
+}
+export interface RequirementsStatus {
+  requirements: RequirementItem[];
+  all_ready: boolean;
+  blocking: string[];
+  checked_at: string;
+  /** Snapshot taken when the server started (null when it has not run
+   *  yet — e.g. tests that never started the server). */
+  startup: RequirementsStatus | null;
+}
+
+const REQUIREMENT_STATUSES: RequirementStatusValue[] = ["ok", "missing", "broken", "degraded"];
+
+export function normalizeRequirementsStatus(raw: unknown): RequirementsStatus | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (!Array.isArray(r.requirements)) return null;
+  const requirements: RequirementItem[] = [];
+  for (const item of r.requirements) {
+    const it = (item ?? {}) as Record<string, unknown>;
+    const status = String(it.status ?? "");
+    if (typeof it.id !== "string" || !(REQUIREMENT_STATUSES as string[]).includes(status)) return null;
+    requirements.push({
+      id: it.id,
+      label: typeof it.label === "string" ? it.label : it.id,
+      status: status as RequirementStatusValue,
+      version: typeof it.version === "string" ? it.version : "",
+      path: typeof it.path === "string" ? it.path : "",
+      source: typeof it.source === "string" ? it.source : "",
+      detail: typeof it.detail === "string" ? it.detail : "",
+      fix_action: typeof it.fix_action === "string" ? it.fix_action : "",
+      fix_label: typeof it.fix_label === "string" ? it.fix_label : "",
+    });
+  }
+  return {
+    requirements,
+    all_ready: r.all_ready === true,
+    blocking: Array.isArray(r.blocking) ? r.blocking.map(String) : [],
+    checked_at: typeof r.checked_at === "string" ? r.checked_at : "",
+    startup:
+      r.startup != null && typeof r.startup === "object"
+        ? normalizeRequirementsStatus(r.startup)
+        : null,
+  };
+}
+
+/** GET /requirements/status — the whole pre-flight check, live
+ *  (returns null when the API is unreachable). */
+export async function getRequirementsStatus(): Promise<RequirementsStatus | null> {
+  return normalizeRequirementsStatus(await apiGet<unknown>("/requirements/status"));
+}
+
+/** POST /requirements/recheck — re-run the whole check live, right
+ *  now (returns null when the API is unreachable). */
+export async function recheckRequirements(): Promise<RequirementsStatus | null> {
+  const res = await apiPostJson("/requirements/recheck");
+  return res.ok ? normalizeRequirementsStatus(res.data) : null;
+}
+
 /** Channel status, exactly as GET /channels returns it (clipforge.auth.channels). */
 export type ChannelStatusValue = "connected" | "expired" | "not_connected";
 /** Connection health (v0.9.0, clipforge.auth.health): the honest state. */

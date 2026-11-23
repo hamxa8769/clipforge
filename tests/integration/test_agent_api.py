@@ -236,9 +236,23 @@ def test_agent_start_real_video_without_yt_dlp_fails_fast(monkeypatch):
     """ON with a real video source and no yt-dlp is a 422 at click
     time — the toggle never shows a fake "running" that silently
     becomes "error" while ON is still displayed."""
-    import shutil
+    # v0.9.2: the agent gate uses the verified probe
+    # (clipforge.agent.probe_yt_dlp — the binary must *run*), not
+    # shutil.which: stub the probe to report "missing".
+    import clipforge.agent as agent_mod
 
-    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr(
+        agent_mod,
+        "probe_yt_dlp",
+        lambda *args, **kwargs: {
+            "found": False,
+            "path": "",
+            "version": "",
+            "broken": False,
+            "broken_reason": "",
+            "source": "",
+        },
+    )
     saved = _put_config(transcript_text=None)
     assert saved.status_code == 200, saved.text
     started = client.post("/api/agent/start")

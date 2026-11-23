@@ -5,8 +5,8 @@
 // → post is doable from here.
 //
 // Data: every number comes from the real backend (channels, jobs, posts,
-// analytics, monetization, health, ffmpeg/status, worker/queue,
-// agent/status) and polls every 15s while the API is live. When the API
+// analytics, monetization, health, ffmpeg/status, requirements/status,
+// worker/queue, agent/status) and polls every 15s while the API is live. When the API
 // is unreachable the page falls back to clearly-labelled demo data
 // (DemoBadge) and every control that needs the server is disabled with
 // the reason — demo numbers are never presented as live channel stats.
@@ -47,6 +47,7 @@ import {
 import { demoAnalytics, demoChannels, demoJobs, demoMonetization, demoPosts } from "@/lib/mock";
 import { useFfmpegInstaller } from "@/components/FfmpegInstaller";
 import NewClipRun from "@/components/NewClipRun";
+import { RequirementsPanel } from "@/components/RequirementsPanel";
 import {
   Avatar, Badge, Card, CardHeader, DemoBadge, EmptyState, fmtCompact, fmtNum, PageHeader,
   PlatformDot, platformLabel, PrimaryButton, ProgressBar, SecondaryButton, Skeleton, StatCard,
@@ -397,6 +398,13 @@ export default function Dashboard() {
             </p>
           </div>
         </div>
+      </Card>
+
+      {/* Requirements — verified before any job starts, so a run never
+          starts a download it cannot finish. */}
+      <Card>
+        <CardHeader title="Requirements" hint="yt-dlp · FFmpeg · ffprobe · Whisper — each verified by running it" />
+        <RequirementsPanel />
       </Card>
 
       {/* New clip run — the daily flow starts here. */}

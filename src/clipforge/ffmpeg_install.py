@@ -222,7 +222,15 @@ def resolve_ffmpeg_path(
     1. The path saved in settings after a one-click install.
     2. The installer-managed ``<data_dir>/ffmpeg/bin/`` binary.
     3. Whatever is on PATH (a manual install).
+
+    On Windows the registry PATH is merged into this process first,
+    so an FFmpeg installed after the server started is found without
+    a restart (same fix as yt-dlp in v0.9.1 — see
+    :func:`refresh_process_path_from_registry`).
     """
+    system = system or platform.system()
+    if system == "Windows":
+        refresh_process_path_from_registry()
     if stored_path:
         candidate = Path(stored_path)
         if _is_usable(candidate):
@@ -238,15 +246,290 @@ def resolve_ffmpeg_path(
     return found
 
 
-def ffmpeg_version(binary: str | Path) -> str:
+def ffmpeg_version(binary: str | Path, timeout: float = 15.0) -> str:
     """First line of ``ffmpeg -version`` (``""`` when it does not run)."""
     try:
-        proc = subprocess.run([str(binary), "-version"], capture_output=True, text=True, timeout=15)
+        proc = subprocess.run(
+            [str(binary), "-version"], capture_output=True, text=True, timeout=timeout
+        )
     except (OSError, ValueError, subprocess.SubprocessError):
         return ""
     if proc.returncode != 0:
         return ""
     return (proc.stdout or "").splitlines()[0].strip() if proc.stdout else ""
+
+
+def ffprobe_version(binary: str | Path, timeout: float = 15.0) -> str:
+    """First line of ``ffprobe -version`` (``""`` when it does not run)."""
+    try:
+        proc = subprocess.run(
+            [str(binary), "-version"], capture_output=True, text=True, timeout=timeout
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return (proc.stdout or "").splitlines()[0].strip() if proc.stdout else ""
+
+
+# ------------------------------------------- Windows registry PATH (v0.9.2)
+# Moved here from clipforge.ytdlp_install (v0.9.1) so FFmpeg detection
+# can use the same fix: a server process inherits PATH when it starts,
+# so an FFmpeg installed *after* the server started (an installer
+# updating the user PATH) is invisible to the running process until a
+# restart. ``clipforge.ytdlp_install`` re-exports these names, so
+# existing imports keep working.
+
+
+def _read_windows_registry_path() -> list[str]:
+    """User + system PATH, as the Windows registry currently has them.
+
+    Returns [] off Windows or when the registry cannot be read.
+    ``%VAR%`` references are expanded.
+    """
+    try:
+        import winreg  # noqa: PLC0415  (Windows-only stdlib module)
+    except ImportError:
+        return []
+    entries: list[str] = []
+    for root, subkey in (
+        (winreg.HKEY_CURRENT_USER, r"Environment"),
+        (
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        ),
+    ):
+        try:
+            with winreg.OpenKey(root, subkey, 0, winreg.KEY_READ) as key:
+                raw, _ = winreg.QueryValueEx(key, "Path")
+        except OSError:
+            continue
+        if raw:
+            entries.extend(part for part in str(raw).split(";") if part.strip())
+    return [os.path.expandvars(entry) for entry in entries]
+
+
+def refresh_process_path_from_registry() -> list[str]:
+    """Merge the registry PATH into this process's PATH (Windows only).
+
+    Returns the dirs that were added ([] when nothing was new, or off
+    Windows). Idempotent: entries already in the process PATH are not
+    duplicated, and the existing order is kept.
+    """
+    if platform.system() != "Windows":
+        return []
+    current = os.environ.get("PATH", "")
+    parts = current.split(os.pathsep) if current else []
+    seen = {os.path.normcase(part) for part in parts}
+    added: list[str] = []
+    for entry in _read_windows_registry_path():
+        if os.path.normcase(entry) not in seen:
+            parts.append(entry)
+            seen.add(os.path.normcase(entry))
+            added.append(entry)
+    if added:
+        os.environ["PATH"] = os.pathsep.join(parts)
+    return added
+
+
+# ------------------------------------------------------- detection (v0.9.2)
+# v0.9.1 added verified detection for yt-dlp only (``--version`` must
+# run; a file that exists but does not run is "broken", never "found").
+# FFmpeg / ffprobe had only ``resolve_ffmpeg_path`` — existence on
+# disk — so a broken FFmpeg counted as installed, the job gate passed,
+# and the render failed mid-way with a raw ffmpeg error. These probes
+# mirror ``probe_yt_dlp`` exactly: stored path, bundled binary, every
+# PATH hit (registry-merged on Windows), then the standard install
+# locations. A candidate only counts as *found* when ``-version`` runs.
+
+#: Human-readable labels for where a binary was found, shown in the UI
+#: so the user can see *which* install the app is using.
+_SOURCE_PATH = "PATH"
+_SOURCE_STORED = "saved install location"
+_SOURCE_BUNDLED = "app data folder (one-click install)"
+
+
+def _known_location_candidates(tool: str, system: str | None = None) -> list[tuple[Path, str]]:
+    """Standard FFmpeg install locations that are often NOT on PATH.
+
+    Windows: Chocolatey, Program Files, Scoop, a top-level C:\\ffmpeg
+    install. POSIX: /usr/local/bin, Homebrew, ~/.local/bin. Paths that
+    do not exist are harmless — the probe skips them.
+    """
+    system = system or platform.system()
+    exe = f"{tool}.exe" if system == "Windows" else tool
+    if system == "Windows":
+        home = Path.home()
+        programdata = Path(os.environ.get("ProgramData") or r"C:\ProgramData")
+        programfiles = Path(os.environ.get("ProgramFiles") or r"C:\Program Files")
+        localappdata = Path(os.environ.get("LOCALAPPDATA") or str(home / "AppData" / "Local"))
+        return [
+            (programdata / "chocolatey" / "bin" / exe, "Chocolatey"),
+            (programfiles / "ffmpeg" / "bin" / exe, "Program Files"),
+            (home / "scoop" / "shims" / exe, "Scoop"),
+            (Path(r"C:\ffmpeg\bin") / exe, "C:\\ffmpeg"),
+            (localappdata / "Microsoft" / "WindowsApps" / exe, "winget (WindowsApps)"),
+        ]
+    home = Path.home()
+    return [
+        (Path("/usr/local/bin") / exe, "system bin folder"),
+        (Path("/opt/homebrew/bin") / exe, "Homebrew"),
+        (home / ".local" / "bin" / exe, "user bin folder"),
+    ]
+
+
+def _path_dir_candidates(tool: str, system: str | None = None) -> list[tuple[Path, str]]:
+    """Every ``tool`` on the *current* process PATH, in PATH order.
+
+    ``shutil.which`` only returns the first hit; a broken binary
+    earlier on PATH would otherwise shadow a working one later, so
+    the probe walks the dirs itself.
+    """
+    system = system or platform.system()
+    name = f"{tool}.exe" if system == "Windows" else tool
+    out: list[tuple[Path, str]] = []
+    seen: set[str] = set()
+    for entry in (os.environ.get("PATH", "") or "").split(os.pathsep):
+        if not entry:
+            continue
+        candidate = Path(entry) / name
+        key = os.path.normcase(str(candidate))
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.is_file():
+            out.append((candidate, _SOURCE_PATH))
+    return out
+
+
+def _candidate_tool_paths(
+    tool: str,
+    data_dir: str | Path | None = None,
+    stored_path: str | None = None,
+    system: str | None = None,
+) -> list[tuple[str, str]]:
+    """All locations worth probing for ``tool``, in priority order.
+
+    Each item is ``(path, source-label)``: the saved install path, the
+    bundled ``<data_dir>/ffmpeg/bin/`` binary, every PATH hit, then
+    the standard install locations. Duplicates are removed, first
+    occurrence winning.
+    """
+    system = system or platform.system()
+    if data_dir is None:
+        data_dir = os.environ.get("CLIPFORGE_DATA_DIR") or "./data"
+    ordered: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def _add(path: str | Path, source: str) -> None:
+        key = os.path.normcase(str(path))
+        if key not in seen:
+            seen.add(key)
+            ordered.append((str(path), source))
+
+    if stored_path:
+        _add(stored_path, _SOURCE_STORED)
+    bundled_fn = bundled_ffmpeg_path if tool == "ffmpeg" else bundled_ffprobe_path
+    _add(bundled_fn(data_dir, system), _SOURCE_BUNDLED)
+    for path, source in _path_dir_candidates(tool, system):
+        _add(path, source)
+    for path, source in _known_location_candidates(tool, system):
+        _add(path, source)
+    return ordered
+
+
+def _probe_tool(
+    tool: str,
+    data_dir: str | Path | None = None,
+    stored_path: str | None = None,
+    system: str | None = None,
+    timeout: float = 10.0,
+) -> dict:
+    """Verified detection for ``ffmpeg`` / ``ffprobe``.
+
+    Walks the candidates and returns the first whose ``-version``
+    actually runs. A candidate that exists but does not run is skipped
+    (a broken binary earlier on PATH must not shadow a working one
+    later) and, when nothing runs, reported honestly as ``broken``
+    with its path — never as "found". ``found`` is True only when a
+    binary both exists and runs. Same dict shape as
+    :func:`clipforge.ytdlp_install.probe_yt_dlp`.
+    """
+    system = system or platform.system()
+    if system == "Windows":
+        refresh_process_path_from_registry()
+    version_fn = ffmpeg_version if tool == "ffmpeg" else ffprobe_version
+    first_existing: tuple[str, str, str] | None = None
+    for path, source in _candidate_tool_paths(tool, data_dir, stored_path, system):
+        candidate = Path(path)
+        if not candidate.is_file():
+            continue
+        if not os.access(candidate, os.X_OK):
+            if first_existing is None:
+                first_existing = (path, source, "exists but is not executable")
+            continue
+        version = version_fn(path, timeout=timeout)
+        if version:
+            return {
+                "found": True,
+                "path": path,
+                "version": version,
+                "broken": False,
+                "broken_reason": "",
+                "source": source,
+            }
+        if first_existing is None:
+            first_existing = (path, source, f"does not run ({tool} -version failed)")
+    if first_existing is not None:
+        path, source, why = first_existing
+        return {
+            "found": False,
+            "path": path,
+            "version": "",
+            "broken": True,
+            "broken_reason": (
+                f"{tool} was found at {path} ({source}) but {why}. "
+                "Reinstall it with the 'Install FFmpeg' button, or remove "
+                "the broken copy and press 'Re-check'."
+            ),
+            "source": source,
+        }
+    return {
+        "found": False,
+        "path": "",
+        "version": "",
+        "broken": False,
+        "broken_reason": "",
+        "source": "",
+    }
+
+
+def probe_ffmpeg(
+    data_dir: str | Path | None = None,
+    stored_path: str | None = None,
+    system: str | None = None,
+    timeout: float = 10.0,
+) -> dict:
+    """Verified FFmpeg detection: found, where, and which version.
+
+    See :func:`_probe_tool`. ``found`` is True only when an ffmpeg
+    binary both exists and runs ``ffmpeg -version``.
+    """
+    return _probe_tool("ffmpeg", data_dir, stored_path, system, timeout)
+
+
+def probe_ffprobe(
+    data_dir: str | Path | None = None,
+    stored_path: str | None = None,
+    system: str | None = None,
+    timeout: float = 10.0,
+) -> dict:
+    """Verified ffprobe detection: found, where, and which version.
+
+    See :func:`_probe_tool`. ``found`` is True only when an ffprobe
+    binary both exists and runs ``ffprobe -version``.
+    """
+    return _probe_tool("ffprobe", data_dir, stored_path, system, timeout)
 
 
 def ensure_bundled_on_path(data_dir: str | Path, system: str | None = None) -> bool:
@@ -634,6 +917,14 @@ class InstallState:
     #: Non-fatal Windows PATH warning on an otherwise successful install
     #: ("" when the PATH update worked or did not apply).
     path_warning: str = ""
+    #: v0.9.2 detection: True when an FFmpeg file exists but none runs
+    #: (``-version`` fails) — reported plainly, never as "found".
+    broken: bool = False
+    #: Plain-language reason when ``broken`` is True.
+    broken_reason: str = ""
+    #: Where the working (or broken) FFmpeg was found, e.g. "PATH" or
+    #: "app data folder (one-click install)".
+    source: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -652,6 +943,9 @@ class InstallState:
             "checksum_verified": self.checksum_verified,
             "failed_step": self.failed_step,
             "path_warning": self.path_warning,
+            "broken": self.broken,
+            "broken_reason": self.broken_reason,
+            "source": self.source,
         }
 
 
@@ -745,14 +1039,25 @@ class FfmpegInstaller:
             pass  # state file is best-effort; the in-memory state is live
 
     def status(self) -> dict:
-        """Current install state, enriched with live FFmpeg detection."""
+        """Current install state, enriched with live FFmpeg detection.
+
+        ``found`` is True only when an FFmpeg binary both exists and
+        runs (``ffmpeg -version``); ``path`` / ``version`` / ``source``
+        say where it was found and which version it is. When a binary
+        exists but does not run, ``found`` is False and ``broken`` /
+        ``broken_reason`` name the broken copy instead of claiming
+        "installed and ready" (v0.9.2 — the v0.9.1 gap: a broken
+        FFmpeg counted as found and the render failed mid-way).
+        """
         with self._lock:
             snapshot = self._state.to_dict()
-        found_path = resolve_ffmpeg_path(self.data_dir)
-        snapshot["found"] = bool(found_path)
-        snapshot["path"] = found_path or snapshot["path"]
-        if found_path:
-            snapshot["version"] = ffmpeg_version(found_path) or snapshot["version"]
+        probe = probe_ffmpeg(self.data_dir)
+        snapshot["found"] = probe["found"]
+        snapshot["path"] = probe["path"]
+        snapshot["version"] = probe["version"]
+        snapshot["broken"] = probe["broken"]
+        snapshot["broken_reason"] = probe["broken_reason"]
+        snapshot["source"] = probe["source"]
         if not snapshot["download_url"]:
             snapshot["download_url"] = download_url_for_platform() or ""
         return snapshot
@@ -787,21 +1092,27 @@ class FfmpegInstaller:
                 path_warning="",
             )
             return self.status()
-        existing = resolve_ffmpeg_path(self.data_dir)
-        if existing and not force:
-            version = ffmpeg_version(existing)
+        existing = probe_ffmpeg(self.data_dir)
+        if existing["found"] and not force:
+            version = existing["version"]
             self._set_state(
                 state="done",
                 progress_pct=100.0,
                 message="FFmpeg is already installed.",
                 error="",
                 version=version,
-                path=existing,
+                path=existing["path"],
                 found=True,
+                broken=False,
+                broken_reason="",
+                source=existing["source"],
                 failed_step="",
                 path_warning="",
             )
             return self.status()
+        # A binary that exists but does not run (probe["broken"]) falls
+        # through to a real install: the bundled binary replaces the
+        # broken one as the preferred candidate, which is the fix.
         self._set_state(
             state="downloading",
             progress_pct=0.0,
@@ -1124,6 +1435,10 @@ __all__ = [
     "download_urls_for_platform",
     "ensure_bundled_on_path",
     "ffmpeg_version",
+    "ffprobe_version",
+    "probe_ffmpeg",
+    "probe_ffprobe",
+    "refresh_process_path_from_registry",
     "resolve_ffmpeg_path",
 ]
 

@@ -107,7 +107,10 @@ from pathlib import Path
 
 import httpx
 
-from clipforge.ffmpeg_install import add_to_user_path_windows
+from clipforge.ffmpeg_install import (
+    add_to_user_path_windows,
+    refresh_process_path_from_registry,
+)
 
 # ---------------------------------------------------------------- sources
 #: ``.../releases/latest/download/`` — always the newest stable release.
@@ -255,59 +258,13 @@ _SOURCE_PATH = "PATH"
 _SOURCE_STORED = "saved install location"
 _SOURCE_BUNDLED = "app data folder (one-click install)"
 
-
-def _read_windows_registry_path() -> list[str]:
-    """User + system PATH, as the Windows registry currently has them.
-
-    A running process never sees registry PATH edits (an installer
-    updating ``HKCU\\Environment\\Path`` does not touch it), so a
-    re-check reads the registry directly instead of trusting the
-    frozen process PATH. Returns [] off Windows or when the registry
-    cannot be read. ``%VAR%`` references are expanded.
-    """
-    try:
-        import winreg  # noqa: PLC0415  (Windows-only stdlib module)
-    except ImportError:
-        return []
-    entries: list[str] = []
-    for root, subkey in (
-        (winreg.HKEY_CURRENT_USER, r"Environment"),
-        (
-            winreg.HKEY_LOCAL_MACHINE,
-            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
-        ),
-    ):
-        try:
-            with winreg.OpenKey(root, subkey, 0, winreg.KEY_READ) as key:
-                raw, _ = winreg.QueryValueEx(key, "Path")
-        except OSError:
-            continue
-        if raw:
-            entries.extend(part for part in str(raw).split(";") if part.strip())
-    return [os.path.expandvars(entry) for entry in entries]
-
-
-def refresh_process_path_from_registry() -> list[str]:
-    """Merge the registry PATH into this process's PATH (Windows only).
-
-    Returns the dirs that were added ([] when nothing was new, or off
-    Windows). Idempotent: entries already in the process PATH are not
-    duplicated, and the existing order is kept.
-    """
-    if platform.system() != "Windows":
-        return []
-    current = os.environ.get("PATH", "")
-    parts = current.split(os.pathsep) if current else []
-    seen = {os.path.normcase(part) for part in parts}
-    added: list[str] = []
-    for entry in _read_windows_registry_path():
-        if os.path.normcase(entry) not in seen:
-            parts.append(entry)
-            seen.add(os.path.normcase(entry))
-            added.append(entry)
-    if added:
-        os.environ["PATH"] = os.pathsep.join(parts)
-    return added
+# NOTE (v0.9.2): _read_windows_registry_path /
+# refresh_process_path_from_registry moved to
+# clipforge.ffmpeg_install (FFmpeg detection needs the same fix).
+# refresh_process_path_from_registry is imported above, so it stays
+# importable from this module (see __all__ at the end of this file);
+# _read_windows_registry_path must now be imported from
+# clipforge.ffmpeg_install.
 
 
 def _windows_home_dirs() -> dict[str, Path]:
