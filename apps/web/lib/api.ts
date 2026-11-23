@@ -1002,6 +1002,16 @@ export interface YtDlpInstallStatus {
   failed_step: string;
   /** Non-fatal Windows PATH warning on an otherwise successful install ("" when none). */
   path_warning: string;
+  /** True when a yt-dlp file exists but does not run (--version fails). */
+  broken: boolean;
+  /** Plain-language reason when `broken` is true ("" otherwise). */
+  broken_reason: string;
+  /** Where the working (or broken) yt-dlp was found, e.g. "PATH" or
+   *  "Python user Scripts folder (pip install)" ("" when none found). */
+  source: string;
+  /** PATH dirs the last re-check merged into the server from the
+   *  Windows registry (only present on a POST /yt-dlp/recheck answer). */
+  path_refreshed: string[];
 }
 
 const YTDLP_INSTALL_STATES: YtDlpInstallState[] = [
@@ -1028,12 +1038,24 @@ export function normalizeYtDlpInstallStatus(raw: unknown): YtDlpInstallStatus | 
     checksum_verified: typeof r.checksum_verified === "boolean" ? r.checksum_verified : null,
     failed_step: typeof r.failed_step === "string" ? r.failed_step : "",
     path_warning: typeof r.path_warning === "string" ? r.path_warning : "",
+    broken: r.broken === true,
+    broken_reason: typeof r.broken_reason === "string" ? r.broken_reason : "",
+    source: typeof r.source === "string" ? r.source : "",
+    path_refreshed: Array.isArray(r.path_refreshed) ? r.path_refreshed.map(String) : [],
   };
 }
 
 /** GET /yt-dlp/status — pollable install progress (returns null when the API is unreachable). */
 export async function getYtDlpInstallStatus(): Promise<YtDlpInstallStatus | null> {
   return normalizeYtDlpInstallStatus(await apiGet<unknown>("/yt-dlp/status"));
+}
+
+/** POST /yt-dlp/recheck — re-probe for a manually installed yt-dlp
+ *  (pip / winget / PowerShell) with no app restart. Returns the fresh
+ *  status, or null when the API is unreachable. */
+export async function recheckYtDlp(): Promise<YtDlpInstallStatus | null> {
+  const res = await apiPostJson("/yt-dlp/recheck");
+  return res.ok ? normalizeYtDlpInstallStatus(res.data) : null;
 }
 
 /** POST /yt-dlp/install — start the one-click install (returns immediately; poll the status). */
@@ -1242,7 +1264,7 @@ export interface AppSettingsView {
   credentials: Record<string, { client_id: MaskedCredential; client_secret: MaskedCredential }>;
   data_dir: string; secret_backend: string;
   ffmpeg: { found: boolean; path: string; version: string; install_url: string };
-  yt_dlp: { found: boolean; path: string; version: string; install_url: string };
+  yt_dlp: { found: boolean; path: string; version: string; install_url: string; broken: boolean; broken_reason: string; source: string };
   monetization_thresholds: { platform: string; program: string; threshold: Record<string, number>; note: string }[];
 }
 
@@ -1293,6 +1315,9 @@ export function normalizeSettings(raw: unknown): AppSettingsView | null {
       path: String(ytDlp.path ?? ""),
       version: String(ytDlp.version ?? ""),
       install_url: String(ytDlp.install_url ?? ""),
+      broken: ytDlp.broken === true,
+      broken_reason: String(ytDlp.broken_reason ?? ""),
+      source: String(ytDlp.source ?? ""),
     },
     monetization_thresholds: Array.isArray(r.monetization_thresholds)
       ? (r.monetization_thresholds as Record<string, unknown>[]).map((t) => ({

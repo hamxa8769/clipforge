@@ -45,11 +45,13 @@ approved Post record, explicit credentials, and ``dry_run=false``):
                                      (one-click FFmpeg install: official
                                       build into <data_dir>/ffmpeg, progress
                                       pollable, PATH updated on Windows)
-  GET  /yt-dlp/status | POST /yt-dlp/install
+  GET  /yt-dlp/status | POST /yt-dlp/install | POST /yt-dlp/recheck
                                      (one-click yt-dlp install: official
                                       release binary into <data_dir>/yt-dlp,
                                       SHA-256 verified, progress pollable,
-                                      PATH updated on Windows)
+                                      PATH updated on Windows; recheck
+                                      re-probes for a manually installed
+                                      yt-dlp with no restart)
   GET  /monetization                 (tracker; ?platform=&subs=&...)
   GET  /analytics | GET /analytics/{account_id}
   POST /scheduler/run                (run due posts; dry-run default)
@@ -2447,10 +2449,30 @@ def ytdlp_status():
     the published SHA-256 (release ``SHA2-256SUMS``) matched, False
     when no checksum file was available for the build (the download
     still came over HTTPS from the official source), None before
-    verification ran. ``found`` / ``path`` / ``version`` say whether
-    yt-dlp is usable right now, whatever installed it.
+    verification ran. ``found`` / ``path`` / ``version`` / ``source``
+    say whether yt-dlp is usable right now, whatever installed it —
+    ``found`` is True only when the binary runs (``--version``), and
+    ``source`` names where it was found (PATH, pip Scripts folder,
+    winget, …). When a binary exists but does not run, ``found`` is
+    False and ``broken`` / ``broken_reason`` name the broken copy
+    instead of claiming it is ready. ``POST /yt-dlp/recheck``
+    re-probes on demand (no restart).
     """
     return _ytdlp_installer().status()
+
+
+@app.post("/yt-dlp/recheck")
+def ytdlp_recheck():
+    """Re-check for yt-dlp right now, without restarting the app.
+
+    For the user who just installed yt-dlp themselves (PowerShell /
+    pip / winget) and the app still says "missing": re-reads the
+    Windows registry PATH into this process, then re-probes every
+    known install location. Returns the same dict as
+    ``GET /yt-dlp/status``, plus ``path_refreshed`` (the PATH dirs the
+    registry added to this process). Never starts an install.
+    """
+    return _ytdlp_installer().recheck()
 
 
 @app.post("/yt-dlp/install", status_code=202)

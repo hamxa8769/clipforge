@@ -526,8 +526,47 @@ test("normalizeYtDlpInstallStatus rejects unknown states and non-objects", () =>
   assert.equal(normalizeYtDlpInstallStatus("done"), null);
 });
 
+test("normalizeYtDlpInstallStatus passes source, broken and path_refreshed through (v0.9.1)", () => {
+  const s = normalizeYtDlpInstallStatus({
+    state: "idle", progress_pct: 0, downloaded_bytes: 0, total_bytes: null,
+    message: "", error: "", version: "2026.10.26",
+    path: "C:\\Users\\hamxa\\AppData\\Roaming\\Python\\Python313\\Scripts\\yt-dlp.exe",
+    found: true, download_url: "", platform: "Windows",
+    path_added: null, checksum_verified: null, failed_step: "", path_warning: "",
+    broken: false, broken_reason: "", source: "Python user Scripts folder (pip install)",
+    path_refreshed: ["C:\\Users\\hamxa\\AppData\\Roaming\\Python\\Python313\\Scripts"],
+  });
+  assert.equal(s?.found, true);
+  assert.equal(s?.version, "2026.10.26");
+  assert.equal(s?.source, "Python user Scripts folder (pip install)");
+  assert.equal(s?.broken, false);
+  assert.equal(s?.path_refreshed.length, 1);
+  const broken = normalizeYtDlpInstallStatus({
+    state: "idle", progress_pct: 0, downloaded_bytes: 0, total_bytes: null,
+    message: "", error: "", version: "",
+    path: "C:\\Tools\\yt-dlp.exe", found: false, download_url: "", platform: "Windows",
+    path_added: null, checksum_verified: null, failed_step: "", path_warning: "",
+    broken: true,
+    broken_reason: "yt-dlp was found at C:\\Tools\\yt-dlp.exe (PATH) but does not run (yt-dlp --version failed).",
+    source: "PATH", path_refreshed: [],
+  });
+  assert.equal(broken?.found, false);
+  assert.equal(broken?.broken, true);
+  assert.ok(broken?.broken_reason.includes("does not run"));
+  // Older backends omit the v0.9.1 fields — defaults, not a crash.
+  const legacy = normalizeYtDlpInstallStatus({
+    state: "done", progress_pct: 100, downloaded_bytes: 0, total_bytes: null,
+    message: "", error: "", version: "2026.10.26", path: "/tmp/yt-dlp/yt-dlp",
+    found: true, download_url: "", platform: "Linux",
+    path_added: null, checksum_verified: null, failed_step: "", path_warning: "",
+  });
+  assert.equal(legacy?.broken, false);
+  assert.equal(legacy?.source, "");
+  assert.deepEqual(legacy?.path_refreshed, []);
+});
+
 test("ytdlpInstallRunning is true only while a run is active (no extracting step)", () => {
-  const base = { progress_pct: 0, downloaded_bytes: 0, total_bytes: null, message: "", error: "", version: "", path: "", found: false, download_url: "", platform: "Linux", path_added: null, checksum_verified: null, failed_step: "", path_warning: "" };
+  const base = { progress_pct: 0, downloaded_bytes: 0, total_bytes: null, message: "", error: "", version: "", path: "", found: false, download_url: "", platform: "Linux", path_added: null, checksum_verified: null, failed_step: "", path_warning: "", broken: false, broken_reason: "", source: "", path_refreshed: [] as string[] };
   for (const state of ["downloading", "verifying", "installing"] as const) {
     assert.equal(ytdlpInstallRunning({ ...base, state }), true);
   }
@@ -548,6 +587,8 @@ test("normalizeSettings keeps the yt-dlp version when present", () => {
   });
   assert.equal(s?.yt_dlp.found, true);
   assert.equal(s?.yt_dlp.version, "2026.10.26");
+  assert.equal(s?.yt_dlp.broken, false);
+  assert.equal(s?.yt_dlp.source, "");
   assert.equal(s?.ffmpeg.found, true);
 });
 

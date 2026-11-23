@@ -204,7 +204,7 @@ yet — `brew install ffmpeg` is the one-command route). The same
 installer is available from the command line:
 `python scripts/install-ffmpeg.py [--data-dir ./data] [--force]`.
 
-### `GET /yt-dlp/status` · `POST /yt-dlp/install` (v0.8.1)
+### `GET /yt-dlp/status` · `POST /yt-dlp/install` · `POST /yt-dlp/recheck` (v0.8.1, re-check v0.9.1)
 
 One-click yt-dlp install — the same pattern as FFmpeg, for the tool
 that downloads YouTube sources. `POST /yt-dlp/install` (202) starts
@@ -233,6 +233,23 @@ is available from the command line:
 A job blocked at Ingest with `yt_dlp_missing` is retryable from the
 Pipeline page once the install finishes — the install button sits
 right on the blocked Ingest stage, next to Retry.
+
+Detection (v0.9.1): `GET /yt-dlp/status` reports `found` only when a
+yt-dlp binary both exists and runs (`--version`), with `path`,
+`version`, and `source` — where it was found (saved install
+location, app data folder, PATH, or a standard install location
+such as the pip user Scripts folder or a winget shim). A binary
+that exists but does not run is reported as `broken` with a
+plain-language `broken_reason`, never as "found". `POST
+/yt-dlp/recheck` re-probes on demand with no restart: on Windows it
+first re-reads the user + system PATH from the registry into the
+running process, so a yt-dlp installed after the server started
+(PowerShell / pip / winget) is picked up at once, and it returns
+the same status dict plus `path_refreshed` (the PATH dirs the
+registry added). The Re-check button sits next to the install
+button on the blocked Ingest stage, the Agent page, and Settings.
+(The worker gate uses the same detection, so a re-check that finds
+yt-dlp unblocks the run.)
 
 ### `GET /analytics` · `GET /analytics/{account_id}`
 
