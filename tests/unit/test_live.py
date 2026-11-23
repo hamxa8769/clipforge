@@ -584,7 +584,12 @@ def _worker_env(tmp_path, monkeypatch):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     stub = bindir / "yt-dlp"
-    stub.write_text("#!/bin/sh\nexit 0\n")
+    # v0.9.2 verifies tools by running them: the probe calls
+    # ``yt-dlp --version`` and reports a binary that prints nothing as
+    # ``broken``, which blocks the job before capture. The stub must
+    # therefore answer --version like a real yt-dlp; any other call
+    # stays a silent success, as before.
+    stub.write_text('#!/bin/sh\nif [ "$1" = "--version" ]; then echo "2026.01.01"; fi\nexit 0\n')
     stub.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bindir}:{os.environ.get('PATH', '')}")
     monkeypatch.setenv("CLIPFORGE_DATA_DIR", str(tmp_path / "data"))
