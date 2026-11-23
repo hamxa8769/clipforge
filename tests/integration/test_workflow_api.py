@@ -419,9 +419,17 @@ def test_worker_queue_and_run_next(test_video):
 
     ran = client.post("/worker/run-next")
     assert ran.status_code == 200, ran.text
-    assert ran.json()["ran"]["id"] == job_id
-    assert ran.json()["ran"]["status"] == "review"
-    assert ran.json()["ran"]["demo"] is True
+    if ran.json()["ran"] is None:
+        # Race: the live dispatcher claimed the seeded job between the
+        # GET above and this POST (it polls every 0.2 s). The job is
+        # then already running — wait for it to finish instead; the
+        # outcome (review, queue drained) is the same either way.
+        body = _wait_for_status(job_id, "review", timeout=180.0)
+        assert body["demo"] is True
+    else:
+        assert ran.json()["ran"]["id"] == job_id
+        assert ran.json()["ran"]["status"] == "review"
+        assert ran.json()["ran"]["demo"] is True
     assert client.get("/worker/queue").json()["queued"] == []
 
     empty = client.post("/worker/run-next")
