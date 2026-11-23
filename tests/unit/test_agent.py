@@ -297,11 +297,23 @@ def test_start_real_video_without_yt_dlp_fails_fast(tmp_path, monkeypatch):
     """A real-video run with no yt-dlp fails BEFORE any thread starts
     (plain AgentError at click time) instead of briefly reporting
     "running" and then silently landing in "error" with ON still shown."""
-    # v0.9.1: the agent gate uses resolve_yt_dlp_path (PATH + bundled
-    # + standard install locations), not shutil.which — stub that.
+    # v0.9.2: the agent gate uses the verified probe (probe_yt_dlp —
+    # the binary must *run*, not merely exist), not
+    # resolve_yt_dlp_path — stub the probe to report "missing".
     import clipforge.agent as agent_mod
 
-    monkeypatch.setattr(agent_mod, "resolve_yt_dlp_path", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        agent_mod,
+        "probe_yt_dlp",
+        lambda *args, **kwargs: {
+            "found": False,
+            "path": "",
+            "version": "",
+            "broken": False,
+            "broken_reason": "",
+            "source": "",
+        },
+    )
     agent = _agent(tmp_path)
     with pytest.raises(AgentError, match="yt-dlp"):
         agent.start(_config(transcript_text=None))

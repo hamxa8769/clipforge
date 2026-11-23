@@ -283,11 +283,24 @@ def test_job_blocked_when_ffmpeg_missing(
     client: TestClient, test_video: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """ffprobe (part of FFmpeg) hidden: the job blocks with the install link."""
-    real_which = shutil.which
+    # v0.9.2: the worker gate uses the verified probe
+    # (clipforge.requirements.probe_ffprobe — the binary must *run*),
+    # not shutil.which: a bare which-stub no longer hides a real
+    # ffprobe (e.g. /usr/bin/ffprobe), so stub the probe to report
+    # "missing" instead.
+    import clipforge.requirements as requirements_mod
+
     monkeypatch.setattr(
-        shutil,
-        "which",
-        lambda name: None if name in ("ffmpeg", "ffprobe") else real_which(name),
+        requirements_mod,
+        "probe_ffprobe",
+        lambda *args, **kwargs: {
+            "found": False,
+            "path": "",
+            "version": "",
+            "broken": False,
+            "broken_reason": "",
+            "source": "",
+        },
     )
     job = client.post(
         "/jobs",

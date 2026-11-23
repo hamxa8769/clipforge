@@ -63,7 +63,7 @@ from clipforge.rule_engine import extract_keywords
 from clipforge.seo import PLATFORMS
 from clipforge.transcribe import fallback_transcript_from_text
 from clipforge.trending import is_trending_source
-from clipforge.ytdlp_install import resolve_yt_dlp_path, ytdlp_missing_message
+from clipforge.ytdlp_install import probe_yt_dlp, resolve_yt_dlp_path, ytdlp_missing_message
 
 RIGHTS_NOTICE = (
     "The ClipForge Agent only works with videos you own or have the "
@@ -303,11 +303,20 @@ def _require_pipeline_tools(config: AgentConfig, data_dir: str | Path | None = N
     toggle still shows ON. That silent failure is what made the Agent
     toggle look broken: ON did nothing visible and gave no reason.
     The demo-transcript path needs no download, so it is exempt.
-    The bundled yt-dlp (one-click install) counts as installed."""
+    The bundled yt-dlp (one-click install) counts as installed.
+
+    Verified (v0.9.2): the binary must *run* (``yt-dlp --version``),
+    not merely exist — a broken copy blocks the start with its plain
+    reason instead of failing the download mid-way.
+    """
     if config.transcript_text:
         return
-    if resolve_yt_dlp_path(data_dir) is None:
-        raise AgentError(ytdlp_missing_message() + " Or use a local file instead.")
+    probe = probe_yt_dlp(data_dir)
+    if probe["found"]:
+        return
+    if probe["broken"]:
+        raise AgentError(probe["broken_reason"] + " Or use a local file instead.")
+    raise AgentError(ytdlp_missing_message() + " Or use a local file instead.")
 
 
 class Agent:

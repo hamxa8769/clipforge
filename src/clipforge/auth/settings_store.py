@@ -19,8 +19,6 @@ precedence for the running server, so the toggle works without a restart.
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -28,7 +26,7 @@ import httpx
 
 from clipforge.auth.providers import PLATFORMS, get_provider
 from clipforge.auth.secrets import SecretStore, mask_secret
-from clipforge.ffmpeg_install import resolve_ffmpeg_path
+from clipforge.ffmpeg_install import probe_ffmpeg
 from clipforge.monetization import THRESHOLDS
 from clipforge.workflow import FFMPEG_DOWNLOAD_URL
 from clipforge.ytdlp_install import YTDLP_DOWNLOAD_PAGE, probe_yt_dlp
@@ -98,35 +96,28 @@ def normalize_onboarding(data: object) -> dict[str, object]:
 def ffmpeg_info(data_dir: str | Path | None = None, stored_path: str | None = None) -> dict:
     """Honest FFmpeg report: found, where, and which version.
 
-    Resolution order: the path saved by the one-click install, then
-    the installer-managed ``<data_dir>/ffmpeg/bin/`` binary, then
-    whatever is on PATH. ``version`` is the first line of
-    ``ffmpeg -version`` (e.g. ``ffmpeg version 6.1.1``) when the binary
-    runs, else "" — never a guessed version, never a crash when the
-    binary is absent.
+    Verified (v0.9.2, :func:`clipforge.ffmpeg_install.probe_ffmpeg`):
+    the saved install path, the installer-managed
+    ``<data_dir>/ffmpeg/bin/`` binary, PATH (registry-merged on
+    Windows), and the standard install locations. ``version`` is the
+    first line of ``ffmpeg -version`` (e.g. ``ffmpeg version 6.1.1``)
+    when the binary runs, else "". When a binary exists but does not
+    run, ``found`` is False and ``broken`` / ``broken_reason`` say so
+    plainly — a broken FFmpeg no longer counts as installed.
     """
-    path: str | None = None
-    if data_dir is not None:
-        path = resolve_ffmpeg_path(data_dir, stored_path)
+    if data_dir is None and stored_path is None:
+        probe = probe_ffmpeg()
     else:
-        path = stored_path if stored_path and Path(stored_path).is_file() else None
-        if path is None:
-            path = shutil.which("ffmpeg")
-    info = {
-        "found": bool(path),
-        "path": path or "",
-        "version": "",
+        probe = probe_ffmpeg(data_dir, stored_path)
+    return {
+        "found": probe["found"],
+        "path": probe["path"],
+        "version": probe["version"],
         "install_url": FFMPEG_DOWNLOAD_URL,
+        "broken": probe["broken"],
+        "broken_reason": probe["broken_reason"],
+        "source": probe["source"],
     }
-    if not path:
-        return info
-    try:
-        proc = subprocess.run([path, "-version"], capture_output=True, text=True, timeout=5)
-        first = (proc.stdout or "").splitlines()[0].strip() if proc.stdout else ""
-        info["version"] = first
-    except (OSError, ValueError, subprocess.SubprocessError):
-        pass
-    return info
 
 
 def ytdlp_info(data_dir: str | Path | None = None, stored_path: str | None = None) -> dict:
