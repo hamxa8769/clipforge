@@ -24,6 +24,7 @@ import {
   NICHE_PRESETS, type AgentConfig, type AgentStatus, type LlmProvider,
 } from "@/lib/api";
 import GeminiSetup from "@/components/GeminiSetup";
+import { useServerStatus } from "@/components/ServerStatusProvider";
 import { YtDlpInstallSection } from "@/components/YtDlpInstaller";
 import {
   Card, CardHeader, DemoBadge, EmptyState, ErrorBanner, PrimaryButton,
@@ -48,7 +49,10 @@ export default function AgentPage() {
   const [providers, setProviders] = useState<LlmProvider[] | null>(null);
   const [engineAvailable, setEngineAvailable] = useState(false);
   const [loaded, setLoaded] = useState(false);
-  const [live, setLive] = useState(false);
+  // Liveness is the shared server status (v0.9.3) — no longer "did
+  // my own status/config fetch happen to succeed".
+  const server = useServerStatus();
+  const live = server.live;
   const [saving, setSaving] = useState(false);
   const [acting, setActing] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -66,7 +70,6 @@ export default function AgentPage() {
     const [fetchedStatus, fetchedConfig, fetchedProviders] = await Promise.all([
       getAgentStatus(), getAgentConfig(), getLlmProviders(),
     ]);
-    setLive(fetchedStatus !== null || fetchedConfig !== null);
     setEngineAvailable(fetchedStatus !== null);
     setStatus(fetchedStatus);
     setConfig(fetchedConfig);
@@ -89,6 +92,9 @@ export default function AgentPage() {
   }, []);
 
   useEffect(() => { load().catch(() => setLoaded(true)); }, [load]);
+
+  // When the server comes back after being down, reload on our own.
+  useEffect(() => { if (live) load().catch(() => setLoaded(true)); }, [live, load]);
 
   // Live status refresh while the agent is running.
   useEffect(() => {

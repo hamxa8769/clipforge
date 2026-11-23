@@ -722,7 +722,7 @@ async function apiPutJson(path: string, body: unknown = {}): Promise<ApiResult> 
         : undefined;
     return { ok: res.ok, status: res.status, data, error: res.ok ? undefined : (detailText ?? `Request failed (${res.status})`) };
   } catch {
-    return { ok: false, status: 0, data: null, error: "API unreachable" };
+    return { ok: false, status: 0, data: null, error: "The server is not answering" };
   }
 }
 
@@ -827,9 +827,34 @@ export function pipelineProgress(status: JobStatus): number {
   return Math.round((activeStageIndex(status) / PIPELINE_STAGES.length) * 100);
 }
 
-export async function apiGet<T>(path: string): Promise<T | null> {
+/**
+ * Timeout for API calls whose server handler runs tool probes
+ * (GET /settings, /requirements/status, /ffmpeg/status,
+ * /yt-dlp/status, POST /requirements/recheck): the server runs
+ * `ffmpeg -version` / `yt-dlp --version` (up to 10 s per candidate)
+ * plus OS keyring reads for /settings, so the old 3 s client timeout
+ * fired while the server was still working — and the UI read that
+ * timeout as "server unreachable" while /health said "live" (v0.9.2
+ * screenshot). See also lib/server-status.ts.
+ */
+export const SLOW_API_TIMEOUT_MS = 15000;
+
+/**
+ * GET with a client-side timeout. The default 3 s is for fast
+ * endpoints (notably /health, the liveness probe). Endpoints whose
+ * server handler runs tool probes — GET /settings (keyring reads +
+ * ffmpeg/yt-dlp `--version`, up to 10 s per candidate), /requirements
+ * /status, /ffmpeg/status, /yt-dlp/status — pass SLOW_API_TIMEOUT_MS:
+ * the old unconditional 3 s fired while the server was still working
+ * and the UI read the timeout as "server unreachable" while /health
+ * said "live" (v0.9.2 screenshot). A timed-out call returns null,
+ * never throws, so callers must treat null as "couldn't check", not
+ * as proof the server is down — liveness comes only from the shared
+ * server-status hook.
+ */
+export async function apiGet<T>(path: string, timeoutMs = 3000): Promise<T | null> {
   try {
-    const res = await fetch(`${API_URL}${path}`, { cache: "no-store", signal: AbortSignal.timeout(3000) });
+    const res = await fetch(`${API_URL}${path}`, { cache: "no-store", signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) return null;
     return (await res.json()) as T;
   } catch { return null; }
@@ -837,9 +862,9 @@ export async function apiGet<T>(path: string): Promise<T | null> {
 
 export interface ApiResult { ok: boolean; status: number; data: unknown; error?: string; }
 
-export async function apiPostJson(path: string, body: unknown = {}): Promise<ApiResult> {
+export async function apiPostJson(path: string, body: unknown = {}, timeoutMs = 5000): Promise<ApiResult> {
   try {
-    const res = await fetch(`${API_URL}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(5000) });
+    const res = await fetch(`${API_URL}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
     let data: unknown = null;
     try { data = await res.json(); } catch { /* non-JSON error body */ }
     const detail = (data as { detail?: unknown } | null)?.detail;
@@ -853,7 +878,7 @@ export async function apiPostJson(path: string, body: unknown = {}): Promise<Api
         : undefined;
     return { ok: res.ok, status: res.status, data, error: res.ok ? undefined : (detailText ?? `Request failed (${res.status})`) };
   } catch {
-    return { ok: false, status: 0, data: null, error: "API unreachable" };
+    return { ok: false, status: 0, data: null, error: "The server is not answering" };
   }
 }
 
@@ -936,6 +961,12 @@ export interface FfmpegInstallStatus {
   failed_step: string;
   /** Non-fatal Windows PATH warning on an otherwise successful install ("" when none). */
   path_warning: string;
+  /** True when an FFmpeg file exists but does not run (probe failed). */
+  broken: boolean;
+  /** Plain-language reason when `broken` is true ("" otherwise). */
+  broken_reason: string;
+  /** Where the working (or broken) FFmpeg was found ("" when none found). */
+  source: string;
 }
 
 const FFMPEG_INSTALL_STATES: FfmpegInstallState[] = [
@@ -962,12 +993,15 @@ export function normalizeFfmpegInstallStatus(raw: unknown): FfmpegInstallStatus 
     checksum_verified: typeof r.checksum_verified === "boolean" ? r.checksum_verified : null,
     failed_step: typeof r.failed_step === "string" ? r.failed_step : "",
     path_warning: typeof r.path_warning === "string" ? r.path_warning : "",
+    broken: r.broken === true,
+    broken_reason: typeof r.broken_reason === "string" ? r.broken_reason : "",
+    source: typeof r.source === "string" ? r.source : "",
   };
 }
 
 /** GET /ffmpeg/status — pollable install progress (returns null when the API is unreachable). */
 export async function getFfmpegInstallStatus(): Promise<FfmpegInstallStatus | null> {
-  return normalizeFfmpegInstallStatus(await apiGet<unknown>("/ffmpeg/status"));
+  return normalizeFfmpegInstallStatus(await apiGet<unknown>("/ffmpeg/status", SLOW_API_TIMEOUT_MS));
 }
 
 /** POST /ffmpeg/install — start the one-click install (returns immediately; poll the status). */
@@ -1047,14 +1081,14 @@ export function normalizeYtDlpInstallStatus(raw: unknown): YtDlpInstallStatus | 
 
 /** GET /yt-dlp/status — pollable install progress (returns null when the API is unreachable). */
 export async function getYtDlpInstallStatus(): Promise<YtDlpInstallStatus | null> {
-  return normalizeYtDlpInstallStatus(await apiGet<unknown>("/yt-dlp/status"));
+  return normalizeYtDlpInstallStatus(await apiGet<unknown>("/yt-dlp/status", SLOW_API_TIMEOUT_MS));
 }
 
 /** POST /yt-dlp/recheck — re-probe for a manually installed yt-dlp
  *  (pip / winget / PowerShell) with no app restart. Returns the fresh
  *  status, or null when the API is unreachable. */
 export async function recheckYtDlp(): Promise<YtDlpInstallStatus | null> {
-  const res = await apiPostJson("/yt-dlp/recheck");
+  const res = await apiPostJson("/yt-dlp/recheck", {}, SLOW_API_TIMEOUT_MS);
   return res.ok ? normalizeYtDlpInstallStatus(res.data) : null;
 }
 
@@ -1133,13 +1167,13 @@ export function normalizeRequirementsStatus(raw: unknown): RequirementsStatus | 
 /** GET /requirements/status — the whole pre-flight check, live
  *  (returns null when the API is unreachable). */
 export async function getRequirementsStatus(): Promise<RequirementsStatus | null> {
-  return normalizeRequirementsStatus(await apiGet<unknown>("/requirements/status"));
+  return normalizeRequirementsStatus(await apiGet<unknown>("/requirements/status", SLOW_API_TIMEOUT_MS));
 }
 
 /** POST /requirements/recheck — re-run the whole check live, right
  *  now (returns null when the API is unreachable). */
 export async function recheckRequirements(): Promise<RequirementsStatus | null> {
-  const res = await apiPostJson("/requirements/recheck");
+  const res = await apiPostJson("/requirements/recheck", {}, SLOW_API_TIMEOUT_MS);
   return res.ok ? normalizeRequirementsStatus(res.data) : null;
 }
 
@@ -1282,7 +1316,7 @@ export function explainConnectionError(message: string | undefined | null): { su
   if (lower.includes("invalid_client") || lower.includes("unauthorized_client")) return { summary: "The platform did not recognise the client ID or secret.", nextStep: "Open the Connect wizard, re-copy the client ID and client secret from the platform's developer app, and save them again. Make sure no extra spaces were pasted." };
   if (lower.includes("access_denied") || lower.includes("user denied")) return { summary: "Access was declined on the platform's sign-in page.", nextStep: "Press Connect again and choose Allow / Grant access on the platform's page." };
   if (lower.includes("not configured") || lower.includes("not set up")) return { summary: "The platform app is not set up in ClipForge yet.", nextStep: "Open the Connect wizard for this platform — it walks through creating the developer app and pasting the client ID and secret." };
-  if (lower.includes("api unreachable") || lower.includes("unreachable")) return { summary: "ClipForge could not reach its own server.", nextStep: "Check the server is running (the status bar at the top shows this), then try again." };
+  if (lower.includes("api unreachable") || lower.includes("unreachable") || lower.includes("not answering")) return { summary: "ClipForge could not reach its own server.", nextStep: "Check the server is running (the status bar at the top shows this), then try again." };
   return { summary: raw, nextStep: "Try the Connect wizard again — it checks each step and shows the exact error at the step that failed." };
 }
 
@@ -1407,7 +1441,7 @@ export function normalizeSettings(raw: unknown): AppSettingsView | null {
 
 /** GET /settings — masked credentials + preferences + environment status. */
 export async function getSettings(): Promise<AppSettingsView | null> {
-  const raw = await apiGet<unknown>("/settings");
+  const raw = await apiGet<unknown>("/settings", SLOW_API_TIMEOUT_MS);
   return raw === null ? null : normalizeSettings(raw);
 }
 
@@ -1428,7 +1462,7 @@ export async function saveSettings(body: Record<string, unknown>): Promise<ApiRe
         : undefined;
     return { ok: res.ok, status: res.status, data, error: res.ok ? undefined : (detailText ?? `Request failed (${res.status})`) };
   } catch {
-    return { ok: false, status: 0, data: null, error: "API unreachable" };
+    return { ok: false, status: 0, data: null, error: "The server is not answering" };
   }
 }
 
@@ -2133,7 +2167,7 @@ export async function apiGetResult(path: string): Promise<ApiResult> {
         : undefined;
     return { ok: res.ok, status: res.status, data, error: res.ok ? undefined : (detailText ?? `Request failed (${res.status})`) };
   } catch {
-    return { ok: false, status: 0, data: null, error: "API unreachable" };
+    return { ok: false, status: 0, data: null, error: "The server is not answering" };
   }
 }
 

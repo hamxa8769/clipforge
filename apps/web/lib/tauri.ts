@@ -13,6 +13,13 @@
 // against those exact names; until the Rust side lands them, every
 // updater call resolves to null and the UI says updates are not
 // available in this build yet.
+//
+// Server commands (v0.9.3): `get_server_status` and `retry_server`
+// exist in main.rs and are granted by capabilities/default.json
+// (allow-get-server-status / allow-retry-server) — the web UI can
+// restart a dead server with the Restart button instead of leaving
+// the user to relaunch the whole app. In a plain browser both resolve
+// to null/false and no restart button is shown.
 import { isExternalUrl } from "./external-links";
 
 declare global {
@@ -41,6 +48,63 @@ async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>): Prom
 export async function getServerLogs(lines = 120): Promise<string | null> {
   const res = await tauriInvoke<string>("get_server_logs", { lines });
   return typeof res === "string" ? res : null;
+}
+
+/**
+ * Desktop shell's view of the server (Rust get_server_status), exactly
+ * as main.rs serialises ServerStatus: a `phase` tag — "starting" (with
+ * elapsed_secs + detail), "ready" (with url + port) or "failed" (with
+ * error) — plus how it was launched, the data dir, the log path, and
+ * the splash-time FFmpeg check. Null outside the desktop app.
+ *
+ * NOTE: the phase is set once at startup and never updated
+ * afterwards (diagnosis §1.1) — a mid-run death still reports the
+ * stale "ready" phase. The web UI treats GET /health (the shared
+ * server status) as the truth about liveness, and uses this only to
+ * describe a restart the shell just started.
+ */
+export interface RustServerStatus {
+  phase: "starting" | "ready" | "failed";
+  elapsed_secs?: number;
+  detail?: string;
+  url?: string;
+  port?: number;
+  error?: string;
+  source: string;
+  data_dir: string;
+  log_path: string;
+  ffmpeg: { available: boolean; version: string | null; path: string | null };
+}
+
+/** Ask the desktop shell what phase the server is in. Null = unavailable in this build. */
+export async function getServerStatus(): Promise<RustServerStatus | null> {
+  const res = await tauriInvoke<RustServerStatus>("get_server_status");
+  return res !== null && typeof res === "object" && typeof (res as { phase?: unknown }).phase === "string"
+    ? res
+    : null;
+}
+
+/**
+ * Ask the desktop shell to (re)start the server (Rust retry_server).
+ * Safe to call when a server is merely slow: the shell re-waits on a
+ * live child instead of killing it. Returns true when the shell
+ * accepted the restart; false when the command is unavailable (plain
+ * browser / older build) or the shell refused it (e.g. a start is
+ * already in progress). The caller must not claim success on false —
+ * the shared /health poll is what confirms the server is back.
+ *
+ * NOTE: retry_server returns Result<(), String>, and Tauri resolves
+ * Ok(()) as JSON null — so this does NOT use tauriInvoke (whose null
+ * means "error"): resolve means accepted, reject means refused.
+ */
+export async function retryServer(): Promise<boolean> {
+  if (!isTauri()) return false;
+  try {
+    await window.__TAURI__!.core!.invoke!("retry_server");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export interface UpdateInfo {

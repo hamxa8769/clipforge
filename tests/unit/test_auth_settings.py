@@ -152,3 +152,107 @@ def test_test_connection_survives_poisoned_proxy_env(
     assert result["ok"] is False
     assert "Test failed before reaching the API" not in result["message"]
     assert "Invalid port" not in result["message"]
+
+
+# --- v0.9.3: GET /settings caching (diagnosis P1-4) -----------------------
+# public_view() used to do 11 live keyring reads + 2 subprocess probes on
+# every call (~350-550 ms on Linux, seconds on Windows) while /health
+# answers in ~2 ms — the client timed /settings out at 3 s and the UI
+# called a live server "unreachable". Both are now cached for 60 s.
+
+
+def test_public_view_caches_tool_probes_within_ttl(
+    store: SettingsStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import clipforge.auth.settings_store as settings_module
+
+    calls = {"ffmpeg": 0, "yt_dlp": 0}
+
+    def _ffmpeg(*_args: object, **_kwargs: object) -> dict:
+        calls["ffmpeg"] += 1
+        return {
+            "found": True, "path": "/usr/bin/ffmpeg", "version": "ffmpeg version 8.1.2",
+            "broken": False, "broken_reason": "", "source": "PATH",
+        }
+
+    def _yt_dlp(*_args: object, **_kwargs: object) -> dict:
+        calls["yt_dlp"] += 1
+        return {
+            "found": True, "path": "/usr/bin/yt-dlp", "version": "2026.10.26",
+            "broken": False, "broken_reason": "", "source": "PATH",
+        }
+
+    monkeypatch.setattr(settings_module, "probe_ffmpeg", _ffmpeg)
+    monkeypatch.setattr(settings_module, "probe_yt_dlp", _yt_dlp)
+    first = store.public_view(env_dry_run=True)
+    assert first["ffmpeg"]["found"] is True
+    assert first["yt_dlp"]["version"] == "2026.10.26"
+    # Second call inside the TTL must not re-probe.
+    store.public_view(env_dry_run=True)
+    assert calls == {"ffmpeg": 1, "yt_dlp": 1}
+    # A recheck/install invalidates: the next call re-probes.
+    store.invalidate_tool_probes()
+    store.public_view(env_dry_run=True)
+    assert calls == {"ffmpeg": 2, "yt_dlp": 2}
+
+
+def test_set_ffmpeg_path_invalidates_tool_probe_cache(
+    store: SettingsStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import clipforge.auth.settings_store as settings_module
+
+    calls = {"n": 0}
+
+    def _ffmpeg(*_args: object, **_kwargs: object) -> dict:
+        calls["n"] += 1
+        return {
+            "found": False, "path": "", "version": "",
+            "broken": False, "broken_reason": "", "source": "",
+        }
+
+    monkeypatch.setattr(settings_module, "probe_ffmpeg", _ffmpeg)
+    store.public_view(env_dry_run=True)
+    assert calls["n"] == 1
+    # Remembering a new install must re-probe on the next view.
+    store.set_ffmpeg_path("/opt/clipforge/ffmpeg/bin/ffmpeg")
+    store.public_view(env_dry_run=True)
+    assert calls["n"] == 2
+    store.set_yt_dlp_path("/opt/clipforge/yt-dlp/yt-dlp")
+    store.public_view(env_dry_run=True)
+    assert calls["n"] == 3
+
+
+def test_credential_view_cached_but_invalidated_on_set(
+    store: SettingsStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.set_credential("llm", "api_key", "sk-first-key-1111")
+    calls = {"n": 0}
+    orig_get = store.secrets.get
+
+    def _counting_get(name: str) -> str | None:
+        calls["n"] += 1
+        return orig_get(name)
+
+    monkeypatch.setattr(store.secrets, "get", _counting_get)
+    first = store.credential_view("llm", "api_key")
+    assert first["last4"] == "1111"
+    # Second read inside the TTL must not hit the keyring again.
+    assert store.credential_view("llm", "api_key")["last4"] == "1111"
+    assert calls["n"] == 1
+    # Saving a new key invalidates: the next view reads live.
+    store.set_credential("llm", "api_key", "sk-second-key-2222")
+    assert store.credential_view("llm", "api_key")["last4"] == "2222"
+    assert calls["n"] == 2
+
+
+def test_get_credential_always_reads_live(
+    store: SettingsStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The auth path must never be served from the display cache."""
+    store.set_credential("llm", "api_key", "sk-one-1111")
+    assert store.credential_view("llm", "api_key")["last4"] == "1111"
+    # Changed behind the store's back (another writer, same keyring):
+    # get_credential sees it immediately; the cached view does not
+    # matter here — only the live value is used for API calls.
+    store.secrets.set("app:llm:api_key", "sk-two-2222")
+    assert store.get_credential("llm", "api_key") == "sk-two-2222"

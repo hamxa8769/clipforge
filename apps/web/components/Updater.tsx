@@ -13,8 +13,8 @@
 // the installer only replaces the app itself.
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getHealth } from "@/lib/api";
 import { checkForUpdates, downloadAndInstallUpdate, fmtBytes, getUpdateStatus, isTauri, type UpdateInfo, type UpdateStatus } from "@/lib/tauri";
+import { useServerStatus } from "./ServerStatusProvider";
 import { PrimaryButton, ProgressBar, SecondaryButton, Skeleton, ExternalLink } from "./ui";
 
 const RELEASES_URL = "https://github.com/hamxa8769/clipforge/releases";
@@ -29,6 +29,9 @@ type UpdaterState =
   | { kind: "error"; message: string };
 
 function useUpdater() {
+  // The running version comes from the shared server status (v0.9.3)
+  // — the updater no longer fetches /health itself.
+  const server = useServerStatus();
   const [state, setState] = useState<UpdaterState>({ kind: "checking" });
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -40,13 +43,15 @@ function useUpdater() {
     stopPolling();
     if (!isTauri()) { setState({ kind: "unavailable" }); return; }
     setState({ kind: "checking" });
-    const [info, health] = await Promise.all([checkForUpdates(), getHealth()]);
-    const current = health?.version ?? "";
+    const info = await checkForUpdates();
+    const current = server.health?.version ?? "";
     if (info === null) { setState({ kind: "unavailable" }); return; }
     if (info.error) { setState({ kind: "error", message: info.error }); return; }
     if (info.available) setState({ kind: "available", info, current });
     else setState({ kind: "uptodate", current: info.current_version ?? current });
-  }, [stopPolling]);
+    // Re-checks when the shared health (hence the version) arrives,
+    // so the displayed version is never stale from mount time.
+  }, [stopPolling, server.health?.version]);
 
   const install = useCallback(async () => {
     setState((prev) => (prev.kind === "available" ? { kind: "downloading", info: prev.info, progress: 0 } : prev));

@@ -24,6 +24,7 @@ import {
   Card, CardHeader, EmptyState, ErrorBanner, PrimaryButton, ProgressBar,
   SecondaryButton, Skeleton, StatusPill,
 } from "@/components/ui";
+import { ReconnectingNotice, useServerStatus } from "@/components/ServerStatusProvider";
 import { YtDlpInstallSection } from "@/components/YtDlpInstaller";
 
 // Backend stage name (JobStageEvent.stage) -> display stage index.
@@ -156,7 +157,10 @@ function PipelinePageInner() {
   const [posts, setPosts] = useState<Post[]>([]);
   const [candidateIds, setCandidateIds] = useState<Set<string>>(new Set());
   const [loaded, setLoaded] = useState(false);
-  const [live, setLive] = useState(false);
+  // Liveness is the shared server status (v0.9.3) — no longer "did
+  // my one-shot /jobs fetch happen to succeed".
+  const server = useServerStatus();
+  const live = server.live;
   const [error, setError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [retryMsg, setRetryMsg] = useState<string | null>(null);
@@ -166,7 +170,6 @@ function PipelinePageInner() {
   const loadJobs = useCallback(async () => {
     const fetched = await getJobs();
     setJobs(fetched);
-    setLive(fetched !== null);
     if (fetched && fetched.length > 0) {
       setSelectedId((prev) => (prev && fetched.some((j) => j.id === prev) ? prev : fetched[0].id));
     }
@@ -174,6 +177,9 @@ function PipelinePageInner() {
   }, []);
 
   useEffect(() => { loadJobs().catch(() => setLoaded(true)); }, [loadJobs]);
+
+  // When the server comes back after being down, reload on our own.
+  useEffect(() => { if (server.live) loadJobs().catch(() => setLoaded(true)); }, [server.live, loadJobs]);
 
   const loadDetail = useCallback(async (id: string) => {
     const [detail, fetchedLogs, fetchedPosts, candidates] = await Promise.all([
@@ -273,7 +279,8 @@ function PipelinePageInner() {
     return (
       <div className="space-y-6">
         <h1 className="text-2xl font-bold tracking-tight">Pipeline</h1>
-        <ErrorBanner message="The server did not answer, so no pipeline can be shown. Start the server, then reload this page." onRetry={() => loadJobs()} />
+        <ReconnectingNotice />
+        <p className="text-sm text-neutral-400">No pipeline can be shown until the server is back — this page reloads itself when it is.</p>
       </div>
     );
   }

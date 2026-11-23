@@ -17,12 +17,13 @@
 "use client";
 import { useEffect, useState } from "react";
 import {
-  apiGet, createAbTest, getAbResults, getAnalytics, getMonetizationFor, getRevenue,
+  createAbTest, getAbResults, getAnalytics, getMonetizationFor, getRevenue,
   addAffiliateLink, latestSnapshotPerPlatform,
   type AbVariant, type Monetization, type RevenueRow,
 } from "@/lib/api";
 import { demoAnalytics, demoMonetization } from "@/lib/mock";
 import { Card, CardHeader, DemoBadge, EmptyState, ErrorBanner, PrimaryButton, ProgressBar, SecondaryButton, Skeleton } from "@/components/ui";
+import { useServerStatus } from "@/components/ServerStatusProvider";
 
 function fmt(n: number) { return n.toLocaleString(); }
 
@@ -30,7 +31,9 @@ const PLATFORMS = ["youtube", "tiktok", "instagram", "facebook"] as const;
 
 export default function MonetizationPage() {
   const [items, setItems] = useState<Monetization[] | null>(null);
-  const [live, setLive] = useState(false);
+  // Liveness is the shared server status (v0.9.3).
+  const server = useServerStatus();
+  const live = server.live;
   const [revenue, setRevenue] = useState<RevenueRow[] | null>(null);
   const [revenueLoaded, setRevenueLoaded] = useState(false);
 
@@ -50,16 +53,20 @@ export default function MonetizationPage() {
   const [abResults, setAbResults] = useState<AbVariant[] | null>(null);
   const [abLoading, setAbLoading] = useState(false);
 
+  // Re-runs when liveness flips, so the page recovers on its own
+  // when the server comes back.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [fetchedAnalytics, health] = await Promise.all([
-        getAnalytics(), apiGet<unknown>("/health"),
+      const [fetchedAnalytics] = await Promise.all([
+        getAnalytics(),
       ]);
       if (cancelled) return;
-      const isLive = health !== null;
-      setLive(isLive);
-      if (!isLive) { setItems(demoMonetization); setRevenueLoaded(true); return; }
+      const isLive = live;
+      if (!isLive) {
+        if (server.status === "reconnecting") { setItems(demoMonetization); setRevenueLoaded(true); }
+        return;
+      }
       const latest = latestSnapshotPerPlatform(fetchedAnalytics ?? []);
       const rows: Monetization[] = [];
       for (const p of PLATFORMS) {
@@ -78,7 +85,7 @@ export default function MonetizationPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [live, server.status]);
 
   async function onAddAffiliate() {
     if (!affClipId.trim() || !affUrl.trim()) { setAffNotice("Enter a clip ID and an affiliate URL first."); return; }

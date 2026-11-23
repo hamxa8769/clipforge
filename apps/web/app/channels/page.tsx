@@ -13,13 +13,14 @@
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import {
-  apiGet, connectX, disconnectChannel, getAnalytics, getChannels, getXStatus,
+  connectX, disconnectChannel, getAnalytics, getChannels, getXStatus,
   latestSnapshotPerPlatform, reconnectChannel, refreshChannel, startOAuth,
   type AnalyticsSnapshot, type ChannelStatus, type XStatus,
 } from "@/lib/api";
 import { demoAnalytics } from "@/lib/mock";
 import { openExternal } from "@/lib/tauri";
 import { Card, DemoBadge, EmptyState, fmtCompact, fmtNum, Avatar, Badge, PageHeader, PlatformDot, platformLabel, PrimaryButton, SecondaryButton, Skeleton } from "@/components/ui";
+import { useServerStatus } from "@/components/ServerStatusProvider";
 
 const PLATFORMS = ["youtube", "instagram", "facebook", "tiktok"] as const;
 
@@ -53,29 +54,35 @@ const DEMO_CHANNELS: ChannelStatus[] = (["youtube", "instagram", "facebook", "ti
 export default function ChannelsPage() {
   const [channels, setChannels] = useState<ChannelStatus[] | null>(null);
   const [analytics, setAnalytics] = useState<AnalyticsSnapshot[] | null>(null);
-  const [live, setLive] = useState(false);
+  // Liveness is the shared server status (v0.9.3).
+  const server = useServerStatus();
+  const live = server.live;
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [xStatus, setXStatus] = useState<XStatus | null>(null);
   const [xLoaded, setXLoaded] = useState(false);
 
   const load = useCallback(async () => {
-    const [fetched, fetchedAnalytics, health, fetchedX] = await Promise.all([
-      getChannels(), getAnalytics(), apiGet<unknown>("/health"), getXStatus(),
+    const [fetched, fetchedAnalytics, fetchedX] = await Promise.all([
+      getChannels(), getAnalytics(), getXStatus(),
     ]);
-    const isLive = health !== null;
-    setLive(isLive);
+    const isLive = live;
     setXStatus(fetchedX);
     setXLoaded(true);
-    if (!isLive) { setChannels(DEMO_CHANNELS); setAnalytics(demoAnalytics); }
+    if (!isLive) {
+      if (server.status === "reconnecting") { setChannels(DEMO_CHANNELS); setAnalytics(demoAnalytics); }
+    }
     else { setChannels(fetched ?? []); setAnalytics(fetchedAnalytics ?? []); }
-  }, []);
+    // `live` / `server.status` in deps: when the server comes back,
+    // load changes identity and the mount effect below re-runs, so
+    // this page recovers on its own.
+  }, [live, server.status]);
 
   useEffect(() => {
     let cancelled = false;
-    load().catch(() => { if (!cancelled) { setChannels(DEMO_CHANNELS); setAnalytics(demoAnalytics); } });
+    load().catch(() => { if (!cancelled && server.status === "reconnecting") { setChannels(DEMO_CHANNELS); setAnalytics(demoAnalytics); } });
     return () => { cancelled = true; };
-  }, [load]);
+  }, [load, server.status]);
 
   async function connect(platform: string) {
     setBusy(platform);
@@ -187,7 +194,7 @@ export default function ChannelsPage() {
         actions={
           <>
             {!live && !loading && <DemoBadge />}
-            <span className="text-sm text-neutral-400">{live ? "Live channel status from the API" : loading ? "Checking the API…" : "API unreachable — demo data"}</span>
+            <span className="text-sm text-neutral-400">{live ? "Live channel status from the API" : loading ? "Checking the API…" : "Server not answering — demo data"}</span>
           </>
         }
       />

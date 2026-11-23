@@ -140,7 +140,7 @@ export default function NotificationsBell() {
               <div className="p-3 text-center">
                 <p className="text-sm font-medium text-neutral-200">Notifications aren&apos;t available right now</p>
                 <p className="mx-auto mt-1 max-w-xs text-xs leading-relaxed text-neutral-400">
-                  The server is unreachable, so there is nothing to show here yet — no alerts are being hidden from you.
+                  The server is not answering, so there is nothing to show here yet — no alerts are being hidden from you.
                 </p>
               </div>
             ) : items.length === 0 ? (

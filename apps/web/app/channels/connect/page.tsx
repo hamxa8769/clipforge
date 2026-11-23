@@ -26,6 +26,7 @@ import {
 import { guideFor, type PlatformGuide } from "@/lib/connect";
 import { openExternal } from "@/lib/tauri";
 import { Card, EmptyState, ExternalLink, PlatformDot, platformLabel, PrimaryButton, SecondaryButton, Skeleton } from "@/components/ui";
+import { ReconnectingNotice, useServerStatus } from "@/components/ServerStatusProvider";
 
 const PLATFORMS = ["youtube", "instagram", "facebook", "tiktok"] as const;
 const STEPS = ["Pick a platform", "Create the app", "Paste the keys", "Connect", "Test"] as const;
@@ -73,7 +74,10 @@ function WizardInner() {
   const [redirectLoading, setRedirectLoading] = useState(false);
   const [settings, setSettings] = useState<AppSettingsView | null>(null);
   const [settingsLoading, setSettingsLoading] = useState(true);
-  const [live, setLive] = useState(false);
+  // Liveness is the shared server status (v0.9.3) — no longer "did
+  // my one-shot /settings fetch happen to succeed".
+  const server = useServerStatus();
+  const live = server.live;
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
   const [saving, setSaving] = useState(false);
@@ -90,12 +94,15 @@ function WizardInner() {
   const loadSettings = useCallback(async () => {
     setSettingsLoading(true);
     const fetched = await getSettings();
-    setLive(fetched !== null);
     setSettings(fetched);
     setSettingsLoading(false);
   }, []);
 
   useEffect(() => { loadSettings().catch(() => setSettingsLoading(false)); }, [loadSettings]);
+
+  // When the server comes back after being down, reload settings on
+  // our own — the wizard recovers without a manual reload.
+  useEffect(() => { if (server.live) loadSettings().catch(() => setSettingsLoading(false)); }, [server.live, loadSettings]);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
@@ -265,10 +272,11 @@ function WizardInner() {
         <div className="rounded-xl border border-sky-500/40 bg-sky-500/10 p-4 text-sm text-sky-100">{notice}</div>
       )}
 
-      {!live && !settingsLoading && (
-        <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-100">
-          The server is not answering, so this wizard cannot save keys or start a sign-in. Start the server, then reload this page.
-        </div>
+      {!live && server.reconnecting && (
+        <ReconnectingNotice />
+      )}
+      {!live && server.reconnecting && (
+        <p className="text-sm text-neutral-400">This wizard cannot save keys or start a sign-in until the server is back.</p>
       )}
 
       {/* Step 1 — pick a platform */}

@@ -7,7 +7,8 @@
 // instead of silently sitting in the list.
 "use client";
 import { useEffect, useState } from "react";
-import { apiGet, getPosts, type Post } from "@/lib/api";
+import { getPosts, type Post } from "@/lib/api";
+import { useServerStatus } from "@/components/ServerStatusProvider";
 import { demoPosts } from "@/lib/mock";
 import { Card, DemoBadge, StatusPill } from "@/components/ui";
 
@@ -29,26 +30,32 @@ const FILTERS = [
 export default function SchedulePage() {
   // Post statuses are normalised in getPosts() (legacy "pending" -> "pending_approval").
   const [posts, setPosts] = useState<Post[]>(demoPosts);
-  const [live, setLive] = useState(false);
+  // Liveness is the shared server status (v0.9.3). The demo badge
+  // shows only once a probe has actually failed, not while the first
+  // probe is still checking.
+  const server = useServerStatus();
+  const live = server.live;
   const [filter, setFilter] = useState<string>("all");
+  // Re-runs when liveness flips, so the page recovers on its own
+  // when the server comes back.
   useEffect(() => {
+    if (!live) return;
     let cancelled = false;
     (async () => {
-      const [fetched, health] = await Promise.all([getPosts(), apiGet<unknown>("/health")]);
+      const fetched = await getPosts();
       if (cancelled) return;
       if (fetched !== null) setPosts(fetched);
-      setLive(health !== null);
     })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [live]);
   const sorted = [...posts].sort((a, b) => a.scheduled_at.localeCompare(b.scheduled_at));
   const visible = filter === "all" ? sorted : sorted.filter((p) => p.status === filter);
   const countFor = (key: string) => key === "all" ? posts.length : posts.filter((p) => p.status === key).length;
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3"><h1 className="text-2xl font-bold">Schedule</h1>{!live && <DemoBadge />}</div>
+      <div className="flex items-center gap-3"><h1 className="text-2xl font-bold">Schedule</h1>{!live && server.status === "reconnecting" && <DemoBadge />}</div>
       <Card>
         <h2 className="mb-3 text-lg font-semibold">Staggered posting times</h2>
         <p className="mb-4 text-sm text-neutral-400">Stagger per platform instead of blasting all four at once — each platform gets its own best window.</p>

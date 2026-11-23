@@ -467,6 +467,35 @@ test("normalizeFfmpegInstallStatus passes failed_step and path_warning through",
   assert.equal(warned?.path_warning, "Could not add FFmpeg to your Windows PATH.");
 });
 
+test("normalizeFfmpegInstallStatus passes broken/source through (v0.9.3)", () => {
+  // GET /ffmpeg/status enriches the installer snapshot with the live
+  // probe — a binary that exists but does not run must survive the
+  // normaliser so the status bar can say "broken", not "missing".
+  const broken = normalizeFfmpegInstallStatus({
+    state: "idle", progress_pct: 0, downloaded_bytes: 0, total_bytes: null,
+    message: "", error: "", version: "",
+    path: "C:\\Tools\\ffmpeg.exe", found: false, download_url: "", platform: "Windows",
+    path_added: null, checksum_verified: null, failed_step: "", path_warning: "",
+    broken: true,
+    broken_reason: "ffmpeg was found at C:\\Tools\\ffmpeg.exe (PATH) but does not run (ffmpeg -version failed).",
+    source: "PATH",
+  });
+  assert.equal(broken?.found, false);
+  assert.equal(broken?.broken, true);
+  assert.ok(broken?.broken_reason.includes("does not run"));
+  assert.equal(broken?.source, "PATH");
+  // Older backends omit the fields — defaults, not a crash.
+  const legacy = normalizeFfmpegInstallStatus({
+    state: "done", progress_pct: 100, downloaded_bytes: 0, total_bytes: null,
+    message: "", error: "", version: "ffmpeg version 9.1", path: "/usr/bin/ffmpeg",
+    found: true, download_url: "", platform: "Linux",
+    path_added: null, checksum_verified: null, failed_step: "", path_warning: "",
+  });
+  assert.equal(legacy?.broken, false);
+  assert.equal(legacy?.broken_reason, "");
+  assert.equal(legacy?.source, "");
+});
+
 test("normalizeFfmpegInstallStatus rejects unknown states and non-objects", () => {
   assert.equal(normalizeFfmpegInstallStatus({ state: "flying" }), null);
   assert.equal(normalizeFfmpegInstallStatus(null), null);
@@ -474,7 +503,7 @@ test("normalizeFfmpegInstallStatus rejects unknown states and non-objects", () =
 });
 
 test("ffmpegInstallRunning is true only while a run is active", () => {
-  const base = { progress_pct: 0, downloaded_bytes: 0, total_bytes: null, message: "", error: "", version: "", path: "", found: false, download_url: "", platform: "Linux", path_added: null, checksum_verified: null, failed_step: "", path_warning: "" };
+  const base = { progress_pct: 0, downloaded_bytes: 0, total_bytes: null, message: "", error: "", version: "", path: "", found: false, download_url: "", platform: "Linux", path_added: null, checksum_verified: null, failed_step: "", path_warning: "", broken: false, broken_reason: "", source: "" };
   for (const state of ["downloading", "verifying", "extracting", "installing"] as const) {
     assert.equal(ffmpegInstallRunning({ ...base, state }), true);
   }

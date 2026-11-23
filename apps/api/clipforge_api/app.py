@@ -928,7 +928,11 @@ def requirements_recheck():
     first merge the registry PATH into the server process, so a tool
     installed after startup (PowerShell / pip / winget) is picked up
     with no restart. Use this after installing a requirement by hand.
+    Also drops the settings store's cached tool probes, so the next
+    GET /settings sees the freshly installed tool immediately instead
+    of serving the pre-install answer until the cache TTL expires.
     """
+    _settings_store().invalidate_tool_probes()
     return _requirements_payload()
 
 
@@ -2543,7 +2547,11 @@ def ytdlp_recheck():
     known install location. Returns the same dict as
     ``GET /yt-dlp/status``, plus ``path_refreshed`` (the PATH dirs the
     registry added to this process). Never starts an install.
+
+    Also drops the settings store's cached yt-dlp probe, so the next
+    GET /settings sees the freshly installed yt-dlp immediately.
     """
+    _settings_store().invalidate_tool_probes()
     return _ytdlp_installer().recheck()
 
 

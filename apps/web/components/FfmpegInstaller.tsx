@@ -15,10 +15,15 @@ import {
   ffmpegInstallRunning, getFfmpegInstallStatus, getSettings, installFfmpeg,
   type FfmpegInstallState, type FfmpegInstallStatus,
 } from "@/lib/api";
+import { useServerStatus } from "./ServerStatusProvider";
 import { PrimaryButton, ProgressBar, SecondaryButton, ExternalLink } from "./ui";
 
 export function useFfmpegInstaller(onInstalled?: () => void) {
   const [status, setStatus] = useState<FfmpegInstallStatus | null>(null);
+  // Whether a status check has settled yet: "checking" is honest only
+  // before the first attempt; after a failed attempt the section says
+  // it couldn't check instead of claiming FFmpeg is missing.
+  const [checked, setChecked] = useState(false);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -40,6 +45,7 @@ export function useFfmpegInstaller(onInstalled?: () => void) {
 
   const refresh = useCallback(async () => {
     const next = await getFfmpegInstallStatus();
+    setChecked(true);
     if (next) {
       setStatus(next);
       if (!ffmpegInstallRunning(next)) stopPolling();
@@ -69,7 +75,7 @@ export function useFfmpegInstaller(onInstalled?: () => void) {
     return () => stopPolling();
   }, [refresh, stopPolling]);
 
-  return { status, starting, startError, start, refresh };
+  return { status, checked, starting, startError, start, refresh };
 }
 
 function fmtMB(bytes: number): string {
@@ -79,7 +85,7 @@ function fmtMB(bytes: number): string {
 /** Full installer block: status line + button + progress + error + retry.
  *  Used in onboarding step 1 and in Settings → This app. */
 export function FfmpegInstallSection({ onInstalled }: { onInstalled?: () => void }) {
-  const { status, starting, startError, start } = useFfmpegInstaller(onInstalled);
+  const { status, checked, starting, startError, start, refresh } = useFfmpegInstaller(onInstalled);
   const running = ffmpegInstallRunning(status);
   // "Ready" means FFmpeg is usable — `found` is the authority, not the
   // install state: on a machine where FFmpeg is already on PATH the
@@ -88,6 +94,27 @@ export function FfmpegInstallSection({ onInstalled }: { onInstalled?: () => void
   // wrongly rendered as "FFmpeg is missing" next to a "found" pill.)
   const done = status?.found === true;
   const error = status?.state === "error" || status?.state === "unsupported" ? status.error : null;
+
+  // Settled states first: before any check returns, "checking"; once a
+  // check has failed, say so — never claim "missing" on a check that
+  // simply didn't answer (the v0.9.2 status-bar bug in miniature).
+  if (!checked) {
+    return (
+      <div className="space-y-2">
+        <p className="text-sm text-neutral-400">Checking FFmpeg…</p>
+      </div>
+    );
+  }
+  if (status === null) {
+    return (
+      <div className="space-y-2">
+        <p className="text-sm text-amber-300" role="alert">
+          Couldn&apos;t check FFmpeg right now — the server didn&apos;t answer in time. Nothing is installed or removed.
+        </p>
+        <SecondaryButton onClick={() => { refresh().catch(() => {}); }}>Try again</SecondaryButton>
+      </div>
+    );
+  }
 
   if (done) {
     return (
@@ -153,6 +180,7 @@ export function FfmpegInstallSection({ onInstalled }: { onInstalled?: () => void
  *  expands the installer inline; once the install finishes the banner
  *  re-checks settings and clears itself. */
 export function FfmpegMissingBanner() {
+  const server = useServerStatus();
   const [missing, setMissing] = useState(false);
   const [expanded, setExpanded] = useState(false);
 
@@ -161,7 +189,11 @@ export function FfmpegMissingBanner() {
     setMissing(settings !== null && settings.ffmpeg.found === false);
   }, []);
 
-  useEffect(() => { check().catch(() => {}); }, [check]);
+  // Only check while the server is live, and re-check when it comes
+  // back — a failed check while down must not clear (or set) the banner.
+  useEffect(() => {
+    if (server.live) check().catch(() => {});
+  }, [server.live, check]);
 
   if (!missing) return null;
   return (

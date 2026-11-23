@@ -18,7 +18,7 @@ import Link from "next/link";
 import { openExternal } from "@/lib/tauri";
 
 export function DemoBadge() {
-  return <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-xs font-medium text-sky-300">Demo data — API unreachable</span>;
+  return <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-xs font-medium text-sky-300">Demo data — server not answering</span>;
 }
 
 export function Card({ children, className = "" }: { children: ReactNode; className?: string }) {

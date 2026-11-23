@@ -18,11 +18,12 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
-  apiGet, getAnalytics, getAutomationRules, getJobs, getPosts, pipelineProgress,
+  getAnalytics, getAutomationRules, getJobs, getPosts, pipelineProgress,
   runScheduler, RUNNING_STATUSES, setAutomationRule, type AnalyticsSnapshot, type Job, type Post,
 } from "@/lib/api";
 import { demoAnalytics, demoJobs, demoPosts } from "@/lib/mock";
 import { Card, CardHeader, DemoBadge, EmptyState, ErrorBanner, PlatformDot, platformLabel, PrimaryButton, ProgressBar, SecondaryButton, Skeleton, StatusPill, Toggle } from "@/components/ui";
+import { useServerStatus } from "@/components/ServerStatusProvider";
 
 const RULES_KEY = "clipforge.automation.rules.v1";
 
@@ -56,7 +57,10 @@ export default function AutomationPage() {
   const [jobs, setJobs] = useState<Job[] | null>(null);
   const [posts, setPosts] = useState<Post[] | null>(null);
   const [analytics, setAnalytics] = useState<AnalyticsSnapshot[] | null>(null);
-  const [live, setLive] = useState(false);
+  // Liveness is the shared server status (v0.9.3) — this page no
+  // longer probes /health itself.
+  const server = useServerStatus();
+  const live = server.live;
   const [pollError, setPollError] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   const [rules, setRules] = useState<Record<string, boolean>>(DEFAULT_RULES);
@@ -66,15 +70,19 @@ export default function AutomationPage() {
   const [running, setRunning] = useState(false);
 
   const load = useCallback(async () => {
-    const [fetchedJobs, fetchedPosts, fetchedAnalytics, fetchedRules, health] = await Promise.all([
-      getJobs(), getPosts(), getAnalytics(), getAutomationRules(), apiGet<unknown>("/health"),
+    const [fetchedJobs, fetchedPosts, fetchedAnalytics, fetchedRules] = await Promise.all([
+      getJobs(), getPosts(), getAnalytics(), getAutomationRules(),
     ]);
-    const isLive = health !== null;
-    setLive(isLive);
+    const isLive = live;
     if (!isLive) {
-      setJobs(demoJobs); setPosts(demoPosts); setAnalytics(demoAnalytics);
-      setRules(loadRules()); setRulesLive(false);
-      setPollError(null);
+      // Demo data only once a probe has actually failed — while the
+      // shared status is still "checking", leave the skeletons up so
+      // this page never says "unreachable" before the first probe.
+      if (server.status === "reconnecting") {
+        setJobs(demoJobs); setPosts(demoPosts); setAnalytics(demoAnalytics);
+        setRules(loadRules()); setRulesLive(false);
+        setPollError(null);
+      }
     } else {
       if (fetchedJobs === null || fetchedPosts === null) {
         setPollError("The API stopped answering mid-poll — showing the last good data. Check the server and retry.");
@@ -96,13 +104,16 @@ export default function AutomationPage() {
       }
     }
     setUpdatedAt(new Date());
-  }, []);
+    // `live` / `server.status` in deps: when the server comes back,
+    // load changes identity and the mount effect below re-runs, so
+    // this page recovers on its own.
+  }, [live, server.status]);
 
   useEffect(() => {
     let cancelled = false;
-    load().catch(() => { if (!cancelled) { setJobs(demoJobs); setPosts(demoPosts); setAnalytics(demoAnalytics); setRules(loadRules()); } });
+    load().catch(() => { if (!cancelled && server.status === "reconnecting") { setJobs(demoJobs); setPosts(demoPosts); setAnalytics(demoAnalytics); setRules(loadRules()); } });
     return () => { cancelled = true; };
-  }, [load]);
+  }, [load, server.status]);
   useEffect(() => {
     if (!live) return;
     const t = setInterval(() => { load().catch(() => {}); }, 10000);
@@ -168,7 +179,7 @@ export default function AutomationPage() {
         <h1 className="text-2xl font-bold tracking-tight">Automation</h1>
         {!live && !loading && <DemoBadge />}
         <span className="text-sm text-neutral-400">
-          {live ? "Runner live — polling every 10s" : loading ? "Checking the API…" : "API unreachable — demo data"}
+          {live ? "Runner live — polling every 10s" : loading ? "Checking the API…" : "Server not answering — demo data"}
           {updatedAt && <span suppressHydrationWarning> · updated {updatedAt.toLocaleTimeString()}</span>}
         </span>
         <span className="ml-auto flex gap-2">
@@ -291,7 +302,7 @@ export default function AutomationPage() {
 
       {/* Automation rules */}
       <Card>
-        <CardHeader title="Automation rules" hint={rulesLive ? "stored on the server — GET/PUT /automation/rules" : "API unreachable — this browser's copy only (demo)"} />
+        <CardHeader title="Automation rules" hint={rulesLive ? "stored on the server — GET/PUT /automation/rules" : "Server not answering — this browser's copy only (demo)"} />
         {rulesError && <p className="mb-4 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200" role="status">{rulesError}</p>}
         <ul className="space-y-5">
           {RULE_DEFS.map((r) => (

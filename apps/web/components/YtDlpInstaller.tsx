@@ -20,6 +20,9 @@ import { PrimaryButton, ProgressBar, SecondaryButton, ExternalLink } from "./ui"
 
 export function useYtDlpInstaller(onInstalled?: () => void) {
   const [status, setStatus] = useState<YtDlpInstallStatus | null>(null);
+  // Whether a status check has settled yet — see FfmpegInstaller: a
+  // failed check must say "couldn't check", never "missing".
+  const [checked, setChecked] = useState(false);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [rechecking, setRechecking] = useState(false);
@@ -47,6 +50,7 @@ export function useYtDlpInstaller(onInstalled?: () => void) {
 
   const refresh = useCallback(async () => {
     const next = await getYtDlpInstallStatus();
+    setChecked(true);
     if (next) {
       setStatus(next);
       if (!ytdlpInstallRunning(next)) stopPolling();
@@ -94,7 +98,7 @@ export function useYtDlpInstaller(onInstalled?: () => void) {
     return () => stopPolling();
   }, [refresh, stopPolling]);
 
-  return { status, starting, startError, start, refresh, recheck, rechecking, recheckError };
+  return { status, checked, starting, startError, start, refresh, recheck, rechecking, recheckError };
 }
 
 function fmtMB(bytes: number): string {
@@ -105,7 +109,7 @@ function fmtMB(bytes: number): string {
  *  Used on the blocked Ingest stage (Pipeline), the Agent page, and in
  *  Settings → This app. */
 export function YtDlpInstallSection({ onInstalled }: { onInstalled?: () => void }) {
-  const { status, starting, startError, start, recheck, rechecking, recheckError } = useYtDlpInstaller(onInstalled);
+  const { status, checked, starting, startError, start, refresh, recheck, rechecking, recheckError } = useYtDlpInstaller(onInstalled);
   const running = ytdlpInstallRunning(status);
   // "Ready" means yt-dlp is usable — `found` is the authority, not the
   // install state: on a machine where yt-dlp is already on PATH the
@@ -113,6 +117,25 @@ export function YtDlpInstallSection({ onInstalled }: { onInstalled?: () => void 
   const done = status?.found === true;
   const broken = status?.broken === true;
   const error = status?.state === "error" || status?.state === "unsupported" ? status.error : null;
+
+  // Settled states first — see FfmpegInstallSection.
+  if (!checked) {
+    return (
+      <div className="space-y-2">
+        <p className="text-sm text-neutral-400">Checking yt-dlp…</p>
+      </div>
+    );
+  }
+  if (status === null) {
+    return (
+      <div className="space-y-2">
+        <p className="text-sm text-amber-300" role="alert">
+          Couldn&apos;t check yt-dlp right now — the server didn&apos;t answer in time. Nothing is installed or removed.
+        </p>
+        <SecondaryButton onClick={() => { refresh().catch(() => {}); }}>Try again</SecondaryButton>
+      </div>
+    );
+  }
 
   if (done) {
     return (

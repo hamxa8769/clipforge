@@ -58,6 +58,7 @@ import {
   ProgressBar, SecondaryButton, Skeleton, Toggle, fmtCompact,
 } from "@/components/ui";
 import { openExternal } from "@/lib/tauri";
+import { useServerStatus } from "@/components/ServerStatusProvider";
 
 const GUARDRAIL = RIGHTS_ADVISORY;
 
@@ -121,7 +122,10 @@ function ClipVerdict({ video }: { video: TrendingVideo }) {
 const CAPTURE_DURATIONS = [60, 120, 180, 300];
 
 export default function TrendingPage() {
-  const [creds, setCreds] = useState<TrendingCredentials | null>(null);  const [live, setLive] = useState(false);
+  const [creds, setCreds] = useState<TrendingCredentials | null>(null);
+  // Liveness is the shared server status (v0.9.3).
+  const server = useServerStatus();
+  const live = server.live;
   const [loaded, setLoaded] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -184,12 +188,14 @@ export default function TrendingPage() {
 
   const loadCreds = useCallback(async () => {
     const fetched = await getTrendingCredentials();
-    setLive(fetched !== null);
     setCreds(fetched);
     setLoaded(true);
   }, []);
 
   useEffect(() => { loadCreds().catch(() => setLoaded(true)); }, [loadCreds]);
+
+  // When the server comes back after being down, reload on our own.
+  useEffect(() => { if (live) loadCreds().catch(() => setLoaded(true)); }, [live, loadCreds]);
 
   // Remembered "Licensed only" choice: localStorage (default ON).
   useEffect(() => {
