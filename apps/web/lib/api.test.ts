@@ -61,6 +61,7 @@ import {
   RUNNING_STATUSES,
   sourceVideoUrl,
   startAgentOnSource,
+  getFfmpegInstallStatus,
   API_URL,
 } from "./api.js";
 
@@ -1184,6 +1185,32 @@ test("startAgentOnSource returns the save error without starting the agent", asy
     assert.equal(res.ok, false);
     assert.equal(calls.length, 1);
     assert.match(calls[0], /PUT .*\/api\/agent\/config/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("slow probe getters share one in-flight request (single-flight dedup)", async () => {
+  // v0.9.3 bug C (E2E): the dashboard + status bar + requirements panel
+  // all fetch /ffmpeg/status at load — ~9 concurrent slow requests, and
+  // Chrome's 6-connections-per-host limit queued the rest until the 15 s
+  // client timeout fired. Concurrent callers of the same slow getter
+  // must share one fetch, and a later call must fetch again.
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    await new Promise((r) => setTimeout(r, 10));
+    return { ok: true, status: 200, json: async () => ({ found: true, version: "ffmpeg version 8.1.2", state: "idle" }) } as unknown as Response;
+  }) as typeof fetch;
+  try {
+    const [a, b, c] = await Promise.all([getFfmpegInstallStatus(), getFfmpegInstallStatus(), getFfmpegInstallStatus()]);
+    assert.equal(calls, 1);
+    assert.equal(a?.found, true);
+    assert.equal(b?.found, true);
+    assert.equal(c?.found, true);
+    await getFfmpegInstallStatus();
+    assert.equal(calls, 2);
   } finally {
     globalThis.fetch = originalFetch;
   }

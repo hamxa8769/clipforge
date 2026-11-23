@@ -860,6 +860,30 @@ export async function apiGet<T>(path: string, timeoutMs = 3000): Promise<T | nul
   } catch { return null; }
 }
 
+/**
+ * Single-flight wrapper for the slow probe GETs (v0.9.3, bug C found by
+ * E2E): the dashboard + status bar + requirements panel + settings page
+ * all fetch /ffmpeg/status, /requirements/status, /settings and
+ * /yt-dlp/status at load. Without dedup that is ~9 concurrent slow
+ * requests; Chrome allows 6 connections per host, so the rest queue —
+ * and the 15 s AbortSignal.timeout is counted from the fetch() call, so
+ * queued requests time out before the server ever answers them, and the
+ * UI shows "couldn't check" for tools that are actually installed. Sharing
+ * one in-flight promise per path collapses the stampede to one request
+ * per endpoint. Only for idempotent slow GETs — never for mutations or
+ * fast live data (jobs/posts), which must stay fresh per caller.
+ */
+const slowInflight = new Map<string, Promise<unknown>>();
+function apiGetSlow<T>(path: string): Promise<T | null> {
+  const existing = slowInflight.get(path);
+  if (existing) return existing as Promise<T | null>;
+  const p = apiGet<T>(path, SLOW_API_TIMEOUT_MS).finally(() => {
+    if (slowInflight.get(path) === p) slowInflight.delete(path);
+  });
+  slowInflight.set(path, p);
+  return p;
+}
+
 export interface ApiResult { ok: boolean; status: number; data: unknown; error?: string; }
 
 export async function apiPostJson(path: string, body: unknown = {}, timeoutMs = 5000): Promise<ApiResult> {
@@ -1001,7 +1025,7 @@ export function normalizeFfmpegInstallStatus(raw: unknown): FfmpegInstallStatus 
 
 /** GET /ffmpeg/status — pollable install progress (returns null when the API is unreachable). */
 export async function getFfmpegInstallStatus(): Promise<FfmpegInstallStatus | null> {
-  return normalizeFfmpegInstallStatus(await apiGet<unknown>("/ffmpeg/status", SLOW_API_TIMEOUT_MS));
+  return normalizeFfmpegInstallStatus(await apiGetSlow<unknown>("/ffmpeg/status"));
 }
 
 /** POST /ffmpeg/install — start the one-click install (returns immediately; poll the status). */
@@ -1081,7 +1105,7 @@ export function normalizeYtDlpInstallStatus(raw: unknown): YtDlpInstallStatus | 
 
 /** GET /yt-dlp/status — pollable install progress (returns null when the API is unreachable). */
 export async function getYtDlpInstallStatus(): Promise<YtDlpInstallStatus | null> {
-  return normalizeYtDlpInstallStatus(await apiGet<unknown>("/yt-dlp/status", SLOW_API_TIMEOUT_MS));
+  return normalizeYtDlpInstallStatus(await apiGetSlow<unknown>("/yt-dlp/status"));
 }
 
 /** POST /yt-dlp/recheck — re-probe for a manually installed yt-dlp
@@ -1167,7 +1191,7 @@ export function normalizeRequirementsStatus(raw: unknown): RequirementsStatus | 
 /** GET /requirements/status — the whole pre-flight check, live
  *  (returns null when the API is unreachable). */
 export async function getRequirementsStatus(): Promise<RequirementsStatus | null> {
-  return normalizeRequirementsStatus(await apiGet<unknown>("/requirements/status", SLOW_API_TIMEOUT_MS));
+  return normalizeRequirementsStatus(await apiGetSlow<unknown>("/requirements/status"));
 }
 
 /** POST /requirements/recheck — re-run the whole check live, right
@@ -1441,7 +1465,7 @@ export function normalizeSettings(raw: unknown): AppSettingsView | null {
 
 /** GET /settings — masked credentials + preferences + environment status. */
 export async function getSettings(): Promise<AppSettingsView | null> {
-  const raw = await apiGet<unknown>("/settings", SLOW_API_TIMEOUT_MS);
+  const raw = await apiGetSlow<unknown>("/settings");
   return raw === null ? null : normalizeSettings(raw);
 }
 

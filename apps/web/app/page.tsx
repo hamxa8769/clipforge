@@ -116,6 +116,11 @@ export default function Dashboard() {
   // preview" button) — never the default, never shown as if live.
   const [showDemo, setShowDemo] = useState(false);
   const [ffmpeg, setFfmpeg] = useState<FfmpegInstallStatus | null>(null);
+  // Whether the FFmpeg status has ever been checked (v0.9.3 bug B): while
+  // the first check is still in flight, `ffmpeg` is null — which used to
+  // render as "Missing — clipping needs it" with an Install button for a
+  // tool that was merely unchecked. Unknown must show "Checking…".
+  const [ffmpegChecked, setFfmpegChecked] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   const [toast, setToast] = useState<{ message: string; tone: "success" | "danger" | "info" } | null>(null);
   const [busyJob, setBusyJob] = useState<string | null>(null);
@@ -128,6 +133,7 @@ export default function Dashboard() {
     ]);
     const isLive = live;
     setFfmpeg(fetchedFfmpeg);
+    setFfmpegChecked(true);
     if (!isLive) {
       // Server down: never overwrite live data with demo numbers.
       // Demo data appears only behind the explicit preview choice.
@@ -228,7 +234,7 @@ export default function Dashboard() {
   if (agent?.last_error) {
     attention.push({ id: "agent-error", tone: "warning", text: `Agent stopped with an error: ${agent.last_error}`, href: "/agent", actionLabel: "Open Agent" });
   }
-  if (!ffmpegFound && live) {
+  if (!ffmpegFound && live && ffmpegChecked) {
     attention.push({ id: "ffmpeg", tone: "warning", text: "FFmpeg is missing — clipping cannot run until it is installed." });
   }
   if (pendingApproval > 0) {
@@ -385,9 +391,11 @@ export default function Dashboard() {
             )}
             <span className="text-sm text-neutral-400">
               {data === null
-                ? server.checking
-                  ? "Checking server…"
-                  : `Reconnecting… (attempt ${server.attempts})`
+                ? server.live
+                  ? "Loading…"
+                  : server.checking
+                    ? "Checking server…"
+                    : `Reconnecting… (attempt ${Math.max(1, server.attempts)})`
                 : live
                   ? "Live"
                   : showDemo
@@ -418,7 +426,7 @@ export default function Dashboard() {
             <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">Server</p>
             <p className="mt-1.5 flex items-center gap-2 text-sm font-medium text-neutral-100">
               <span className={`h-2 w-2 rounded-full ${live ? "live-dot bg-emerald-400" : server.checking ? "bg-amber-400" : "bg-red-400"}`} aria-hidden="true" />
-              {live ? `Running${port ? ` · port ${port}` : ""}` : server.checking ? "Checking server…" : `Reconnecting… (attempt ${server.attempts})`}
+              {live ? `Running${port ? ` · port ${port}` : ""}` : server.checking ? "Checking server…" : `Reconnecting… (attempt ${Math.max(1, server.attempts)})`}
             </p>
             <p className="mt-0.5 text-xs text-neutral-500">{health?.version ? `ClipForge v${health.version}` : "Version unknown"}</p>
           </div>
@@ -437,6 +445,13 @@ export default function Dashboard() {
                   <span className="h-2 w-2 rounded-full bg-amber-400" aria-hidden="true" /> Unknown — waiting for server
                 </p>
                 <p className="mt-0.5 text-xs text-neutral-500">FFmpeg is checked when the server is back.</p>
+              </>
+            ) : !ffmpegChecked ? (
+              <>
+                <p className="mt-1.5 flex items-center gap-2 text-sm font-medium text-neutral-100">
+                  <span className="h-2 w-2 rounded-full bg-amber-400" aria-hidden="true" /> Checking…
+                </p>
+                <p className="mt-0.5 text-xs text-neutral-500">FFmpeg is being checked — this settles in a moment.</p>
               </>
             ) : (
               <>
