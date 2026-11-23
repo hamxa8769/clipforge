@@ -22,7 +22,7 @@ import {
   type AppSettingsView, type ChannelStatus, type SetupState, type SetupStatePatch, type SetupStepKey,
 } from "@/lib/api";
 import { FfmpegInstallSection } from "./FfmpegInstaller";
-import GeminiSetup from "./GeminiSetup";
+import LlmProviders from "./LlmProviders";
 import { Card, PrimaryButton, SecondaryButton, Skeleton } from "./ui";
 
 const DONE_KEY = "clipforge-onboarding-done";
@@ -31,7 +31,7 @@ export const REPLAY_EVENT = "clipforge:replay-onboarding";
 const STEP_KEYS: SetupStepKey[] = ["ffmpeg", "gemini", "channel", "niche_source", "agent"];
 const STEP_TITLES: Record<SetupStepKey, string> = {
   ffmpeg: "Install FFmpeg",
-  gemini: "Gemini key (optional)",
+  gemini: "AI engine (optional)",
   channel: "Connect a channel",
   niche_source: "Niche & source",
   agent: "Turn on the agent",
@@ -228,8 +228,8 @@ export function SetupWizard({ inline = false, onDone }: WizardProps) {
 
         {stepKey === "gemini" && (
           <div className="space-y-3">
-            <h3 className="font-semibold">2. Gemini key (optional)</h3>
-            <GeminiSetup />
+            <h3 className="font-semibold">2. AI engine (optional)</h3>
+            <LlmProviders />
             <div className="flex flex-wrap gap-2 pt-2">
               <PrimaryButton onClick={continueFromGemini} disabled={saving}>Continue</PrimaryButton>
               <SecondaryButton onClick={() => advance()} disabled={saving}>Skip — use the built-in engine</SecondaryButton>

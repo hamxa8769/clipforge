@@ -27,7 +27,7 @@ import { UpdateSection } from "@/components/Updater";
 import { FfmpegInstallSection } from "@/components/FfmpegInstaller";
 import { YtDlpInstallSection } from "@/components/YtDlpInstaller";
 import { RequirementsPanel } from "@/components/RequirementsPanel";
-import GeminiSetup from "@/components/GeminiSetup";
+import LlmProviders from "@/components/LlmProviders";
 import { REPLAY_EVENT } from "@/components/Onboarding";
 import Link from "next/link";
 import { Card, CardHeader, PrimaryButton, SecondaryButton, Skeleton, Toggle } from "@/components/ui";
@@ -244,8 +244,8 @@ export default function SettingsPage() {
           </Card>
 
           <Card>
-            <CardHeader title="Gemini — the AI engine" hint="Optional, but smarter than the built-in engine" />
-            <GeminiSetup />
+            <CardHeader title="AI engine" hint="Pick a provider, or use the built-in rule engine with no key" />
+            <LlmProviders />
           </Card>
 
           {/* Performance (v0.8.0) — the app measures this machine and picks

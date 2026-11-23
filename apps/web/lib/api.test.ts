@@ -716,6 +716,29 @@ test("activeEngineName names Gemini only when it is configured", () => {
   ]), "rule-based engine");
 });
 
+test("normalizeLlmProviders keeps the v0.10.0 provider fields", () => {
+  const ps = normalizeLlmProviders([
+    { id: "grok", label: "Grok (xAI)", configured: true, model: "grok-4", active: true,
+      models: ["grok-4"], base_url: "https://api.x.ai/v1", needs_key: true,
+      key_url: "https://console.x.ai", blurb: "Sharp hooks.", last4: "9999", source: "stored" },
+    { id: "ollama", label: "Ollama (on this machine)", configured: false, model: "llama3.1", active: false,
+      models: ["llama3.1"], base_url: "http://127.0.0.1:11434/v1", needs_key: false, key_url: "https://ollama.com" },
+  ]);
+  assert.equal(ps.length, 2);
+  assert.equal(ps[0].models?.[0], "grok-4");
+  assert.equal(ps[0].needsKey, true);
+  assert.equal(ps[0].last4, "9999");
+  assert.equal(ps[1].needsKey, false);
+  assert.equal(ps[1].baseUrl, "http://127.0.0.1:11434/v1");
+});
+
+test("activeEngineName names the active provider for the new providers", () => {
+  assert.equal(activeEngineName([{ id: "grok", label: "Grok (xAI)", configured: true, model: "grok-4", active: true }]), "Grok (xAI)");
+  assert.equal(activeEngineName([{ id: "anthropic", label: "Claude (Anthropic)", configured: true, model: "", active: true }]), "Claude (Anthropic)");
+  assert.equal(activeEngineName([{ id: "ollama", label: "Ollama (on this machine)", configured: true, model: "llama3.1", active: true }]), "Ollama (on this machine)");
+  assert.equal(activeEngineName([{ id: "groq", label: "Groq", configured: true, model: "", active: false }]), "Groq");
+});
+
 test("normalizeSetupState clamps the step and defaults every step to false", () => {
   const s = normalizeSetupState({ current_step: 99, steps: { ffmpeg: true }, niche: "tech", source_type: "channel" });
   assert.equal(s.current_step, 4);

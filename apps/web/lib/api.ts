@@ -1773,6 +1773,14 @@ export interface LlmProvider {
   id: string; label: string; configured: boolean; model: string;
   /** True when this is the engine the agent would use right now. */
   active: boolean;
+  /** Models the user can pick from for this provider. */
+  models?: string[];
+  baseUrl?: string;
+  needsKey?: boolean;
+  keyUrl?: string;
+  blurb?: string;
+  last4?: string;
+  source?: string;
 }
 
 export function normalizeLlmProvider(raw: unknown): LlmProvider | null {
@@ -1783,12 +1791,22 @@ export function normalizeLlmProvider(raw: unknown): LlmProvider | null {
   const label = typeof r.label === "string" && r.label
     ? r.label
     : typeof r.name === "string" && r.name ? r.name : r.id;
+  const strList = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  const str = (v: unknown): string => (typeof v === "string" ? v : "");
   return {
     id: r.id,
     label,
     configured: r.configured === true,
-    model: typeof r.model === "string" ? r.model : "",
+    model: str(r.model),
     active: r.active === true,
+    models: strList(r.models),
+    baseUrl: str(r.base_url),
+    needsKey: r.needs_key !== false,
+    keyUrl: str(r.key_url),
+    blurb: str(r.blurb),
+    last4: str(r.last4),
+    source: str(r.source),
   };
 }
 
@@ -1805,32 +1823,48 @@ export async function getLlmProviders(): Promise<LlmProvider[] | null> {
 
 /** POST /api/llm/gemini/test {api_key} — plain {ok, model, message} result. */
 export async function testGeminiKey(apiKey: string): Promise<ApiResult> {
-  return apiPostJson("/api/llm/gemini/test", { api_key: apiKey });
+  return testLlmProvider("gemini", apiKey);
 }
 
 /** POST /api/llm/gemini/save {api_key} — the key is stored server-side only. */
 export async function saveGeminiKey(apiKey: string): Promise<ApiResult> {
-  return apiPostJson("/api/llm/gemini/save", { api_key: apiKey });
+  return saveLlmProvider("gemini", apiKey);
+}
+
+/** POST /api/llm/{provider}/test {api_key, model?} — plain {ok, model, message}. */
+export async function testLlmProvider(providerId: string, apiKey: string, model?: string): Promise<ApiResult> {
+  return apiPostJson(`/api/llm/${encodeURIComponent(providerId)}/test`, { api_key: apiKey, model: model ?? null });
+}
+
+/** POST /api/llm/{provider}/save {api_key, model?} — the key is stored server-side only. */
+export async function saveLlmProvider(providerId: string, apiKey: string, model?: string): Promise<ApiResult> {
+  return apiPostJson(`/api/llm/${encodeURIComponent(providerId)}/save`, { api_key: apiKey, model: model ?? null });
+}
+
+/** POST /api/llm/active {provider} — pin the agent to one provider ("auto" / "rules" allowed). */
+export async function setActiveLlmProvider(providerId: string): Promise<ApiResult> {
+  return apiPostJson("/api/llm/active", { provider: providerId });
+}
+
+/** POST /clips/{candidate_id}/capcut — export a clip as a CapCut draft folder. */
+export async function exportClipToCapcut(candidateId: string): Promise<ApiResult> {
+  return apiPostJson(`/clips/${encodeURIComponent(candidateId)}/capcut`, {});
 }
 
 /** Which engine is actually writing titles / picking clips right now.
  * Prefers the backend's `active` flag; falls back to configured flags.
  * NOTE: the "rules" provider reports configured=true always (it needs
- * no key), so it must never count as an AI engine — only Gemini /
- * OpenAI configured counts, and with neither it is the rule engine. */
+ * no key), so it must never count as an AI engine — only a configured
+ * keyed provider counts, and with none it is the rule engine. */
 export function activeEngineName(providers: LlmProvider[] | null): string {
   if (providers === null) return "rule-based engine";
   const active = providers.find((p) => p.active);
   if (active) {
-    if (active.id === "gemini") return "Gemini";
-    if (active.id === "openai") return "OpenAI";
-    return "rule-based engine";
+    if (active.id === "rules") return "rule-based engine";
+    return active.label;
   }
-  const gemini = providers.find((p) => p.id === "gemini");
-  if (gemini?.configured) return "Gemini";
-  const openai = providers.find((p) => p.id === "openai");
-  if (openai?.configured) return "OpenAI";
-  return "rule-based engine";
+  const configured = providers.find((p) => p.id !== "rules" && p.configured);
+  return configured ? configured.label : "rule-based engine";
 }
 
 // ---------------------------------------------------------------------------

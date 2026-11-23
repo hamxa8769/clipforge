@@ -21,7 +21,7 @@
 // Commons / licensed / public-domain videos.
 "use client";
 import { useEffect, useState } from "react";
-import { apiPostJson, getPosts, publishToX, scanPublish, type Post, type PublishScanFlag } from "@/lib/api";
+import { apiPostJson, exportClipToCapcut, getPosts, publishToX, scanPublish, type Post, type PublishScanFlag } from "@/lib/api";
 import {
   Badge, Card, CardHeader, EmptyState, ErrorBanner, PageHeader,
   PrimaryButton, SecondaryButton,
@@ -71,6 +71,23 @@ export default function ExportPage() {
   const [publishing, setPublishing] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [published, setPublished] = useState<string[]>([]);
+  // CapCut export (v0.10.0): the clip as a CapCut draft project folder.
+  const [capcutBusy, setCapcutBusy] = useState(false);
+  const [capcutNote, setCapcutNote] = useState<string | null>(null);
+
+  async function onExportCapcut() {
+    if (!clipId.trim()) { setCapcutNote("Pick a post from the approval queue first — the export runs on its clip."); return; }
+    setCapcutBusy(true);
+    setCapcutNote(null);
+    const res = await exportClipToCapcut(clipId);
+    setCapcutBusy(false);
+    if (!res.ok) {
+      setCapcutNote(`Could not export to CapCut: ${res.error ?? "request failed"}.`);
+      return;
+    }
+    const data = (res.data ?? {}) as Record<string, unknown>;
+    setCapcutNote(typeof data.message === "string" ? data.message : "CapCut draft ready.");
+  }
 
   useEffect(() => {
     getPosts()
@@ -309,6 +326,24 @@ export default function ExportPage() {
           {!scanned ? "Run the copyright scan first." : blocked ? "Blocked by a severe scan flag." : "Clips longer than a platform's limit cannot publish — trim them in Clip Studio first."}
         </p>
         <div className="mt-3"><SecondaryButton href="/studio">Open Clip Studio to trim</SecondaryButton></div>
+      </Card>
+
+      <Card className="glass">
+        <CardHeader title="CapCut export" hint="Open the clip in CapCut Desktop to finish it there" />
+        <p className="text-sm text-neutral-400">
+          Exports this clip as a CapCut draft project: the rendered video on a video track, the hook line as a title,
+          and the transcript words as captions — ready to edit with CapCut&apos;s filters, transitions and effects.
+          The draft folder is named in the message below; if CapCut is installed on this machine it appears in
+          CapCut&apos;s project list, otherwise open the folder from CapCut with File &gt; Open project.
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <PrimaryButton onClick={() => { void onExportCapcut(); }} disabled={capcutBusy || !clipId.trim()}>
+            {capcutBusy ? "Exporting to CapCut…" : "Export to CapCut"}
+          </PrimaryButton>
+        </div>
+        {capcutNote && (
+          <p className="mt-3 rounded-lg border border-sky-500/40 bg-sky-500/10 p-3 text-sm text-sky-100" role="status">{capcutNote}</p>
+        )}
       </Card>
     </div>
   );

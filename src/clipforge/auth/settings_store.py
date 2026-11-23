@@ -43,6 +43,13 @@ SECRET_NAMES = {
     "x": {"client_id": "app:x:client_id", "client_secret": "app:x:client_secret"},
     # Gemini (v0.5.0): same keyring storage, separate secret name.
     "gemini": {"api_key": "app:gemini:api_key"},
+    # More LLM providers (v0.10.0): one keyring entry each, same
+    # masked-only display as Gemini's.
+    "grok": {"api_key": "app:grok:api_key"},
+    "groq": {"api_key": "app:groq:api_key"},
+    "openrouter": {"api_key": "app:openrouter:api_key"},
+    "anthropic": {"api_key": "app:anthropic:api_key"},
+    # Ollama runs locally and needs no key, so it has no entry here.
 }
 
 # Env vars the pre-OAuth accounts used — still honoured as a fallback so
@@ -55,6 +62,10 @@ LEGACY_ENV_VARS = {
     "x": ["X_CLIENT_ID", "X_CLIENT_SECRET"],
     "llm": ["CLIPFORGE_LLM_API_KEY"],
     "gemini": ["GEMINI_API_KEY"],
+    "grok": ["XAI_API_KEY"],
+    "groq": ["GROQ_API_KEY"],
+    "openrouter": ["OPENROUTER_API_KEY"],
+    "anthropic": ["ANTHROPIC_API_KEY"],
 }
 
 DEFAULT_PRIVACY = {
@@ -158,6 +169,16 @@ class AppSettings:
     llm_model: str = "gpt-4o-mini"
     # Gemini model for the Agent (v0.5.0); "" = gemini-2.0-flash default.
     gemini_model: str = ""
+    # Active LLM provider (v0.10.0): "" or "auto" = first configured
+    # provider in auto order (Gemini, OpenAI, Grok, Groq, OpenRouter,
+    # Claude); any other provider id pins the agent to it when it is
+    # configured (Ollama needs no key — selecting it is enough).
+    llm_active_provider: str = ""
+    # Per-provider model overrides (v0.10.0): {provider_id: model};
+    # "" / missing = that provider's default model.
+    llm_models: dict[str, str] = field(default_factory=dict)
+    # Ollama base URL (v0.10.0); "" = the default http://127.0.0.1:11434/v1.
+    ollama_base_url: str = ""
     # Path of the FFmpeg binary installed by the one-click installer
     # ("" = none installed; detection then falls back to the bundled
     # location and PATH). Saved by the installer, never typed by hand.
@@ -184,6 +205,22 @@ class AppSettings:
         settings.default_privacy = {p: kept.get(p, DEFAULT_PRIVACY[p]) for p in PLATFORMS}
         settings.default_platforms = [p for p in settings.default_platforms if p in PLATFORMS]
         settings.onboarding = normalize_onboarding(settings.onboarding)
+        # LLM provider choice (v0.10.0): only a known provider id, or
+        # "" / "auto" for automatic selection.
+        from clipforge.llm import PROVIDERS as _LLM_PROVIDERS
+
+        if settings.llm_active_provider not in ("", "auto", "rules", *_LLM_PROVIDERS):
+            settings.llm_active_provider = ""
+        if not isinstance(settings.llm_models, dict):
+            settings.llm_models = {}
+        settings.llm_models = {
+            k: v
+            for k, v in settings.llm_models.items()
+            if k in _LLM_PROVIDERS
+            and isinstance(v, str)
+            and v
+            and len(v) <= 120
+        }
         return settings
 
 
@@ -387,6 +424,8 @@ class SettingsStore:
                 "base_url": settings.llm_base_url,
                 "model": settings.llm_model,
                 "api_key": self.credential_view("llm", "api_key"),
+                # Active provider (v0.10.0): "" = automatic.
+                "active_provider": settings.llm_active_provider or "",
                 # Gemini (v0.5.0): first-class provider alongside the
                 # OpenAI-compatible one. Masked, like every other secret.
                 "gemini": {

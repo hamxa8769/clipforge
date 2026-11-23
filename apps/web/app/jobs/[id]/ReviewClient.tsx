@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import type { Candidate, Job } from "@/lib/api";
-import { approveCandidate, attributionForClip, licenseBadgeLabel, regenerateThumbnail, rejectCandidate, selectThumbnailVariant } from "@/lib/api";
+import { approveCandidate, attributionForClip, exportClipToCapcut, licenseBadgeLabel, regenerateThumbnail, rejectCandidate, selectThumbnailVariant } from "@/lib/api";
 import { summarizeApproveQueue } from "@/lib/review";
 import { Card, ExternalLink, StatusPill } from "@/components/ui";
 import ClipPlayer from "@/components/ClipPlayer";
@@ -22,6 +22,27 @@ function CandidateCard({ c, job, demo }: { c: Candidate; job: Job; demo: boolean
   const [thumbUrl, setThumbUrl] = useState<string | null>(c.thumbnail_url);
   const [thumbNote, setThumbNote] = useState("");
   const [regenerating, setRegenerating] = useState(false);
+  // CapCut export (v0.10.0): the rendered clip as a CapCut draft folder.
+  const [capcutBusy, setCapcutBusy] = useState(false);
+  const [capcutNote, setCapcutNote] = useState("");
+
+  async function onExportCapcut() {
+    if (demo) {
+      setCapcutNote("CapCut export needs the server — demo mode has no rendered clip to export.");
+      return;
+    }
+    setCapcutBusy(true);
+    setCapcutNote("");
+    const res = await exportClipToCapcut(c.id);
+    setCapcutBusy(false);
+    if (!res.ok) {
+      setCapcutNote(`Could not export to CapCut: ${res.error ?? "request failed"}.`);
+      return;
+    }
+    const data = (res.data ?? {}) as Record<string, unknown>;
+    const message = typeof data.message === "string" ? data.message : "CapCut draft ready.";
+    setCapcutNote(message);
+  }
   // Attribution: the candidate's licence record wins; the job's record
   // fills the gaps (the API merges them the same way server-side).
   const attribution = attributionForClip(c)
@@ -229,9 +250,13 @@ function CandidateCard({ c, job, demo }: { c: Candidate; job: Job; demo: boolean
       <div className="mt-4 flex flex-wrap gap-2">
         <button onClick={() => act("approve")} className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium hover:bg-emerald-500">Approve</button>
         <button onClick={() => act("reject")} className="rounded-md bg-red-600/80 px-4 py-2 text-sm font-medium hover:bg-red-600">Reject</button>
+        <button onClick={() => { void onExportCapcut(); }} disabled={capcutBusy} className="rounded-md bg-neutral-800 px-4 py-2 text-sm font-medium text-neutral-100 hover:bg-neutral-700 disabled:opacity-60">
+          {capcutBusy ? "Exporting to CapCut…" : "Export to CapCut"}
+        </button>
         {note && <span className="self-center text-sm text-neutral-400">{note}</span>}
         {noChannel && <a href="/channels" className="self-center text-sm text-sky-400 underline">Connect a channel</a>}
       </div>
+      {capcutNote && <p className="mt-3 rounded-lg border border-sky-500/40 bg-sky-500/10 p-3 text-sm text-sky-100">{capcutNote}</p>}
     </Card>
   );
 }
