@@ -1,6 +1,11 @@
 // Top bar (v0.9.0) — the slim strip above the content: live/demo state on
 // the left, performance profile + notifications bell on the right.
 //
+// The live state comes from the shared useServerStatus() hook (v0.9.3) —
+// this component no longer polls /health itself. Before that, each
+// component polled on its own schedule, so the header could say "Live"
+// while Settings said "unreachable" in the same second.
+//
 // PERFORMANCE MODE: this is where the Low profile takes effect visually.
 // The profile comes from GET /perf/profile (auto-detected hardware or the
 // user's override in Settings). When it is "low" we set data-perf="low"
@@ -8,25 +13,26 @@
 // transform for the whole app — that is what keeps the UI fast on
 // low-end hardware. Balanced / High leave motion on.
 "use client";
-import { useCallback, useEffect, useState } from "react";
-import { getHealth, getPerfProfile, type Health, type PerfProfile } from "@/lib/api";
+import { useEffect, useState } from "react";
+import { getPerfProfile, type PerfProfile } from "@/lib/api";
+import { serverStatusLabel, formatLastSeenAge } from "@/lib/server-status";
+import { useServerStatus, RestartServerButton } from "./ServerStatusProvider";
 import NotificationsBell from "./NotificationsBell";
 
 export default function TopBar() {
-  const [health, setHealth] = useState<Health | null | undefined>(undefined);
+  const server = useServerStatus();
   const [perf, setPerf] = useState<PerfProfile | null>(null);
 
-  const load = useCallback(async () => {
-    const [h, p] = await Promise.all([getHealth(), getPerfProfile()]);
-    setHealth(h);
-    setPerf(p);
-  }, []);
-
+  // The performance profile is independent of server liveness: a
+  // failed fetch just leaves the pill hidden, it never affects the
+  // live state. It is re-checked when the server comes back.
   useEffect(() => {
-    load().catch(() => setHealth(null));
-    const t = setInterval(() => { load().catch(() => {}); }, 30000);
-    return () => clearInterval(t);
-  }, [load]);
+    if (!server.live) return;
+    let cancelled = false;
+    getPerfProfile().then((p) => { if (!cancelled) setPerf(p); }).catch(() => {});
+    const t = setInterval(() => { getPerfProfile().then((p) => { if (!cancelled) setPerf(p); }).catch(() => {}); }, 30000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [server.live]);
 
   // Apply the performance profile to the document element.
   useEffect(() => {
@@ -35,15 +41,18 @@ export default function TopBar() {
     else delete document.documentElement.dataset.perf;
   }, [perf]);
 
-  const live = health !== null && health !== undefined;
   const profileLabel = perf ? perf.profile.charAt(0).toUpperCase() + perf.profile.slice(1) : null;
 
   return (
     <header className="flex h-12 shrink-0 items-center gap-3 border-b border-neutral-800 bg-neutral-900/60 px-6">
-      <span className="inline-flex items-center gap-2 text-xs font-medium text-neutral-300">
-        <span className={`h-2 w-2 rounded-full ${live ? "live-dot bg-emerald-400" : "bg-red-400"}`} aria-hidden="true" />
-        {health === undefined ? "Checking server…" : live ? "Live — server connected" : "Demo mode — server unreachable"}
+      <span
+        className="inline-flex items-center gap-2 text-xs font-medium text-neutral-300"
+        title={server.lastLiveAt ? `Last connected ${formatLastSeenAge(server.lastLiveAt, Date.now())}` : undefined}
+      >
+        <span className={`h-2 w-2 rounded-full ${server.live ? "live-dot bg-emerald-400" : server.checking ? "bg-amber-400" : "bg-red-400"}`} aria-hidden="true" />
+        {serverStatusLabel(server.status, server.attempts)}
       </span>
+      {server.reconnecting && <RestartServerButton />}
       {profileLabel && (
         <span
           className="inline-flex items-center gap-1.5 rounded-full bg-neutral-800 px-2.5 py-1 text-xs text-neutral-400"

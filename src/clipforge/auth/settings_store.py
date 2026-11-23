@@ -19,6 +19,7 @@ precedence for the running server, so the toggle works without a restart.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -189,10 +190,28 @@ class AppSettings:
 class SettingsStore:
     """Load/save preferences + masked credential views + connection tests."""
 
+    # Short-lived caches so GET /settings stays cheap (v0.9.3, diagnosis
+    # P1-4). public_view() used to do 11 live keyring reads + 2
+    # subprocess probes on EVERY call (~350-550 ms on Linux, seconds
+    # on Windows under Defender/Credential Manager) while /health
+    # answers in ~2 ms — the web client timed /settings out at 3 s and
+    # the UI called a live server "unreachable". Cached entries live
+    # 60 s: a tool installed by hand shows up within a minute, or
+    # immediately after a recheck/install, which invalidates. The
+    # bounds are deliberately short — a stale "FFmpeg missing" for an
+    # hour would be worse than a slow call once a minute. Cache
+    # lookups are plain dict ops (atomic under the GIL); a check-then-
+    # set race can only cause a duplicate probe, never a wrong value.
+    _VIEW_CACHE_TTL_S = 60.0
+
     def __init__(self, data_dir: str | Path, secrets: SecretStore | None = None):
         self.data_dir = Path(data_dir)
         self.secrets = secrets or SecretStore(self.data_dir)
         self._path = self.data_dir / "settings.json"
+        # (service, kind) -> (monotonic timestamp, masked view dict).
+        self._credential_view_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+        # (tool, stored_path) -> (monotonic timestamp, probe dict).
+        self._tool_probe_cache: dict[tuple[str, str], tuple[float, dict]] = {}
 
     # ------------------------------------------------------------ preferences
     def load(self) -> AppSettings:
@@ -241,12 +260,26 @@ class SettingsStore:
         current = self.load()
         current.ffmpeg_path = ffmpeg_path
         self.save(current)
+        # The stored path changed, so a cached probe for the old path
+        # is wrong — drop the tool cache (next read re-probes).
+        self._tool_probe_cache.clear()
 
     def set_yt_dlp_path(self, yt_dlp_path: str) -> None:
         """Remember an installed yt-dlp binary (one-click installer)."""
         current = self.load()
         current.yt_dlp_path = yt_dlp_path
         self.save(current)
+        self._tool_probe_cache.clear()
+
+    def invalidate_tool_probes(self) -> None:
+        """Drop cached FFmpeg / yt-dlp probe results.
+
+        Called after a manual install is picked up (POST
+        /requirements/recheck, POST /yt-dlp/recheck) so the next
+        GET /settings re-probes instead of serving the pre-install
+        answer for up to the TTL.
+        """
+        self._tool_probe_cache.clear()
 
     # ------------------------------------------------------------ secrets
     def get_credential(self, service: str, kind: str) -> str | None:
@@ -271,9 +304,28 @@ class SettingsStore:
             self.secrets.set(name, value)
         else:
             self.secrets.delete(name)
+        # The masked view for this credential just changed — drop its
+        # cache entry so the next read shows the new value.
+        self._credential_view_cache.pop((service, kind), None)
 
     def credential_view(self, service: str, kind: str) -> dict:
-        """Masked view for the UI: configured flag + last 4 chars only."""
+        """Masked view for the UI: configured flag + last 4 chars only.
+
+        Cached for _VIEW_CACHE_TTL_S: the underlying read is a live
+        OS keyring call, and public_view() asks for 11 of them per
+        request. Callers get a copy, so nobody can mutate the cache.
+        Only the *display* view is cached — get_credential() (the real
+        value, used for OAuth/API calls) always reads live.
+        """
+        now = time.monotonic()
+        cached = self._credential_view_cache.get((service, kind))
+        if cached is not None and now - cached[0] < self._VIEW_CACHE_TTL_S:
+            return dict(cached[1])
+        view = self._credential_view_uncached(service, kind)
+        self._credential_view_cache[(service, kind)] = (now, view)
+        return dict(view)
+
+    def _credential_view_uncached(self, service: str, kind: str) -> dict:
         import os  # noqa: PLC0415  (legacy env fallback, read at call time)
 
         value = self.get_credential(service, kind)
@@ -298,6 +350,30 @@ class SettingsStore:
         }
 
     # ------------------------------------------------------------ public view
+    def _cached_tool_info(self, tool: str, stored_path: str) -> dict:
+        """ffmpeg_info / ytdlp_info with a short TTL cache.
+
+        Each probe spawns the binary with --version (up to 10 s per
+        candidate under Defender on Windows); public_view() needs both
+        on every call. The cache key includes the stored installer path
+        (a new install changes the answer — see set_ffmpeg_path /
+        set_yt_dlp_path, which clear the cache), and entries expire
+        after _VIEW_CACHE_TTL_S so a tool installed by hand is picked
+        up within a minute even without a recheck. Callers get a copy.
+        """
+        now = time.monotonic()
+        key = (tool, stored_path)
+        cached = self._tool_probe_cache.get(key)
+        if cached is not None and now - cached[0] < self._VIEW_CACHE_TTL_S:
+            return dict(cached[1])
+        info = (
+            ffmpeg_info(self.data_dir, stored_path=stored_path)
+            if tool == "ffmpeg"
+            else ytdlp_info(self.data_dir, stored_path=stored_path)
+        )
+        self._tool_probe_cache[key] = (now, info)
+        return dict(info)
+
     def public_view(self, *, env_dry_run: bool) -> dict:
         """Everything GET /settings returns: masked credentials + status."""
         settings = self.load()
@@ -327,8 +403,8 @@ class SettingsStore:
             },
             "data_dir": str(self.data_dir.resolve()),
             "secret_backend": self.secrets.backend,
-            "ffmpeg": ffmpeg_info(self.data_dir, stored_path=settings.ffmpeg_path),
-            "yt_dlp": ytdlp_info(self.data_dir, stored_path=settings.yt_dlp_path),
+            "ffmpeg": self._cached_tool_info("ffmpeg", settings.ffmpeg_path),
+            "yt_dlp": self._cached_tool_info("yt_dlp", settings.yt_dlp_path),
             "monetization_thresholds": [
                 {
                     "platform": platform,

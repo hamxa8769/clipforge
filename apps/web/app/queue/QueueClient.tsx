@@ -20,7 +20,7 @@ export default function QueueClient({ posts, demo }: { posts: Post[]; demo: bool
     // the post. (The old code set the status even when the request
     // failed or the API was unreachable, so demo posts looked approved.)
     if (demo) {
-      setMsg("Demo data — the API is unreachable, so nothing can be approved or published from here.");
+      setMsg("Demo data — the server is not answering, so nothing can be approved or published from here.");
       return;
     }
     setBusy(`${action}:${id}`);
@@ -53,7 +53,7 @@ export default function QueueClient({ posts, demo }: { posts: Post[]; demo: bool
   }
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3"><h1 className="text-2xl font-bold">Approval queue</h1>{demo && <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-xs font-medium text-sky-300">Demo data — API unreachable</span>}</div>
+      <div className="flex items-center gap-3"><h1 className="text-2xl font-bold">Approval queue</h1>{demo && <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-xs font-medium text-sky-300">Demo data — server not answering</span>}</div>
       <p className="text-sm text-neutral-400">Nothing publishes without approval. TikTok posts go to the creator inbox as a draft until the Content Posting API audit is passed.</p>
       {msg && <p className="rounded-md bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">{msg}</p>}
       {items.length === 0 ? <Card><p className="text-neutral-400">Queue is empty — approve clips on a job review page first.</p></Card> : (
@@ -66,8 +66,8 @@ export default function QueueClient({ posts, demo }: { posts: Post[]; demo: bool
             </div>
             <p className="mt-3 text-sm">{p.caption}</p>
             <div className="mt-4 flex gap-2">
-              <button onClick={() => act(p.id, "approve")} disabled={demo || busy !== null} className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium hover:bg-emerald-500 disabled:opacity-60" title={demo ? "Demo data — the API is unreachable" : undefined}>{busy === `approve:${p.id}` ? "Working…" : "Approve"}</button>
-              <button onClick={() => act(p.id, "publish")} disabled={demo || busy !== null} className="rounded-md bg-neutral-800 px-4 py-2 text-sm font-medium hover:bg-neutral-700 disabled:opacity-60" title={demo ? "Demo data — the API is unreachable" : undefined}>{busy === `publish:${p.id}` ? "Working…" : "Publish (dry-run)"}</button>
+              <button onClick={() => act(p.id, "approve")} disabled={demo || busy !== null} className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium hover:bg-emerald-500 disabled:opacity-60" title={demo ? "Demo data — the server is not answering" : undefined}>{busy === `approve:${p.id}` ? "Working…" : "Approve"}</button>
+              <button onClick={() => act(p.id, "publish")} disabled={demo || busy !== null} className="rounded-md bg-neutral-800 px-4 py-2 text-sm font-medium hover:bg-neutral-700 disabled:opacity-60" title={demo ? "Demo data — the server is not answering" : undefined}>{busy === `publish:${p.id}` ? "Working…" : "Publish (dry-run)"}</button>
             </div>
             {demo && <p className="mt-2 text-xs text-neutral-500">Demo post — approve / publish are disabled until the API answers.</p>}
           </Card></li>

@@ -52,7 +52,7 @@ function CandidateCard({ c, job, demo }: { c: Candidate; job: Job; demo: boolean
       const next = variants.length > 1 ? (thumbIdx + 1) % variants.length : thumbIdx;
       setThumbIdx(next);
       setThumbUrl(variants[next] ?? thumbUrl);
-      setThumbNote("Thumbnail regenerated locally (demo mode: API unreachable). A live regenerate asks the server for a fresh thumbnail.");
+      setThumbNote("Thumbnail regenerated locally (demo mode: server not answering). A live regenerate asks the server for a fresh thumbnail.");
       setRegenerating(false);
       return;
     }
@@ -83,7 +83,7 @@ function CandidateCard({ c, job, demo }: { c: Candidate; job: Job; demo: boolean
     // The old code called /candidates/{id}/{action}, which does not exist.
     if (demo) {
       setStatus(action === "approve" ? "approved" : "rejected");
-      setNote(action === "approve" ? "Approved — recorded locally (demo mode: API unreachable)." : "Rejected (demo mode: recorded locally).");
+      setNote(action === "approve" ? "Approved — recorded locally (demo mode: server not answering)." : "Rejected (demo mode: recorded locally).");
       return;
     }
     const res = action === "approve" ? await approveCandidate(job.id, c.n) : await rejectCandidate(job.id, c.n);
@@ -241,7 +241,7 @@ export default function ReviewClient({ candidates, job, demo }: { candidates: Ca
     <div className="space-y-6">
       <div className="flex items-center gap-3">
         <h1 className="text-2xl font-bold">Review clips</h1>
-        {demo && <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-xs font-medium text-sky-300">Demo data — API unreachable</span>}
+        {demo && <span className="rounded-full bg-sky-500/15 px-2 py-0.5 text-xs font-medium text-sky-300">Demo data — server not answering</span>}
       </div>
       {candidates.length === 0 ? (
         <Card><p className="text-neutral-400">{job.status === "failed" ? "No clip candidates — this job failed before producing any. Retry it from the pipeline card above." : job.status === "review" || job.status === "ready" ? "No clip candidates — this run finished, but no moment scored high enough to become a clip. Try a longer or livelier source video, or retry the job." : "No clip candidates yet — this job is still processing."}</p></Card>

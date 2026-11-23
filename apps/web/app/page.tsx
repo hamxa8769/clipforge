@@ -6,10 +6,19 @@
 //
 // Data: every number comes from the real backend (channels, jobs, posts,
 // analytics, monetization, health, ffmpeg/status, requirements/status,
-// worker/queue, agent/status) and polls every 15s while the API is live. When the API
-// is unreachable the page falls back to clearly-labelled demo data
-// (DemoBadge) and every control that needs the server is disabled with
-// the reason — demo numbers are never presented as live channel stats.
+// worker/queue, agent/status) and polls every 15s while the API is live.
+//
+// Liveness is the shared server status (v0.9.3, useServerStatus) —
+// this page no longer decides "live" from its own /health fetch, so
+// it can never show demo data while the header says "Live". When the
+// API is unreachable and no live data was ever loaded, the page shows
+// a reconnecting state with a Retry now button — not a fake live page
+// — and reloads itself when the server comes back. Demo data is only
+// shown behind an explicit "Show demo preview" choice, clearly
+// labelled (DemoBadge), with every control disabled. When live data
+// was loaded and the server then drops, the last data stays visible
+// under a "Reconnecting — showing last data" banner, never presented
+// as current.
 // A follower count the API does not return shows as "—", never an
 // invented number. While the first fetch is in flight the page shows
 // skeletons, not a blank screen.
@@ -38,16 +47,17 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
   activeStageIndex, approvePost, cancelJob, getAgentStatus, getAnalytics, getChannels,
-  getFfmpegInstallStatus, getHealth, getJobs, getMonetizationFor, getPosts, getWorkerQueue,
+  getFfmpegInstallStatus, getJobs, getMonetizationFor, getPosts, getWorkerQueue,
   latestSnapshotPerPlatform, pipelineProgress, PIPELINE_STAGES, PROCESSING_STATUSES,
   pauseJob, refreshChannel, resumeJob, retryJob,
   type AgentStatus, type AnalyticsSnapshot, type ChannelStatus, type FfmpegInstallStatus,
-  type Health, type Job, type Monetization, type Post, type WorkerQueueSummary,
+  type Job, type Monetization, type Post, type WorkerQueueSummary,
 } from "@/lib/api";
 import { demoAnalytics, demoChannels, demoJobs, demoMonetization, demoPosts } from "@/lib/mock";
 import { useFfmpegInstaller } from "@/components/FfmpegInstaller";
 import NewClipRun from "@/components/NewClipRun";
 import { RequirementsPanel } from "@/components/RequirementsPanel";
+import { ReconnectingNotice, useServerStatus } from "@/components/ServerStatusProvider";
 import {
   Avatar, Badge, Card, CardHeader, DemoBadge, EmptyState, fmtCompact, fmtNum, PageHeader,
   PlatformDot, platformLabel, PrimaryButton, ProgressBar, SecondaryButton, Skeleton, StatCard,
@@ -98,9 +108,13 @@ function pausable(job: Job): boolean {
 }
 
 export default function Dashboard() {
+  const server = useServerStatus();
+  const live = server.live;
+  const health = server.health;
   const [data, setData] = useState<DashboardData | null>(null);
-  const [live, setLive] = useState(false);
-  const [health, setHealth] = useState<Health | null>(null);
+  // Demo data is opt-in while the server is down (the "Show demo
+  // preview" button) — never the default, never shown as if live.
+  const [showDemo, setShowDemo] = useState(false);
   const [ffmpeg, setFfmpeg] = useState<FfmpegInstallStatus | null>(null);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   const [toast, setToast] = useState<{ message: string; tone: "success" | "danger" | "info" } | null>(null);
@@ -109,15 +123,17 @@ export default function Dashboard() {
   const [busyChannel, setBusyChannel] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [fetchedJobs, fetchedPosts, fetchedChannels, fetchedAnalytics, fetchedHealth, fetchedFfmpeg, fetchedQueue, fetchedAgent] = await Promise.all([
-      getJobs(), getPosts(), getChannels(), getAnalytics(), getHealth(), getFfmpegInstallStatus(), getWorkerQueue(), getAgentStatus(),
+    const [fetchedJobs, fetchedPosts, fetchedChannels, fetchedAnalytics, fetchedFfmpeg, fetchedQueue, fetchedAgent] = await Promise.all([
+      getJobs(), getPosts(), getChannels(), getAnalytics(), getFfmpegInstallStatus(), getWorkerQueue(), getAgentStatus(),
     ]);
-    const isLive = fetchedHealth !== null;
-    setLive(isLive);
-    setHealth(fetchedHealth);
+    const isLive = live;
     setFfmpeg(fetchedFfmpeg);
     if (!isLive) {
-      setData({ jobs: demoJobs, posts: demoPosts, channels: demoChannels, analytics: demoAnalytics, monetization: demoMonetization, queue: null, agent: null });
+      // Server down: never overwrite live data with demo numbers.
+      // Demo data appears only behind the explicit preview choice.
+      if (showDemo) {
+        setData({ jobs: demoJobs, posts: demoPosts, channels: demoChannels, analytics: demoAnalytics, monetization: demoMonetization, queue: null, agent: null });
+      }
     } else {
       const jobs = fetchedJobs ?? [];
       const posts = fetchedPosts ?? [];
@@ -137,11 +153,16 @@ export default function Dashboard() {
       setData({ jobs, posts, channels, analytics, monetization, queue: fetchedQueue, agent: fetchedAgent });
     }
     setUpdatedAt(new Date());
-  }, []);
+  }, [live, showDemo]);
 
+  // Load on mount, and again whenever liveness flips — `load` changes
+  // identity when `live` changes, so this effect re-runs when the
+  // server comes back after being down and the page recovers on its
+  // own, no manual Refresh needed. (v0.9.2 only polled while live, so
+  // a page loaded during downtime never recovered by itself.)
   useEffect(() => {
     let cancelled = false;
-    load().catch(() => { if (!cancelled) setData({ jobs: demoJobs, posts: demoPosts, channels: demoChannels, analytics: demoAnalytics, monetization: demoMonetization, queue: null, agent: null }); });
+    load().catch(() => {});
     return () => { cancelled = true; };
   }, [load]);
 
@@ -317,6 +338,40 @@ export default function Dashboard() {
       ? `${processing.length} processing now`
       : "Idle";
 
+  // Server down, nothing live ever loaded, no demo preview asked for:
+  // a reconnecting state, not a fake live page. The rights notice
+  // stays visible (it is not data), then the notice + demo opt-in.
+  if (!live && data === null && !showDemo && server.reconnecting) {
+    return (
+      <div className="space-y-6">
+        <PageHeader
+          title="Dashboard"
+          intro="Start a clip run, watch jobs live, approve clips — the daily flow, all on this page."
+          actions={
+            <span className="text-sm text-neutral-400">
+              {`Reconnecting… (attempt ${server.attempts})`}
+            </span>
+          }
+        />
+        <p className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm leading-snug text-amber-200" role="note">
+          <span className="font-semibold">Rights notice.</span>{" "}
+          Make sure you have the right to use the videos you clip — your own video, a licensed video, or a use YouTube permits. You are responsible for the rights to what you post.
+          CC-BY attribution is added to the description automatically.{" "}
+          <Link href="/trending" className="font-medium underline hover:text-amber-100">Find licensed videos →</Link>
+        </p>
+        <ReconnectingNotice />
+        <p className="text-sm text-neutral-400">
+          Your clips, jobs and settings are safe on the server — this page will reload itself when it is back.
+          Want to look around meanwhile?{" "}
+          <button className="font-medium text-amber-300 underline hover:text-amber-200" onClick={() => setShowDemo(true)}>
+            Show demo preview
+          </button>{" "}
+          (sample data, clearly labelled — nothing here is your channel).
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -324,9 +379,20 @@ export default function Dashboard() {
         intro="Start a clip run, watch jobs live, approve clips — the daily flow, all on this page."
         actions={
           <>
-            {!live && data !== null && <DemoBadge />}
+            {!live && data !== null && showDemo && <DemoBadge />}
+            {showDemo && !live && data !== null && (
+              <SecondaryButton onClick={() => { setShowDemo(false); setData(null); }}>Hide demo preview</SecondaryButton>
+            )}
             <span className="text-sm text-neutral-400">
-              {data === null ? "Checking server…" : live ? "Live" : "API unreachable — demo data"}
+              {data === null
+                ? server.checking
+                  ? "Checking server…"
+                  : `Reconnecting… (attempt ${server.attempts})`
+                : live
+                  ? "Live"
+                  : showDemo
+                    ? "Demo preview — sample data, not your channel"
+                    : "Reconnecting — showing last data"}
               {updatedAt && <span suppressHydrationWarning> · updated {updatedAt.toLocaleTimeString()}</span>}
             </span>
             <SecondaryButton onClick={() => load()}>Refresh</SecondaryButton>
@@ -334,6 +400,8 @@ export default function Dashboard() {
           </>
         }
       />
+
+      {!live && data !== null && !showDemo && <ReconnectingNotice variant="inline" />}
 
       {/* Rights notice (advisory since v0.9.1) — always visible, never changes. */}
       <p className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm leading-snug text-amber-200" role="note">
@@ -349,8 +417,8 @@ export default function Dashboard() {
           <div className="bg-neutral-900 p-4">
             <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">Server</p>
             <p className="mt-1.5 flex items-center gap-2 text-sm font-medium text-neutral-100">
-              <span className={`h-2 w-2 rounded-full ${live ? "live-dot bg-emerald-400" : "bg-red-400"}`} aria-hidden="true" />
-              {live ? `Running${port ? ` · port ${port}` : ""}` : "Unreachable — start the server"}
+              <span className={`h-2 w-2 rounded-full ${live ? "live-dot bg-emerald-400" : server.checking ? "bg-amber-400" : "bg-red-400"}`} aria-hidden="true" />
+              {live ? `Running${port ? ` · port ${port}` : ""}` : server.checking ? "Checking server…" : `Reconnecting… (attempt ${server.attempts})`}
             </p>
             <p className="mt-0.5 text-xs text-neutral-500">{health?.version ? `ClipForge v${health.version}` : "Version unknown"}</p>
           </div>
@@ -363,6 +431,13 @@ export default function Dashboard() {
                 </p>
                 <p className="mt-0.5 text-xs text-neutral-500">Clipping will work.</p>
               </>
+            ) : !live ? (
+              <>
+                <p className="mt-1.5 flex items-center gap-2 text-sm font-medium text-neutral-100">
+                  <span className="h-2 w-2 rounded-full bg-amber-400" aria-hidden="true" /> Unknown — waiting for server
+                </p>
+                <p className="mt-0.5 text-xs text-neutral-500">FFmpeg is checked when the server is back.</p>
+              </>
             ) : (
               <>
                 <p className="mt-1.5 flex items-center gap-2 text-sm font-medium text-neutral-100">
@@ -371,7 +446,7 @@ export default function Dashboard() {
                 <button
                   onClick={() => startInstall()}
                   disabled={installStarting || ffmpegInstalling || !live}
-                  title={!live ? "The server is unreachable — FFmpeg installs when the API is back" : undefined}
+                  title={!live ? "The server is not answering — FFmpeg installs when the API is back" : undefined}
                   className="mt-2 rounded-md bg-amber-400 px-3 py-1 text-xs font-semibold text-neutral-950 hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {ffmpegInstalling ? `Installing… ${Math.round(installStatus?.progress_pct ?? 0)}%` : installStarting ? "Starting…" : "Install FFmpeg"}

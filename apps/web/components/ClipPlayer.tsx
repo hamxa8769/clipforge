@@ -194,7 +194,7 @@ export default function ClipPlayer({
     setSaved(false);
     if (demo) {
       // Demo mode: no API to call; record the trim locally only.
-      showNote("info", `Trim ${fmt(s)} – ${fmt(e)} recorded locally (demo mode — API unreachable, nothing saved on the server).`);
+      showNote("info", `Trim ${fmt(s)} – ${fmt(e)} recorded locally (demo mode — server not answering, nothing saved on the server).`);
       setSaving(false);
       setSaved(true);
       return;

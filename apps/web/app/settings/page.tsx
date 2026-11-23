@@ -22,6 +22,7 @@ import {
   testConnection, updateOnboarding,
   type AppSettingsView, type PerfProfile, type PerfProfileName,
 } from "@/lib/api";
+import { ReconnectingNotice, useServerStatus } from "@/components/ServerStatusProvider";
 import { UpdateSection } from "@/components/Updater";
 import { FfmpegInstallSection } from "@/components/FfmpegInstaller";
 import { YtDlpInstallSection } from "@/components/YtDlpInstaller";
@@ -29,7 +30,7 @@ import { RequirementsPanel } from "@/components/RequirementsPanel";
 import GeminiSetup from "@/components/GeminiSetup";
 import { REPLAY_EVENT } from "@/components/Onboarding";
 import Link from "next/link";
-import { Card, CardHeader, DemoBadge, PrimaryButton, SecondaryButton, Skeleton, Toggle } from "@/components/ui";
+import { Card, CardHeader, PrimaryButton, SecondaryButton, Skeleton, Toggle } from "@/components/ui";
 
 const PLATFORMS = ["youtube", "instagram", "facebook", "tiktok"] as const;
 const PLATFORM_LABELS: Record<string, string> = {
@@ -49,9 +50,19 @@ function StatusLine({ configured, masked }: { configured: boolean; masked: strin
 }
 
 export default function SettingsPage() {
+  // Liveness is the shared server status (v0.9.3) — this page no longer
+  // decides "live" from whether its own one-shot /settings fetch
+  // happened to succeed. Before that, one slow /settings call left
+  // this page saying "Server unreachable" forever while the header
+  // said "Live".
+  const server = useServerStatus();
+  const live = server.live;
   const [view, setView] = useState<AppSettingsView | null>(null);
-  const [live, setLive] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  // True when the server is live but /settings itself could not be
+  // loaded (slow probe, bad payload) — a retryable load failure, not
+  // "server unreachable".
+  const [settingsError, setSettingsError] = useState(false);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, { ok: boolean; summary: string; nextStep: string }>>({});
@@ -73,7 +84,10 @@ export default function SettingsPage() {
     }
   }, []);
 
-  useEffect(() => { loadPerf().catch(() => setPerfLoaded(true)); }, [loadPerf]);
+  useEffect(() => {
+    if (server.live) loadPerf().catch(() => setPerfLoaded(true));
+    else if (server.reconnecting) setPerfLoaded(true);
+  }, [server.live, server.reconnecting, loadPerf]);
 
   async function savePerf(profile: PerfProfileName) {
     setPerfSaving(true);
@@ -95,7 +109,7 @@ export default function SettingsPage() {
   const load = useCallback(async () => {
     try {
       const fetched = await getSettings();
-      setLive(fetched !== null);
+      setSettingsError(fetched === null);
       if (fetched) {
         setView(fetched);
         setLlmBaseUrl(fetched.llm.base_url);
@@ -103,12 +117,18 @@ export default function SettingsPage() {
         setDryRun(fetched.dry_run);
         setPrivacy(fetched.default_privacy);
       }
+    } catch {
+      setSettingsError(true);
     } finally {
       setLoaded(true);
     }
   }, []);
 
-  useEffect(() => { load().catch(() => setLive(false)); }, [load]);
+  // Load once the server is live, and again every time it comes back
+  // after being down — the page recovers on its own, no reload needed.
+  useEffect(() => {
+    if (server.live) load().catch(() => setSettingsError(true));
+  }, [server.live, load]);
 
   async function save(patch: Record<string, unknown>) {
     setSaving(true);
@@ -143,17 +163,25 @@ export default function SettingsPage() {
     window.dispatchEvent(new Event(REPLAY_EVENT));
   }
 
-  const loading = view === null && !loaded;
+  // Skeletons while the first probe is unsettled, or while the server
+  // is live and the settings load is still in flight. While
+  // reconnecting with nothing loaded yet, the reconnecting notice
+  // below takes this place instead of a skeleton.
+  const loading = view === null && !loaded && (server.checking || server.live);
 
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
-        {!live && !loading && <DemoBadge />}
         <span className="text-sm text-neutral-400">
-          {live ? "Live settings from the server" : loading ? "Checking the server…" : "Server unreachable — settings cannot be changed"}
+          {live
+            ? "Live settings from the server"
+            : server.checking
+              ? "Checking the server…"
+              : `Reconnecting… (attempt ${server.attempts}) — settings are safe on the server, changes resume when it is back`}
         </span>
       </div>
+      {!live && !loading && view !== null && <ReconnectingNotice variant="inline" />}
 
       {notice && (
         <div className="rounded-xl border border-sky-500/40 bg-sky-500/10 p-4 text-sm text-sky-100">{notice}</div>
@@ -231,7 +259,11 @@ export default function SettingsPage() {
             {!perfLoaded ? (
               <Skeleton className="h-24" />
             ) : perf === null ? (
-              <p className="text-sm text-neutral-400">Performance profiles are not available in this build yet — the profile service has not landed on the server.</p>
+              <p className="text-sm text-neutral-400">
+                {live
+                  ? "Performance profiles are not available in this build yet — the profile service has not landed on the server."
+                  : "Performance profiles need the server — they will load when it reconnects."}
+              </p>
             ) : (
               <div className="space-y-4">
                 <dl className="space-y-1 text-sm">
@@ -428,10 +460,19 @@ export default function SettingsPage() {
             )}
           </Card>
         </>
-      ) : (
+      ) : settingsError ? (
         <Card>
-          <p className="text-sm text-neutral-400">The server did not answer. Start the server, then reload this page.</p>
+          <p className="font-medium text-neutral-200">Settings couldn&apos;t load</p>
+          <p className="mt-1 text-sm text-neutral-400">
+            The server is up, but the settings check didn&apos;t answer in time — it reads your saved keys and
+            checks FFmpeg and yt-dlp, which can be slow on this machine. Nothing is lost; try again.
+          </p>
+          <div className="mt-3">
+            <SecondaryButton onClick={() => { load().catch(() => {}); }}>Try again</SecondaryButton>
+          </div>
         </Card>
+      ) : (
+        <ReconnectingNotice />
       )}
     </div>
   );

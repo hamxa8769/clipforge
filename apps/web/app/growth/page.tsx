@@ -12,6 +12,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { apiGet, apiPostJson } from "@/lib/api";
 import { Card, CardHeader, EmptyState, PlatformDot, Skeleton, fmtCompact, fmtNum, platformLabel } from "@/components/ui";
+import { ReconnectingNotice, useServerStatus } from "@/components/ServerStatusProvider";
 
 type Basis = { kind: "own_data" | "general"; label: string; n: number };
 
@@ -93,6 +94,7 @@ function TrendPill({ trend }: { trend: string }) {
 }
 
 export default function GrowthPage() {
+  const server = useServerStatus();
   const [view, setView] = useState<GrowthView | null>(null);
   const [apiDown, setApiDown] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -105,6 +107,9 @@ export default function GrowthPage() {
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+
+  // When the server comes back after being down, reload on our own.
+  useEffect(() => { if (server.live) void load(); }, [server.live, load]);
 
   const refresh = async () => {
     setRefreshing(true);
@@ -134,10 +139,13 @@ export default function GrowthPage() {
       {loading ? (
         <div className="grid gap-4 md:grid-cols-4"><Skeleton className="h-24" /><Skeleton className="h-24" /><Skeleton className="h-24" /><Skeleton className="h-24" /></div>
       ) : apiDown ? (
-        <Card>
-          <p className="font-medium text-neutral-200">ClipForge server is not reachable</p>
-          <p className="mt-1 text-sm text-neutral-400">Growth numbers come from the local API — start the app (the server runs inside it) and reload this page. No demo numbers are shown here: invented view counts would be worse than no data.</p>
-        </Card>
+        <div className="space-y-3">
+          <ReconnectingNotice />
+          <Card>
+            <p className="font-medium text-neutral-200">Growth numbers come from the local API</p>
+            <p className="mt-1 text-sm text-neutral-400">This page reloads itself when the server is back. No demo numbers are shown here: invented view counts would be worse than no data.</p>
+          </Card>
+        </div>
       ) : view !== null && !view.has_posted_clips ? (
         <>
           <EmptyState

@@ -12,6 +12,10 @@ trap 'rm -rf "$TMP"' EXIT
   --target es2022 --module nodenext --moduleResolution nodenext \
   --strict --skipLibCheck --outDir "$TMP"
 
+./node_modules/.bin/tsc lib/server-status.ts lib/server-status.test.ts \
+  --target es2022 --module nodenext --moduleResolution nodenext \
+  --strict --skipLibCheck --outDir "$TMP"
+
 ./node_modules/.bin/tsc lib/external-links.ts lib/external-links.test.ts \
   --target es2022 --module nodenext --moduleResolution nodenext \
   --strict --skipLibCheck --outDir "$TMP"
@@ -20,4 +24,4 @@ trap 'rm -rf "$TMP"' EXIT
   --target es2022 --module nodenext --moduleResolution nodenext \
   --strict --skipLibCheck --outDir "$TMP"
 
-node --test "$TMP/api.test.js" "$TMP/external-links.test.js" "$TMP/batch.test.js" "$TMP/review.test.js"
+node --test "$TMP/api.test.js" "$TMP/external-links.test.js" "$TMP/batch.test.js" "$TMP/review.test.js" "$TMP/server-status.test.js"

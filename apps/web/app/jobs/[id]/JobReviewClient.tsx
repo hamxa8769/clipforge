@@ -15,6 +15,7 @@
 import { useEffect, useState } from "react";
 import { getJob, apiGet, cancelJob, normalizeCandidates, normalizeJob, pauseJob, pipelineProgress, PROCESSING_STATUSES, resumeJob, retryJob, type Candidate, type Job } from "@/lib/api";
 import { demoCandidates, demoJobs } from "@/lib/mock";
+import { useServerStatus } from "@/components/ServerStatusProvider";
 import { Card, DangerButton, ErrorBanner, PrimaryButton, ProgressBar, SecondaryButton } from "@/components/ui";
 import PipelineSteps from "@/components/PipelineSteps";
 import ReviewClient from "./ReviewClient";
@@ -26,7 +27,10 @@ export default function JobReviewClient({ id }: { id: string }) {
   const [candidates, setCandidates] = useState<Candidate[]>(
     demoCandidates.filter((c) => c.job_id === id || id === "job-001"),
   );
-  const [live, setLive] = useState(false);
+  // Liveness is the shared server status (v0.9.3) — this page no
+  // longer probes /health itself.
+  const server = useServerStatus();
+  const live = server.live;
   const [retryNote, setRetryNote] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [controlling, setControlling] = useState(false);
@@ -35,20 +39,37 @@ export default function JobReviewClient({ id }: { id: string }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [fetchedJob, fetchedCandidates, health] = await Promise.all([
+      const [fetchedJob, fetchedCandidates] = await Promise.all([
         getJob(id),
         apiGet<Candidate[]>(`/jobs/${id}/candidates`),
-        apiGet<unknown>("/health"),
       ]);
       if (cancelled) return;
       if (fetchedJob !== null) setJob(fetchedJob);
       if (fetchedCandidates !== null) setCandidates(normalizeCandidates(fetchedCandidates));
-      setLive(health !== null);
     })();
     return () => {
       cancelled = true;
     };
   }, [id]);
+
+  // When the server comes back after being down, reload the job on
+  // our own instead of showing the demo seed until a manual refresh.
+  useEffect(() => {
+    if (!live) return;
+    let cancelled = false;
+    (async () => {
+      const [fetchedJob, fetchedCandidates] = await Promise.all([
+        getJob(id),
+        apiGet<Candidate[]>(`/jobs/${id}/candidates`),
+      ]);
+      if (cancelled) return;
+      if (fetchedJob !== null) setJob(fetchedJob);
+      if (fetchedCandidates !== null) setCandidates(normalizeCandidates(fetchedCandidates));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [live, id]);
 
   // Poll while the job is still processing so the pipeline advances live.
   useEffect(() => {
@@ -79,7 +100,7 @@ export default function JobReviewClient({ id }: { id: string }) {
     if (!live) {
       // Demo mode: simulate the retry locally — no API to call.
       setJob((j) => ({ ...j, status: "pending", error: null, failed_stage: null }));
-      setRetryNote("Retry simulated locally (demo mode: API unreachable). A live retry re-runs this same job via POST /jobs/{id}/retry.");
+      setRetryNote("Retry simulated locally (demo mode: server not answering). A live retry re-runs this same job via POST /jobs/{id}/retry.");
       setRetrying(false);
       return;
     }

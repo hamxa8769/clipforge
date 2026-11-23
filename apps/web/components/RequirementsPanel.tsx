@@ -47,11 +47,18 @@ function shortVersion(version: string): string {
 
 export function RequirementsPanel() {
   const [status, setStatus] = useState<RequirementsStatus | null>(null);
+  // Whether a check attempt has settled yet. "Checking…" is honest
+  // only before the first attempt; after a failed attempt the panel
+  // says it couldn't check instead of hanging on "Checking…" forever
+  // (v0.9.2: GET /requirements/status runs the tool probes and can
+  // outlast the fetch timeout while the server is live).
+  const [checked, setChecked] = useState(false);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     const next = await getRequirementsStatus();
+    setChecked(true);
     if (next) {
       setStatus(next);
       setError(null);
@@ -92,7 +99,9 @@ export function RequirementsPanel() {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm text-neutral-300">
           {status === null
-            ? "Checking what the pipeline needs…"
+            ? checked
+              ? "Couldn't check requirements — the server didn't answer in time. Press “Verify requirements” to try again."
+              : "Checking what the pipeline needs…"
             : status.all_ready
               ? "All requirements installed — jobs can run."
               : `${status.blocking.length} requirement${status.blocking.length === 1 ? "" : "s"} need${status.blocking.length === 1 ? "s" : ""} attention — a job cannot start until ${status.blocking.length === 1 ? "it is" : "they are"} fixed.`}

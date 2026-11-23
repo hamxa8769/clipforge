@@ -51,7 +51,7 @@ export default function NewClipRun({ live, onJobStarted }: { live: boolean; onJo
 
   const nicheValue = niche === "__custom" ? customNiche.trim() : niche;
   const rightsOk = ownContent || (check?.can_clip ?? false);
-  const offlineReason = "The server is unreachable — clip runs start when the API is back.";
+  const offlineReason = "The server is not answering — clip runs start when the API is back.";
   // Own video, no licence check needed: the server accepts the
   // own-content declaration on POST /jobs as-is (v0.9.1). The URL must
   // still look like a YouTube link — anything else goes through the
