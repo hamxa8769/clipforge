@@ -104,3 +104,33 @@ commit — star counts and licences drift.
   reason transparent and editable (research §1 gap).
 - **AutoClip's publish pack as manual ZIP**: ClipForge's approval queue +
   scheduler is the delivery path instead.
+
+## v0.10.0 — ClipNova-AI (MIT) credit
+
+Source: https://github.com/ahsanK225/ClipNova-AI — MIT licence
+(checked 2026-11-23; repo is MIT-licensed, so adaptation with credit is
+permitted). ClipNova was studied as the reference implementation for the
+four v0.10.0 features; **no ClipNova code was copied or vendored** — every
+feature below is a fresh implementation in ClipForge's own codebase, in
+ClipForge's own architecture (FastAPI server + Next.js UI + the existing
+pipeline/worker). What was adapted, per feature:
+
+| Feature | ClipNova idea adapted | Where it landed in ClipForge |
+|---|---|---|
+| Live stream monitoring | `studio/live.py`: live recording + chat-spike peak detection (`_watch_spikes`, anonymous Twitch IRC `justinfan`, golden-retention clip window around a peak) | `src/clipforge/live_monitor.py` (PeakDetector, YouTube-first live monitor, Twitch/Kick honest limits) + `apps/api/clipforge_api/live_monitor.py` (`/api/live/*`) + `apps/web/app/live/page.tsx`; details in `docs/live-monitoring.md` |
+| Facecam Studio | `render.py` layout modes: `split_half` / `custom` split, `gameplay` (camera over gameplay), `zoom`, `blur_fill` (16:9 source over a blurred background), `fullscreen` | `src/clipforge/facecam.py` (FacecamLayout: split / pip / fullscreen / blur_fill, ffprobe-verified 1080x1920 render) + `src/clipforge/render.py` facecam path + Studio page; ClipNova's facecam-box auto-detection from the video itself was NOT ported (ClipForge uses explicit user-set layout instead) |
+| Animated captions | ClipNova's captioned-clip rendering (word-level animated captions on vertical video) | `src/clipforge/captions.py`: 6 animated caption styles, rendered by the real render path (`tests/unit/test_render_facecam.py`) |
+| CapCut draft export | ClipNova's use of the public `pyJianYingDraft` library (MIT) to write CapCut draft folders | `src/clipforge/capcut.py` — ClipForge's own draft builder (own `draft_content.json` writer, no pyJianYingDraft dependency vendored); validated with `validate_draft`; details in `docs/capcut-export.md` |
+| LLM providers | `studio/ai.py` `PROVIDERS` table shape (one entry per provider: key env var, base URL, model list) + model-id validation on save | `src/clipforge/llm.py`: 8 providers (Gemini, OpenAI, Grok, Groq, OpenRouter, Claude, Ollama + rules fallback) with per-provider Test buttons in Settings (`apps/web/components/LlmProviders.tsx`); details in `docs/ai-providers.md` |
+
+### SKIPPED: sherpa-onnx (offline transcription)
+
+ClipNova uses **sherpa-onnx** for offline transcription. Deliberately NOT
+adopted in v0.10.0. Reason, stated honestly: ClipForge already has
+working offline transcription via **faster-whisper** (with a memory guard
+added in v0.9.3), which covers the same job. Adding sherpa-onnx would pull
+in a second heavy native dependency (ONNX Runtime + model files) for
+marginal gain — a second transcription engine to install, ship, and keep
+working on Windows for no user-visible improvement. If faster-whisper ever
+stops meeting ClipForge's needs (e.g. a model faster-whisper cannot run),
+revisit sherpa-onnx then; until that day it stays out.
