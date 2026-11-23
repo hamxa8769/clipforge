@@ -585,6 +585,13 @@ app.include_router(x_router)
 app.include_router(monetization_router)
 app.include_router(publish_router)
 
+# --- v0.10.0 (Worker A): live stream monitoring (/api/live/*).
+# Registered here, before __main__ adds the "/" StaticFiles mount,
+# so API calls still return JSON.
+from clipforge_api.live_monitor import router as live_monitor_router  # noqa: E402
+
+app.include_router(live_monitor_router)
+
 
 def _queue_position(db: Session, job: Job) -> int | None:
     """1-based queue position for a pending / queued job, else None.
