@@ -49,9 +49,13 @@ Create a clipping job (JSON body — no file upload in v0.1.0).
 ```
 
 - `source_type`: `local` or `youtube`.
-- YouTube jobs **require** `own_content` / `own_content_declaration`
-  = true, otherwise **422** — ClipForge only processes content you own
-  or hold the rights to.
+- YouTube jobs: advisory since v0.9.1 — no licence gate and no
+  declaration requirement (see `docs/licensing.md`). The licence is
+  recorded (`source_license`, `source_title`, `source_channel`) and
+  any CC source still gets its attribution block; the rights notice is
+  shown in the UI and the user is responsible for the rights to what
+  they post. (Up to v0.9.0 a YouTube job without
+  `own_content_declaration` or a lawful licence was 422.)
 - Local jobs need `source_path` (or `source_url`), otherwise **422**.
 - → `201` `{ "id": "...", "status": "pending", "own_content": true,
   "candidates": 0, ... }`.

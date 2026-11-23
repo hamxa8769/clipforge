@@ -1,19 +1,17 @@
 // New clip run (v0.9.0) — the dashboard's one-place start: paste a video
 // URL, pick a niche, and go. Three real paths, no dummy buttons:
 //
-// 1. "Check licence & clip this video" — verifies the licence first
-//    (GET /api/videos/license) and only then starts a clip job
-//    (POST /jobs). A standard-licence video that is not yours is refused
-//    with the server's plain-language reason; CC / public-domain / own
-//    videos start, and CC-BY attribution is added automatically.
+// 1. "Check licence & clip this video" — reports the licence first
+//    (GET /api/videos/license) and then starts a clip job (POST /jobs).
+//    Advisory since v0.9.1: the licence check never refuses a video —
+//    any pasted link proceeds, the rights notice is shown instead, and
+//    CC-BY attribution is added automatically for CC videos.
 // 2. "Start clip job — my own video" (v0.9.1) — when the rights box is
 //    ticked, the job starts straight from the own-content declaration
 //    (POST /jobs with own_content_declaration=true), with NO licence
 //    check in the way. The check needs a YouTube connection or API key,
 //    so without this path an own video could never start on a fresh
-//    install: the check 422d and the Start button never appeared. The
-//    server still enforces the gate — this only exposes its existing
-//    own-content path; a non-declared, non-licensed source still 422s.
+//    install: the check 422d and the Start button never appeared.
 // 3. "Run the agent on this source" — starts the agent on this URL +
 //    niche via startAgentOnSource (PUT /api/agent/config with
 //    enabled:true, then POST /api/agent/start), exactly the Agent
@@ -28,6 +26,7 @@ import { useState } from "react";
 import Link from "next/link";
 import {
   checkVideoLicense, createYoutubeClipJob, jobSourceLicense, licenseBadgeLabel,
+  RIGHTS_ADVISORY,
   startAgentOnSource, NICHE_PRESETS,
   type LicenseCheck,
 } from "@/lib/api";
@@ -84,9 +83,10 @@ export default function NewClipRun({ live, onJobStarted }: { live: boolean; onJo
   }
 
   async function onStartJob() {
-    // Two ways in, both server-enforced: a passed licence check, or
-    // the own-content declaration (no check needed for your own video).
-    if (!check?.can_clip && !canStartOwnJob) return;
+    // Advisory since v0.9.1: the licence check never refuses a video —
+    // any checked link proceeds; the own-content declaration also
+    // starts a job with no check at all.
+    if (!check && !canStartOwnJob) return;
     setStarting(true);
     setError(null);
     const res = check?.can_clip
@@ -143,11 +143,12 @@ export default function NewClipRun({ live, onJobStarted }: { live: boolean; onJo
         hint="Paste a video, check its licence, start clipping — all from here."
         action={<Link href="/trending" className="text-sm font-medium text-amber-300 hover:text-amber-200">Find a licensed video →</Link>}
       />
+      <p className="mb-4 rounded-lg bg-neutral-800/60 px-3 py-2 text-sm text-neutral-300" role="note">{RIGHTS_ADVISORY}</p>
       {!live && (
         <p className="mb-4 rounded-lg bg-amber-500/10 px-3 py-2 text-sm text-amber-200" role="note">{offlineReason}</p>
       )}
       <div className="grid gap-4 lg:grid-cols-[1fr_220px]">
-        <Field label="Source video or channel URL" hint="Your own video, a Creative Commons video, or a public-domain video. Standard-licence videos that aren't yours are refused.">
+        <Field label="Source video or channel URL" hint="Paste any YouTube video link — the licence check below reports its licence, and the rights notice above applies.">
           <TextInput
             id="new-clip-url"
             type="url"
@@ -189,20 +190,21 @@ export default function NewClipRun({ live, onJobStarted }: { live: boolean; onJo
         />
         <span>
           This is my own video (or I have the rights to use it)
-          <span className="block text-xs text-neutral-500">Tick this for your own uploads. For Creative Commons videos the licence check below confirms the rights instead.</span>
+          <span className="block text-xs text-neutral-500">Tick this for your own uploads. For other videos the licence check below reports the video&apos;s licence instead.</span>
         </span>
       </label>
 
-      {/* Licence verdict — never clip on a guess. */}
+      {/* Licence report — advisory since v0.9.1: the licence is reported,
+          never a refusal. Any checked video can be clipped. */}
       {check && (
-        <div className={`mt-4 rounded-lg border px-3 py-2.5 text-sm ${check.can_clip ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200" : "border-red-500/40 bg-red-500/10 text-red-200"}`} role="status">
+        <div className="mt-4 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2.5 text-sm text-emerald-200" role="status">
           <p className="font-medium">
-            {check.can_clip ? "✓ Can be clipped — " : "✕ Cannot be clipped — "}
+            {"✓ Can be clipped — "}
             {licenseBadgeLabel(check.license)} · {check.title || "Untitled video"}
             {check.channel ? ` · by ${check.channel}` : ""}
           </p>
           <p className="mt-0.5 text-xs leading-snug opacity-90">{check.reason}</p>
-          {check.can_clip && check.license === "cc" && (
+          {check.license === "cc" && (
             <p className="mt-0.5 text-xs leading-snug opacity-90">CC-BY attribution will be added to the clip description automatically.</p>
           )}
         </div>
@@ -222,7 +224,7 @@ export default function NewClipRun({ live, onJobStarted }: { live: boolean; onJo
       )}
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
-        {check?.can_clip ? (
+        {check ? (
           <PrimaryButton onClick={() => void onStartJob()} disabled={!live || starting}>
             {starting ? <Spinner label="Starting…" /> : `Start clip job — ${licenseBadgeLabel(check.license)}`}
           </PrimaryButton>
@@ -242,11 +244,11 @@ export default function NewClipRun({ live, onJobStarted }: { live: boolean; onJo
           {startingAgent ? "Starting agent…" : "Run the agent on this source"}
         </SecondaryButton>
         {!rightsOk && live && (
-          <span className="text-xs text-neutral-500">Agent run needs the rights checkbox (or a passed licence check) first.</span>
+          <span className="text-xs text-neutral-500">Agent run needs the rights checkbox (or a licence check) first.</span>
         )}
       </div>
       <p className="mt-3 text-xs leading-snug text-neutral-500">
-        Licensed clips only — ClipForge clips your own videos, Creative Commons and public-domain videos. Nothing from a standard-licence video that isn&apos;t yours is ever cut or posted.
+        {RIGHTS_ADVISORY} ClipForge does not guarantee rights clearance.
       </p>
     </Card>
   );

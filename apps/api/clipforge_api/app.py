@@ -183,10 +183,8 @@ from clipforge.job_queue import get_job_queue
 from clipforge.licensing import (
     append_attribution,
     build_attribution_text,
-    is_lawful_source,
     merge_records,
     normalize_license,
-    publish_blocked_reason,
     record_from_obj,
 )
 from clipforge.llm import (
@@ -239,11 +237,11 @@ class JobCreate(BaseModel):
     title: str = ""
     own_content: bool | None = None
     own_content_declaration: bool | None = None
-    # v0.7.0 lawful CC pipeline (see clipforge.licensing): the source
-    # video's licence + original-video facts. A YouTube job may skip
-    # the own-content declaration when it carries a lawful licence
-    # (own / public-domain / any Creative Commons); a Standard-licence
-    # source is refused outright.
+    # v0.7.0 licence record (see clipforge.licensing): the source
+    # video's licence + original-video facts. Advisory since v0.9.1:
+    # the licence is recorded (and any CC attribution auto-added), but
+    # no licence value refuses a job — the rights notice is shown in
+    # the UI and the user is responsible for the rights to what they post.
     source_license: str | None = None
     source_title: str | None = None
     source_channel: str | None = None
@@ -920,27 +918,20 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)):
     audit's top defect). ``POST /jobs/{id}/run`` stays available for
     pending / failed / blocked jobs (e.g. after a retry).
     """
-    # v0.7.0 lawful-source gate: a YouTube job needs either the
-    # own-content declaration or a lawful licence (own / public-domain /
-    # any Creative Commons). A Standard-licence source is refused here
-    # — and again at publish time — because re-uploading it would
-    # infringe the original creator's copyright.
+    # v0.9.1 (advisory): the licence is recorded, never enforced. The
+    # v0.7.0 job-creation gate — refusing Standard-licence sources and
+    # YouTube jobs without a declaration or a lawful licence — was
+    # removed at the user's explicit instruction after they checked
+    # YouTube's terms and confirmed clipping is officially allowed.
+    # Any pasted video link proceeds; the UI shows the non-blocking
+    # rights notice and the user is responsible for the rights to what
+    # they post. CC sources still get their attribution block.
     licence = normalize_license(payload.source_license)
-    if payload.source_type == "youtube":
-        if licence == "standard":
-            raise HTTPException(
-                422,
-                "This video is under the YouTube Standard licence, so "
-                "ClipForge cannot clip or post it. Only your own videos, "
-                "public-domain videos, or Creative Commons videos are allowed.",
-            )
-        if not payload.declared() and not is_lawful_source(licence):
-            raise HTTPException(
-                422,
-                "YouTube ingest requires own_content_declaration=true or a "
-                "Creative Commons / public-domain source_license: ClipForge "
-                "only processes content you own or hold the rights to.",
-            )
+    if payload.source_type == "youtube" and not payload.source_url:
+        # Structural, not a licence rule: a YouTube job with no URL
+        # has nothing to clip. (The v0.7.0 licence / declaration gate
+        # that used to refuse here was removed in v0.9.1 — see above.)
+        raise HTTPException(422, "YouTube jobs need source_url")
     if (
         payload.source_type == "local"
         and payload.source_path is None
@@ -1486,17 +1477,11 @@ def create_post(payload: PostCreate, db: Session = Depends(get_db)):
         )
     if payload.account_id:
         _get_or_404(db, SocialAccount, payload.account_id, "account")
-    # v0.7.0 licence record: the clip's licence travels onto the post,
-    # and a Standard-licence third-party source is refused here as well
-    # as at publish time — creating the post must never be a way around
-    # the publish refusal.
+    # v0.7.0 licence record: the clip's licence travels onto the post
+    # (and any CC attribution with it). Advisory since v0.9.1: no
+    # licence value refuses post creation any more.
     job = db.get(Job, cand.job_id)
     record = _licence_out(cand, job)
-    blocked = publish_blocked_reason(
-        record["source_license"], own_content=bool(job.own_content) if job else False
-    )
-    if blocked:
-        raise HTTPException(409, blocked)
     seo = payload.seo
     if seo is None:
         keyword = ((job.title if job else "") or "").split(":")[0].strip() or "clip"
@@ -1596,20 +1581,12 @@ def _publish_post(post: Post, dry_run: bool, db: Session) -> dict:
         raise HTTPException(409, f"post is '{post.status}' — approve it before publishing")
     if post.status in {PostStatus.DRAFT.value, PostStatus.PENDING_APPROVAL.value}:
         raise HTTPException(409, "Approval-first: approve this post before publishing it")
-    # v0.7.0 defence in depth: even if the job-creation and post-creation
-    # checks were bypassed (e.g. a post seeded before the licence was
-    # recorded), a Standard-licence third-party source is never published.
-    record = record_from_obj(post)
-    if not record["source_license"] and post.clip_candidate_id:
-        cand = db.get(ClipCandidate, post.clip_candidate_id)
-        if cand is not None:
-            job = db.get(Job, cand.job_id)
-            record = merge_records(record_from_obj(cand), record_from_obj(job) if job else {})
-    blocked = publish_blocked_reason(record["source_license"])
-    if blocked:
-        post.error = blocked
-        db.commit()
-        raise HTTPException(409, blocked)
+    # Advisory since v0.9.1: the licence record still travels with the
+    # post (and any CC attribution with it), but no licence value
+    # refuses publishing any more — the v0.7.0 defence-in-depth 409
+    # was removed at the user's explicit instruction after they checked
+    # YouTube's terms. The rights notice is shown in the UI before
+    # publishing; the user is responsible for the rights to what they post.
     if not dry_run and _effective_dry_run():
         raise HTTPException(
             409,

@@ -6,6 +6,14 @@ merge.
 
 ## Own content only
 
+> v0.9.1 note: the licence hard block described below was removed —
+> see `docs/licensing.md`. The licence is now reported (advisory),
+> never enforced: any pasted video link proceeds, the rights notice is
+> shown where the link is entered and before publishing, and the user
+> is responsible for the rights to what they post. The rights
+> acknowledgement checkboxes (agent `rights_confirmed`, batch
+> `own_content_declaration`) remain as the user's own acknowledgement.
+
 - Ingest requires a **source-ownership declaration** (`ownership_declared`)
   on every job. No declaration, no job.
 - ClipForge never downloads other creators' videos (no "channel

@@ -15,15 +15,18 @@ Two pieces, kept in one module so the router and the worker share them:
      ``liveStreamingDetails.concurrentViewers`` the viewers and
      ``actualStartTime`` when the stream started.
 
-   Licence verification before capture reuses Worker A's
-   :func:`clipforge.trending.check_video_license` (the same live
-   ``status.license`` check the recorded-video flow uses) — one
-   licence rule for recorded and live video alike.
+   Licence reporting (advisory since v0.9.1): :func:`clip_decision`
+   reports a live stream's licence with the rights notice — it never
+   refuses a stream. The v0.7.0 hard block (standard-licence or
+   unverifiable third-party streams refused) was removed at the user's
+   explicit instruction after they checked YouTube's terms and
+   confirmed clipping is officially allowed. The licence is still
+   re-verified against the YouTube API at capture time (never trusted
+   from the client) so the job record and any CC attribution are
+   accurate; the verdict itself no longer blocks capture.
 
-   Every result carries ``can_clip``: True only for the user's OWN live
-   stream or a Creative Commons licensed live stream. A standard-licence
-   third-party live stream is ``can_clip=false`` with a plain-language
-   reason — it is never captured.
+   Every result carries ``can_clip``: always True since v0.9.1, with
+   ``clip_reason`` carrying the licence report / rights notice.
 
 2. **Live capture** — :func:`capture_live_stream` records a *bounded*
    segment of a live stream with yt-dlp (never an unbounded recording:
@@ -58,6 +61,7 @@ import httpx
 
 from clipforge.auth.secrets import SecretStore
 from clipforge.ingest import SourceInfo
+from clipforge.licensing import RIGHTS_ADVISORY
 from clipforge.trending import (
     YOUTUBE_API_BASE,
     TrendingCredentials,
@@ -81,11 +85,7 @@ LIVE_STOP_GRACE_S = 15.0
 # How often the capture loop checks for cancel / timeout (seconds).
 _CAPTURE_POLL_S = 0.5
 
-LIVE_NOTICE = (
-    "Live clipping works on YOUR live streams and on Creative Commons "
-    "licensed live streams. Standard-licence streams by other creators "
-    "cannot be clipped."
-)
+LIVE_NOTICE = "Live clipping reports each stream's licence. " + RIGHTS_ADVISORY
 
 LICENCE_CREATIVE_COMMONS = "creativeCommon"
 LICENCE_STANDARD = "youtube"
@@ -105,12 +105,14 @@ class LiveCaptureCancelled(LiveCaptureError):
 
 # ------------------------------------------------------------------ clip decision
 def clip_decision(licence: str, is_own: bool) -> tuple[bool, str]:
-    """Whether a live stream may be clipped, and the plain-language reason.
+    """Report whether a live stream may be clipped, and the reason.
 
-    Own live streams are always clippable. Otherwise only Creative
-    Commons licensed streams are clippable — a standard-licence stream
-    by another creator, or a stream whose licence could not be
-    confirmed, is refused.
+    Advisory since v0.9.1: always ``(True, reason)`` — the licence is
+    reported with the rights notice, never enforced. The v0.7.0 hard
+    block (standard-licence or unverifiable third-party streams
+    refused) was removed at the user's explicit instruction after they
+    checked YouTube's terms. Own and Creative Commons streams keep
+    their positive reasons; anything else gets the rights notice.
     """
     if is_own:
         return True, "Your own live stream — you can clip it."
@@ -118,25 +120,23 @@ def clip_decision(licence: str, is_own: bool) -> tuple[bool, str]:
         return True, "Creative Commons licensed live stream — you can clip it."
     if licence == LICENCE_STANDARD:
         return (
-            False,
-            "This live stream uses the standard YouTube licence and "
-            "belongs to another creator, so ClipForge cannot clip it. "
-            "Only your own live streams and Creative Commons licensed "
-            "live streams can be clipped.",
+            True,
+            "This live stream uses the standard YouTube licence. " + RIGHTS_ADVISORY,
         )
     return (
-        False,
-        "The licence of this live stream could not be confirmed, so "
-        "ClipForge cannot clip it. Only your own live streams and "
-        "Creative Commons licensed live streams can be clipped.",
+        True,
+        "The licence of this live stream could not be confirmed. " + RIGHTS_ADVISORY,
     )
 
 
 def check_can_clip(licence: str, is_own: bool) -> None:
-    """Raise :class:`LiveCaptureError` when a live stream may not be clipped."""
-    can_clip, reason = clip_decision(licence, is_own)
-    if not can_clip:
-        raise LiveCaptureError(reason)
+    """Advisory since v0.9.1 — never raises for a licence.
+
+    Kept for backward compatibility: the licence is reported by
+    :func:`clip_decision`, not enforced. (The worker's live-ingest
+    re-check that used to fail jobs here was removed with it.)
+    """
+    return None
 
 
 # ------------------------------------------------------------------ discovery
@@ -266,10 +266,10 @@ def search_live(
     ``search.list`` (``eventType=live``, ``q`` = the niche keywords,
     ``videoLicense=creativeCommon`` when ``licensed_only``) finds the
     live streams; ``videos.list`` verifies each one's licence and
-    reads viewers / start time. ``can_clip`` is True only for the
-    user's own live streams (``channel_id == own_channel_id``) or
-    Creative Commons licensed ones. Raises :class:`LiveError` in plain
-    language when YouTube rejects the call — never invented streams.
+    reads viewers / start time. ``can_clip`` is always True (advisory
+    since v0.9.1 — the licence is reported, never enforced). Raises
+    :class:`LiveError` in plain language when YouTube rejects the call
+    — never invented streams.
     """
     from clipforge.trending import niche_search_query  # noqa: PLC0415 (avoid cycle)
 
@@ -358,8 +358,9 @@ def list_own_live(
     the scope) it falls back to ``search.list`` by channel id +
     ``eventType=live``. With an API-key credential and no known channel
     id there is nothing to list — raises :class:`LiveError` saying to
-    connect the channel. Every result is the user's own: ``is_own`` and
-    ``can_clip`` are True.
+    connect the channel. Every result is the user's own: ``is_own``
+    is True (and ``can_clip`` is True, as for every stream since the
+    v0.9.1 advisory change).
     """
     own_client = client is None
     http = client or httpx.Client(timeout=30.0)
@@ -441,11 +442,12 @@ def verify_live_video(
     """Re-verify one live stream before capture: licence + ownership.
 
     Delegates to Worker A's :func:`clipforge.trending.check_video_license`
-    (live ``videos.list`` ``status.license`` check) so a
-    standard-licence third-party stream cannot be captured by sending
-    a faked ``licence`` field — the capture endpoint calls this, never
-    the client's claim. Raises :class:`LiveError` when the video
-    cannot be found — it may have ended — or YouTube rejects the call.
+    (live ``videos.list`` ``status.license`` check) so the job record
+    carries the true licence (never a faked ``licence`` field from the
+    client). Advisory since v0.9.1: the verdict never blocks capture —
+    the licence is reported with the rights notice. Raises
+    :class:`LiveError` when the video cannot be found — it may have
+    ended — or YouTube rejects the call.
     """
     url = f"https://www.youtube.com/watch?v={video_id}"
     try:

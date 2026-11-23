@@ -27,8 +27,9 @@ import {
 } from "@/components/ui";
 
 const GUARDRAIL =
-  "Clips are made only from your own videos or Creative Commons / licensed / public-domain videos. "
-  + "Never re-upload another creator's standard-licensed video.";
+  "Make sure you have the right to use the videos you clip — your own video, "
+  + "a licensed video, or a use YouTube permits. You are responsible for the "
+  + "rights to what you post.";
 
 const SIGNALS: { key: keyof Pick<DetectionCandidate, "hook_score" | "peak_score" | "payoff_score" | "emotion_score" | "visual_score" | "completeness_score">; label: string }[] = [
   { key: "hook_score", label: "Hook" },

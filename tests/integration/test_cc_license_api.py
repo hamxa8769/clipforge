@@ -1,5 +1,5 @@
 """API integration tests — Creative Commons discovery + licence
-guardrail (v0.7.0, Worker A).
+advisory (v0.7.0, Worker A; advisory since v0.9.1).
 
 Contract:
 
@@ -8,17 +8,19 @@ Contract:
   GET  /api/videos/license?url=<youtube-url>
        -> {video_id, title, channel, channel_id, license,
            license_url, can_clip, reason}
-  POST /api/trending/run — the licence guardrail: a standard-licence
-       third-party source video is refused (422, plain language) even
-       when rights were ticked; a CC video or the user's own video is
-       accepted; a video whose licence cannot be verified is refused
-       honestly.
+  POST /api/trending/run — advisory since v0.9.1: the source video's
+       licence is NOT verified as a gate any more. A standard-licence
+       third-party source, a CC video, the user's own video, and even a
+       video whose licence cannot be verified all proceed on the
+       user's rights confirmation (the v0.7.0 refusal was removed at
+       the user's explicit instruction after they checked YouTube's
+       terms). The licence check endpoint still reports the licence.
 
 YouTube HTTP is mocked by monkeypatching ``httpx.Client`` in the
 router module — no test ever hits the real YouTube API. The agent
-itself is stubbed for the /run guardrail tests (the full pipeline is
+itself is stubbed for the /run tests (the full pipeline is
 already covered by the v0.6.0 demo-path test); these tests assert the
-guardrail decision, not the pipeline.
+advisory decision, not the pipeline.
 """
 
 from __future__ import annotations
@@ -143,7 +145,9 @@ def test_license_endpoint_cc_video_can_clip(monkeypatch):
     assert body["channel"] == "Some Channel"
 
 
-def test_license_endpoint_standard_video_cannot_clip(monkeypatch):
+def test_license_endpoint_standard_video_is_advisory(monkeypatch):
+    """v0.9.1: a standard-licence video is reported (licence + rights
+    notice) and proceeds — can_clip is True, never a refusal."""
     _save_api_key()
     monkeypatch.setattr(
         trending_router.httpx,
@@ -156,8 +160,9 @@ def test_license_endpoint_standard_video_cannot_clip(monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["license"] == "youtube"
-    assert body["can_clip"] is False
+    assert body["can_clip"] is True
     assert body["reason"] == STANDARD_LICENSE_REASON
+    assert "You are responsible for the rights" in body["reason"]
 
 
 def test_license_endpoint_own_video_can_clip(monkeypatch, _isolated_data_dir):
@@ -295,10 +300,12 @@ def test_run_accepts_cc_source_video(monkeypatch):
     assert len(stub.started) == 1
 
 
-def test_run_refuses_standard_licence_third_party_video(monkeypatch, _isolated_data_dir):
-    """GUARDRAIL: a standard-licence video that is provably not the
-    user's own (connected channel id known, different channel) is
-    refused even though rights were ticked."""
+def test_run_accepts_standard_licence_third_party_video(monkeypatch, _isolated_data_dir):
+    """v0.9.1 ADVISORY: a standard-licence video that is provably not
+    the user's own (connected channel id known, different channel)
+    proceeds on the user's rights confirmation — the v0.7.0 refusal
+    was removed at the user's explicit instruction after they checked
+    YouTube's terms."""
     _save_oauth_token(_isolated_data_dir, account_ref=OWN_CHANNEL_ID)
     monkeypatch.setattr(
         trending_router.httpx,
@@ -312,9 +319,8 @@ def test_run_refuses_standard_licence_third_party_video(monkeypatch, _isolated_d
     resp = client.post(
         "/api/trending/run", json=_run_payload(f"https://www.youtube.com/watch?v={STD_VIDEO}")
     )
-    assert resp.status_code == 422
-    assert resp.json()["detail"] == STANDARD_LICENSE_REASON
-    assert stub.started == []
+    assert resp.status_code == 202
+    assert len(stub.started) == 1
 
 
 def test_run_accepts_own_standard_licence_video(monkeypatch, _isolated_data_dir):
@@ -335,10 +341,12 @@ def test_run_accepts_own_standard_licence_video(monkeypatch, _isolated_data_dir)
     assert len(stub.started) == 1
 
 
-def test_run_refuses_unverifiable_licence_honestly(monkeypatch):
-    """The video cannot be found on YouTube at all: the run is refused
-    with a plain-language reason instead of proceeding on an
-    unverified source."""
+def test_run_proceeds_when_licence_cannot_be_verified(monkeypatch):
+    """v0.9.1 ADVISORY: the video cannot be found on YouTube at all, so
+    there is no licence to verify — the run still proceeds on the
+    user's rights confirmation instead of refusing on an unverified
+    source. (The licence-check endpoint itself still reports the
+    "could not find that video" error honestly.)"""
     _save_api_key()
     monkeypatch.setattr(trending_router.httpx, "Client", _fake_client_factory(video_items=[]))
     stub = _StubAgent()
@@ -346,9 +354,8 @@ def test_run_refuses_unverifiable_licence_honestly(monkeypatch):
     resp = client.post(
         "/api/trending/run", json=_run_payload(f"https://www.youtube.com/watch?v={STD_VIDEO}")
     )
-    assert resp.status_code == 422
-    assert "could not find that video" in resp.json()["detail"].lower()
-    assert stub.started == []
+    assert resp.status_code == 202
+    assert len(stub.started) == 1
 
 
 def test_run_without_credentials_falls_back_to_rights_attestation(monkeypatch):

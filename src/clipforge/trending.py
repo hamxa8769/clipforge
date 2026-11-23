@@ -24,17 +24,21 @@ Two pieces, kept in one module so the router and the agent share them:
    pipeline (transcribe -> score -> clip -> SEO -> approval queue ->
    schedule / publish) runs with its SEO tuned to the trending topic.
 
-Rights guardrail (non-negotiable): the agent clips ONLY the user's own
-videos or videos they have rights / a licence to use. It must NOT
-download and re-upload other creators' videos. :func:`is_trending_source`
-refuses a trending video URL as a clip source, and the router + agent
-both enforce it.
+Rights notice (v0.9.1, advisory): the licence is reported, never
+enforced. The v0.7.0 hard block — refusing standard-licence or
+unknown-licence videos — was removed at the user's explicit
+instruction after they checked YouTube's terms and confirmed
+clipping is officially allowed. :func:`is_trending_source` still
+refuses a trending video URL as a clip source (topic vs. source, not
+a licence verdict), and the router + agent both enforce that.
 
 Creative Commons discovery (v0.7.0, Worker A): ``search_trending``
 takes ``licensed_only=True`` (``videoLicense=creativeCommon`` + a
 ``status.license`` verification pass), and :func:`check_video_license`
-answers whether one video may be clipped — CC or the user's own video
-only, never a standard-licence third-party video, never a guess.
+reports one video's licence with an advisory ``can_clip`` verdict
+(always True since v0.9.1) and the rights notice as its reason for
+standard / unknown licences. ``licensed_only`` stays an opt-in
+search filter for users who want CC-only discovery.
 """
 
 from __future__ import annotations
@@ -52,6 +56,7 @@ import httpx
 from clipforge.auth.secrets import SecretStore, mask_secret
 from clipforge.auth.settings_store import SettingsStore
 from clipforge.auth.token_store import TokenRecord, TokenStore
+from clipforge.licensing import RIGHTS_ADVISORY
 from clipforge.niches import niche_keywords, niche_label, normalize_niche
 from clipforge.ytdlp_install import resolve_yt_dlp_path, ytdlp_missing_message
 
@@ -76,9 +81,9 @@ TRENDING_NOTICE = (
 )
 
 RIGHTS_NOTICE = (
-    "The ClipForge Agent only works with videos you own or have the "
-    "rights / licence to use. It is not a tool to re-upload other "
-    "creators' videos."
+    "Make sure you have the right to use this video — your own video, "
+    "a licensed video, or a use YouTube permits. You are responsible "
+    "for the rights to what you post."
 )
 
 # Creative Commons discovery (v0.7.0, Worker A). YouTube's
@@ -89,19 +94,12 @@ CC_LICENSE = "creativeCommon"
 STANDARD_LICENSE = "youtube"
 CC_LICENSE_URL = "https://creativecommons.org/licenses/by/3.0/"
 
-# Plain-language refusal for a standard-licence third-party video.
-# Shown verbatim by the licence-check endpoint and the /run guardrail.
-STANDARD_LICENSE_REASON = (
-    "This video uses YouTube's standard licence — it cannot be "
-    "re-uploaded. Only Creative Commons, public-domain, or your own "
-    "videos can be clipped."
-)
+# Advisory reasons (v0.9.1): the licence check reports the licence and
+# shows the rights notice — it never refuses a video. The constant
+# names are kept so existing imports keep working.
+STANDARD_LICENSE_REASON = "This video uses YouTube's standard licence. " + RIGHTS_ADVISORY
 
-UNVERIFIABLE_LICENSE_REASON = (
-    "Could not verify this video's licence — YouTube did not report "
-    "one, so ClipForge cannot confirm it is safe to clip. Only "
-    "Creative Commons, public-domain, or your own videos can be clipped."
-)
+UNVERIFIABLE_LICENSE_REASON = "YouTube did not report a licence for this video. " + RIGHTS_ADVISORY
 
 
 def license_url_for(license_value: str | None) -> str:
@@ -589,18 +587,20 @@ def check_video_license(
     own_channel_id: str = "",
     client: httpx.Client | None = None,
 ) -> dict:
-    """Check whether one YouTube video may be clipped, live from the
-    YouTube Data API (``videos.list`` ``part=status,snippet,
-    contentDetails``).
+    """Report one YouTube video's licence, live from the YouTube Data
+    API (``videos.list`` ``part=status,snippet,contentDetails``).
 
     Returns ``{video_id, title, channel, channel_id, license,
-    license_url, can_clip, reason}``. ``can_clip`` is True ONLY when
-    the video is Creative Commons licensed OR it is the user's own
-    video (its channel id matches ``own_channel_id``). A standard
-    licence (``youtube``) is refused with
-    :data:`STANDARD_LICENSE_REASON`. A video whose licence cannot be
-    verified at all (no ``status.license`` in the response) is also
-    refused — the licence is never guessed or faked.
+    license_url, can_clip, reason}``. Advisory since v0.9.1:
+    ``can_clip`` is ALWAYS True — the licence check reports what
+    licence a video has and shows the rights notice; it never refuses
+    a video. A standard licence (``youtube``) returns
+    :data:`STANDARD_LICENSE_REASON` (the licence + the rights
+    notice); a video whose licence cannot be verified at all (no
+    ``status.license`` in the response) returns
+    :data:`UNVERIFIABLE_LICENSE_REASON`. The licence is never guessed
+    or faked. CC videos still get the CC reason (attribution is added
+    automatically downstream) and own videos the own-video reason.
 
     Raises :class:`TrendingError` (plain language) when the URL is not
     a YouTube video URL, YouTube has no such video, or the API call
@@ -650,17 +650,15 @@ def check_video_license(
         elif is_own:
             can_clip, reason = True, ("This is your own video — you can clip it.")
         elif license_value == STANDARD_LICENSE:
-            can_clip, reason = False, STANDARD_LICENSE_REASON
+            # Advisory only (v0.9.1): report the licence + rights
+            # notice; the video proceeds through the pipeline.
+            can_clip, reason = True, STANDARD_LICENSE_REASON
         elif not license_value:
-            can_clip, reason = False, UNVERIFIABLE_LICENSE_REASON
+            can_clip, reason = True, UNVERIFIABLE_LICENSE_REASON
         else:
             can_clip, reason = (
-                False,
-                (
-                    f"This video's licence ({license_value}) is not one "
-                    "ClipForge can clip. Only Creative Commons, "
-                    "public-domain, or your own videos can be clipped."
-                ),
+                True,
+                (f"This video's licence is {license_value}. " + RIGHTS_ADVISORY),
             )
         return {
             "video_id": video_id,

@@ -69,9 +69,12 @@ def test_health_ok():
     assert body["dry_run"] is True
 
 
-def test_job_create_youtube_requires_ownership_declaration():
+def test_job_create_youtube_requires_a_source_url():
+    """v0.9.1: the licence / declaration gate is gone, but a YouTube
+    job with no URL at all is still a structural 422."""
     no_declaration = client.post("/jobs", json={"source_type": "youtube"})
     assert no_declaration.status_code == 422
+    assert "source_url" in no_declaration.text
     declared = client.post(
         "/jobs",
         json={
