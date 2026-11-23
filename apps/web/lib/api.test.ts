@@ -59,6 +59,7 @@ import {
   resolveApiUrl,
   RUNNING_STATUSES,
   sourceVideoUrl,
+  startAgentOnSource,
   API_URL,
 } from "./api.js";
 
@@ -997,4 +998,105 @@ test("normalizeWorkerQueue keeps the v0.9.0 paused list, active job and queue po
   const legacy = normalizeWorkerQueue({ running: [], queued: [], recent_runs: [] });
   assert.deepEqual(legacy?.paused, []);
   assert.equal(legacy?.active_job_id, null);
+});
+
+test("startAgentOnSource sends enabled:true with the source, then starts the agent", async () => {
+  // v0.9.1 regression: the dashboard used to PUT the source/niche
+  // WITHOUT enabled, so POST /api/agent/start 422d "agent is off" and
+  // pasting ANY video link started nothing. The save-then-start
+  // sequence must carry enabled:true.
+  const calls: Array<{ url: string; method: string; body: Record<string, unknown> }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: unknown, init?: { method?: string; body?: string }) => {
+    calls.push({
+      url: String(url),
+      method: init?.method ?? "GET",
+      body: init?.body ? (JSON.parse(init.body) as Record<string, unknown>) : {},
+    });
+    return { ok: true, status: 200, json: async () => ({ ok: true }) } as unknown as Response;
+  }) as typeof fetch;
+  try {
+    const res = await startAgentOnSource({
+      source_type: "video",
+      source_url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      niche: "gaming",
+      rights_confirmed: true,
+    });
+    assert.equal(res.ok, true);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].method, "PUT");
+    assert.equal(calls[0].url, `${API_URL}/api/agent/config`);
+    assert.equal(calls[0].body.enabled, true);
+    assert.equal(calls[0].body.source_url, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    assert.equal(calls[0].body.niche, "gaming");
+    assert.equal(calls[0].body.rights_confirmed, true);
+    assert.equal(calls[1].method, "POST");
+    assert.equal(calls[1].url, `${API_URL}/api/agent/start`);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("startAgentOnSource rolls the toggle back off when the start fails", async () => {
+  // A failed start must not leave enabled:true saved: the Agent page
+  // toggle would show a stuck ON for an agent that never started.
+  const calls: Array<{ url: string; method: string; body: Record<string, unknown> }> = [];
+  const originalFetch = globalThis.fetch;
+  let n = 0;
+  globalThis.fetch = (async (url: unknown, init?: { method?: string; body?: string }) => {
+    n += 1;
+    calls.push({
+      url: String(url),
+      method: init?.method ?? "GET",
+      body: init?.body ? (JSON.parse(init.body) as Record<string, unknown>) : {},
+    });
+    if (n === 2) {
+      return {
+        ok: false, status: 422,
+        json: async () => ({ detail: "yt-dlp is not installed — install it first." }),
+      } as unknown as Response;
+    }
+    return { ok: true, status: 200, json: async () => ({ ok: true }) } as unknown as Response;
+  }) as typeof fetch;
+  try {
+    const res = await startAgentOnSource({
+      source_type: "video",
+      source_url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      niche: "gaming",
+      rights_confirmed: true,
+    });
+    assert.equal(res.ok, false);
+    assert.match(res.error ?? "", /yt-dlp/);
+    assert.equal(calls.length, 3);
+    assert.equal(calls[2].method, "PUT");
+    assert.equal(calls[2].url, `${API_URL}/api/agent/config`);
+    assert.equal(calls[2].body.enabled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("startAgentOnSource returns the save error without starting the agent", async () => {
+  const calls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: unknown, init?: { method?: string; body?: string }) => {
+    calls.push(`${init?.method ?? "GET"} ${String(url)}`);
+    return {
+      ok: false, status: 422,
+      json: async () => ({ detail: "Give the agent a source URL starting with http:// or https://." }),
+    } as unknown as Response;
+  }) as typeof fetch;
+  try {
+    const res = await startAgentOnSource({
+      source_type: "video",
+      source_url: "not-a-url",
+      niche: "gaming",
+      rights_confirmed: true,
+    });
+    assert.equal(res.ok, false);
+    assert.equal(calls.length, 1);
+    assert.match(calls[0], /PUT .*\/api\/agent\/config/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

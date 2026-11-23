@@ -1577,6 +1577,40 @@ export async function stopAgent(): Promise<ApiResult> {
   return apiPostJson("/api/agent/stop");
 }
 
+/**
+ * Start the agent on a source in one step (v0.9.1): save the source as
+ * the agent's config AND turn the agent on, then start it.
+ *
+ * The server refuses POST /api/agent/start while the stored config has
+ * ``enabled: false`` ("The agent is off") — and PUT /api/agent/config
+ * is a partial update, so a caller that only sends the source/niche
+ * leaves the agent off and the start 422s. The dashboard used to do
+ * exactly that: "Run the agent on this source" saved the URL + niche
+ * and then start failed with "agent is off", so pasting ANY video link
+ * did nothing. Every caller that means "run the agent now" must go
+ * through here (the Agent page's toggle already sends enabled:true
+ * itself, so it is unaffected).
+ *
+ * On a failed start the saved ``enabled: true`` is rolled back, so the
+ * Agent page toggle never shows a stuck ON for an agent that never
+ * started (same rule as the Agent page's own toggle handler).
+ */
+export async function startAgentOnSource(config: {
+  source_type: AgentSourceType;
+  source_url: string;
+  niche: string;
+  rights_confirmed: boolean;
+}): Promise<ApiResult> {
+  const saved = await saveAgentConfig({ ...config, enabled: true });
+  if (!saved.ok) return saved;
+  const started = await startAgent();
+  if (!started.ok) {
+    await saveAgentConfig({ enabled: false });
+    return started;
+  }
+  return started;
+}
+
 export interface LlmProvider {
   id: string; label: string; configured: boolean; model: string;
   /** True when this is the engine the agent would use right now. */

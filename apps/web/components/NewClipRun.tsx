@@ -1,16 +1,25 @@
 // New clip run (v0.9.0) — the dashboard's one-place start: paste a video
-// URL, pick a niche, and go. Two real paths, no dummy buttons:
+// URL, pick a niche, and go. Three real paths, no dummy buttons:
 //
 // 1. "Check licence & clip this video" — verifies the licence first
 //    (GET /api/videos/license) and only then starts a clip job
 //    (POST /jobs). A standard-licence video that is not yours is refused
 //    with the server's plain-language reason; CC / public-domain / own
 //    videos start, and CC-BY attribution is added automatically.
-// 2. "Run the agent on this source" — saves this URL + niche as the
-//    agent's source (PUT /api/agent/config) and starts the agent
-//    (POST /api/agent/start), exactly the Agent page's flow, surfaced
-//    here so the daily run does not need a tab hop. Needs the rights
-//    checkbox (or a passed licence check) first.
+// 2. "Start clip job — my own video" (v0.9.1) — when the rights box is
+//    ticked, the job starts straight from the own-content declaration
+//    (POST /jobs with own_content_declaration=true), with NO licence
+//    check in the way. The check needs a YouTube connection or API key,
+//    so without this path an own video could never start on a fresh
+//    install: the check 422d and the Start button never appeared. The
+//    server still enforces the gate — this only exposes its existing
+//    own-content path; a non-declared, non-licensed source still 422s.
+// 3. "Run the agent on this source" — starts the agent on this URL +
+//    niche via startAgentOnSource (PUT /api/agent/config with
+//    enabled:true, then POST /api/agent/start), exactly the Agent
+//    page's toggle flow, surfaced here so the daily run does not need
+//    a tab hop. Needs the rights checkbox (or a passed licence check)
+//    first.
 //
 // Everything is disabled with the reason shown when the API is
 // unreachable — a run that cannot start is never presented as working.
@@ -19,7 +28,7 @@ import { useState } from "react";
 import Link from "next/link";
 import {
   checkVideoLicense, createYoutubeClipJob, jobSourceLicense, licenseBadgeLabel,
-  saveAgentConfig, startAgent, NICHE_PRESETS,
+  startAgentOnSource, NICHE_PRESETS,
   type LicenseCheck,
 } from "@/lib/api";
 import { Card, CardHeader, Field, PrimaryButton, SecondaryButton, Select, Spinner, TextInput } from "./ui";
@@ -44,6 +53,11 @@ export default function NewClipRun({ live, onJobStarted }: { live: boolean; onJo
   const nicheValue = niche === "__custom" ? customNiche.trim() : niche;
   const rightsOk = ownContent || (check?.can_clip ?? false);
   const offlineReason = "The server is unreachable — clip runs start when the API is back.";
+  // Own video, no licence check needed: the server accepts the
+  // own-content declaration on POST /jobs as-is (v0.9.1). The URL must
+  // still look like a YouTube link — anything else goes through the
+  // licence check, which validates the URL shape.
+  const canStartOwnJob = ownContent && /youtu\.?be/.test(url.trim());
 
   async function onCheckLicence() {
     const trimmed = url.trim();
@@ -56,22 +70,40 @@ export default function NewClipRun({ live, onJobStarted }: { live: boolean; onJo
     setAgentStarted(false);
     const { check: found, error: err } = await checkVideoLicense(trimmed);
     setChecking(false);
-    if (err || !found) { setError(err ?? "Licence check failed."); return; }
+    if (err || !found) {
+      // No YouTube connection / API key is the common dead-end on a
+      // fresh install: say the own-video way out in the same message
+      // instead of leaving the user with a check that can never pass.
+      const hint = err && /no youtube connection|api key/i.test(err)
+        ? " If this is your own video, tick 'This is my own video' above and press 'Start clip job — my own video' instead — that needs no licence check or YouTube connection."
+        : "";
+      setError((err ?? "Licence check failed.") + hint);
+      return;
+    }
     setCheck(found);
   }
 
   async function onStartJob() {
-    if (!check || !check.can_clip) return;
+    // Two ways in, both server-enforced: a passed licence check, or
+    // the own-content declaration (no check needed for your own video).
+    if (!check?.can_clip && !canStartOwnJob) return;
     setStarting(true);
     setError(null);
-    const res = await createYoutubeClipJob({
-      source_url: check.url || url.trim(),
-      title: check.title,
-      source_license: jobSourceLicense(check),
-      source_title: check.title,
-      source_channel: check.channel,
-      own_content_declaration: ownContent || check.license === "own",
-    });
+    const res = check?.can_clip
+      ? await createYoutubeClipJob({
+          source_url: check.url || url.trim(),
+          title: check.title,
+          source_license: jobSourceLicense(check),
+          source_title: check.title,
+          source_channel: check.channel,
+          own_content_declaration: ownContent || check.license === "own",
+        })
+      : await createYoutubeClipJob({
+          source_url: url.trim(),
+          title: "",
+          source_license: "own",
+          own_content_declaration: true,
+        });
     setStarting(false);
     if (!res.ok) { setError(res.error ?? "Could not start the clip job."); return; }
     const data = (res.data ?? {}) as Record<string, unknown>;
@@ -87,18 +119,17 @@ export default function NewClipRun({ live, onJobStarted }: { live: boolean; onJo
     setStartingAgent(true);
     setError(null);
     setAgentStarted(false);
-    const saved = await saveAgentConfig({
+    // One helper owns the save-then-start sequence: it sends
+    // enabled:true with the config (without it POST /api/agent/start
+    // 422s "agent is off" — the v0.9.0 dashboard bug where pasting any
+    // link started nothing) and rolls the toggle back off if the
+    // start itself fails.
+    const started = await startAgentOnSource({
       source_type: isChannelUrl(sourceUrl) ? "channel" : "video",
       source_url: sourceUrl,
       niche: nicheValue,
       rights_confirmed: rightsOk,
     });
-    if (!saved.ok) {
-      setStartingAgent(false);
-      setError(saved.error ?? "Could not save the agent source.");
-      return;
-    }
-    const started = await startAgent();
     setStartingAgent(false);
     if (!started.ok) { setError(started.error ?? "Could not start the agent."); return; }
     setAgentStarted(true);
@@ -191,13 +222,17 @@ export default function NewClipRun({ live, onJobStarted }: { live: boolean; onJo
       )}
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
-        {!check || !check.can_clip ? (
-          <PrimaryButton onClick={() => void onCheckLicence()} disabled={!live || checking}>
-            {checking ? <Spinner label="Checking licence…" /> : "Check licence & clip this video"}
-          </PrimaryButton>
-        ) : (
+        {check?.can_clip ? (
           <PrimaryButton onClick={() => void onStartJob()} disabled={!live || starting}>
             {starting ? <Spinner label="Starting…" /> : `Start clip job — ${licenseBadgeLabel(check.license)}`}
+          </PrimaryButton>
+        ) : canStartOwnJob ? (
+          <PrimaryButton onClick={() => void onStartJob()} disabled={!live || starting}>
+            {starting ? <Spinner label="Starting…" /> : "Start clip job — my own video"}
+          </PrimaryButton>
+        ) : (
+          <PrimaryButton onClick={() => void onCheckLicence()} disabled={!live || checking}>
+            {checking ? <Spinner label="Checking licence…" /> : "Check licence & clip this video"}
           </PrimaryButton>
         )}
         <SecondaryButton
