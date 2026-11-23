@@ -90,9 +90,7 @@ def get_styles():
     ]
     return {
         "caption_styles": caption_styles,
-        "layout_modes": [
-            {"id": mode, "label": MODE_LABELS[mode]} for mode in LAYOUT_MODES
-        ],
+        "layout_modes": [{"id": mode, "label": MODE_LABELS[mode]} for mode in LAYOUT_MODES],
         "pip_positions": list(PIP_POSITIONS),
     }
 
@@ -219,14 +217,11 @@ def render_facecam(payload: FacecamRenderIn):
         raise HTTPException(422, "pass exactly one of source_path or source_url")
     duration = payload.end_s - payload.start_s
     if duration <= 0 or duration > MAX_RENDER_SECONDS:
-        raise HTTPException(
-            422, f"clip must be 0-300 s long, got {duration:.1f} s"
-        )
+        raise HTTPException(422, f"clip must be 0-300 s long, got {duration:.1f} s")
     if payload.caption_style not in STYLES:
         raise HTTPException(
             422,
-            f"unknown caption style {payload.caption_style!r}; "
-            f"choose from {sorted(STYLES)}",
+            f"unknown caption style {payload.caption_style!r}; choose from {sorted(STYLES)}",
         )
     try:
         layout = FacecamLayout.from_dict(payload.layout)
@@ -290,9 +285,7 @@ def render_facecam(payload: FacecamRenderIn):
         "filename": out_path.name,
         "media_url": f"/facecam/media/{out_path.name}",
         "ass_file": str(ass_path) if ass_path.exists() else None,
-        "ass_media_url": (
-            f"/facecam/media/{ass_path.name}" if ass_path.exists() else None
-        ),
+        "ass_media_url": (f"/facecam/media/{ass_path.name}" if ass_path.exists() else None),
         "layout": layout.to_dict(),
         "caption_style": payload.caption_style,
         "render": result.to_dict(),

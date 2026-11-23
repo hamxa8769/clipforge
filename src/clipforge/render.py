@@ -315,9 +315,7 @@ def render_clip(
         )
 
         facecam_layout = (
-            facecam
-            if isinstance(facecam, FacecamLayout)
-            else FacecamLayout.from_dict(facecam)
+            facecam if isinstance(facecam, FacecamLayout) else FacecamLayout.from_dict(facecam)
         )
         if broll:
             raise RenderError("B-roll cannot be combined with a facecam layout")
@@ -366,8 +364,7 @@ def render_clip(
             "-i",
             str(source),
             "-filter_complex",
-            video_filter
-            + f";[0:a]loudnorm=I={loudness_lufs}:TP=-1.5:LRA=11[aout]",
+            video_filter + f";[0:a]loudnorm=I={loudness_lufs}:TP=-1.5:LRA=11[aout]",
             "-map",
             f"[{final_label}]",
             "-map",

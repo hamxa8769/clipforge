@@ -76,17 +76,50 @@ CAPTION_WORDS_PER_CHUNK = 3
 # drafts list them. Only "videos", "texts" and "speeds" ever carry
 # entries from this writer; the rest stay empty.
 _MATERIAL_KEYS = (
-    "ai_translates", "audio_balances", "audio_effects", "audio_fades",
-    "audio_track_indexes", "audios", "beats", "canvases", "chromas",
-    "color_curves", "digital_humans", "drafts", "effects", "flowers",
-    "green_screens", "handwrites", "hsl", "images", "log_color_wheels",
-    "loudnesses", "manual_deformations", "material_animations",
-    "material_colors", "multi_language_refs", "placeholders",
-    "plugin_effects", "primary_color_wheels", "realtime_denoises",
-    "shapes", "smart_crops", "smart_relights", "sound_channel_mappings",
-    "speeds", "stickers", "tail_leaders", "text_templates", "texts",
-    "time_marks", "transitions", "video_effects", "video_trackings",
-    "videos", "vocal_beautifys", "vocal_separations",
+    "ai_translates",
+    "audio_balances",
+    "audio_effects",
+    "audio_fades",
+    "audio_track_indexes",
+    "audios",
+    "beats",
+    "canvases",
+    "chromas",
+    "color_curves",
+    "digital_humans",
+    "drafts",
+    "effects",
+    "flowers",
+    "green_screens",
+    "handwrites",
+    "hsl",
+    "images",
+    "log_color_wheels",
+    "loudnesses",
+    "manual_deformations",
+    "material_animations",
+    "material_colors",
+    "multi_language_refs",
+    "placeholders",
+    "plugin_effects",
+    "primary_color_wheels",
+    "realtime_denoises",
+    "shapes",
+    "smart_crops",
+    "smart_relights",
+    "sound_channel_mappings",
+    "speeds",
+    "stickers",
+    "tail_leaders",
+    "text_templates",
+    "texts",
+    "time_marks",
+    "transitions",
+    "video_effects",
+    "video_trackings",
+    "videos",
+    "vocal_beautifys",
+    "vocal_separations",
 )
 
 # Default project config, as observed in a real CapCut draft.
@@ -154,9 +187,7 @@ def get_capcut_drafts_dir(data_dir: str | Path) -> tuple[Path, bool]:
     """
     local_app = os.environ.get("LOCALAPPDATA", "")
     if local_app:
-        candidate = (
-            Path(local_app) / "CapCut" / "User Data" / "Projects" / "com.lveditor.draft"
-        )
+        candidate = Path(local_app) / "CapCut" / "User Data" / "Projects" / "com.lveditor.draft"
         if candidate.is_dir():
             return candidate, True
     fallback = Path(data_dir) / "capcut_drafts"
@@ -213,10 +244,14 @@ def _video_material(
         "category_name": "local",
         "check_flag": 63487,
         "crop": {
-            "upper_left_x": 0.0, "upper_left_y": 0.0,
-            "upper_right_x": 1.0, "upper_right_y": 0.0,
-            "lower_left_x": 0.0, "lower_left_y": 1.0,
-            "lower_right_x": 1.0, "lower_right_y": 1.0,
+            "upper_left_x": 0.0,
+            "upper_left_y": 0.0,
+            "upper_right_x": 1.0,
+            "upper_right_y": 0.0,
+            "lower_left_x": 0.0,
+            "lower_left_y": 1.0,
+            "lower_right_x": 1.0,
+            "lower_right_y": 1.0,
         },
         "crop_ratio": "free",
         "crop_scale": 1.0,
@@ -235,9 +270,7 @@ def _video_material(
     return entry, material_id
 
 
-def _video_segment(
-    material_id: str, duration_us: int, speed_id: str
-) -> dict:
+def _video_segment(material_id: str, duration_us: int, speed_id: str) -> dict:
     """The video segment on the main track (full clip, from 0)."""
     seg = _base_segment(_new_id(), material_id, _timerange(0, duration_us))
     seg.update(
@@ -315,9 +348,7 @@ def _text_material(text: str, *, size: float, bold: bool) -> tuple[dict, str]:
 def _text_segment(material_id: str, start_us: int, duration_us: int) -> dict:
     """A text segment on a text track."""
     speed_id = _new_id()
-    seg = _base_segment(
-        _new_id(), material_id, _timerange(start_us, duration_us)
-    )
+    seg = _base_segment(_new_id(), material_id, _timerange(start_us, duration_us))
     seg.update(
         {
             "source_timerange": None,
@@ -434,9 +465,7 @@ def build_draft_document(
         materials["speeds"].append(
             {"curve_speed": None, "id": seg_speed_id, "mode": 0, "speed": 1.0, "type": "speed"}
         )
-        tracks.append(
-            _track("text", "Hook Title", _RENDER_INDEX_TEXT, [seg])
-        )
+        tracks.append(_track("text", "Hook Title", _RENDER_INDEX_TEXT, [seg]))
 
     # 3. Captions track (3-word chunks from the transcript).
     caption_segments: list[dict] = []
@@ -451,17 +480,13 @@ def build_draft_document(
             continue
         entry, mat_id = _text_material(chunk["text"], size=8.0, bold=False)
         materials["texts"].append(entry)
-        seg, seg_speed_id = _text_segment(
-            mat_id, _us(start_s), _us(end_s - start_s)
-        )
+        seg, seg_speed_id = _text_segment(mat_id, _us(start_s), _us(end_s - start_s))
         materials["speeds"].append(
             {"curve_speed": None, "id": seg_speed_id, "mode": 0, "speed": 1.0, "type": "speed"}
         )
         caption_segments.append(seg)
     if caption_segments:
-        tracks.append(
-            _track("text", "Captions", _RENDER_INDEX_TEXT, caption_segments)
-        )
+        tracks.append(_track("text", "Captions", _RENDER_INDEX_TEXT, caption_segments))
 
     tracks.sort(key=lambda t: t["segments"][0]["render_index"] if t["segments"] else 0)
 
@@ -528,9 +553,7 @@ def _draft_meta_info(draft_name: str, draft_dir: Path, drafts_root: Path, durati
         "draft_is_cloud_temp_draft": False,
         "draft_is_from_deeplink": "false",
         "draft_is_invisible": False,
-        "draft_materials": [
-            {"type": t, "value": []} for t in (0, 1, 2, 3, 6, 7, 8)
-        ],
+        "draft_materials": [{"type": t, "value": []} for t in (0, 1, 2, 3, 6, 7, 8)],
         "draft_materials_copied_info": [],
         "draft_name": draft_name,
         "draft_need_rename_folder": False,
@@ -572,12 +595,15 @@ def write_draft(draft_dir: Path, draft_name: str, document: dict) -> list[str]:
     written = []
     # Modern CapCut reads draft_content.json (with its own .bak and
     # template-2.tmp mirrors); older builds read draft_info.json.
-    for filename in ("draft_content.json", "draft_content.json.bak", "template-2.tmp", "draft_info.json"):
+    for filename in (
+        "draft_content.json",
+        "draft_content.json.bak",
+        "template-2.tmp",
+        "draft_info.json",
+    ):
         (draft_dir / filename).write_text(content, encoding="utf-8")
         written.append(filename)
-    meta = _draft_meta_info(
-        draft_name, draft_dir, draft_dir.parent, int(document["duration"])
-    )
+    meta = _draft_meta_info(draft_name, draft_dir, draft_dir.parent, int(document["duration"]))
     (draft_dir / "draft_meta_info.json").write_text(
         json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8"
     )
@@ -601,22 +627,29 @@ def probe_video(mp4_path: Path) -> tuple[float, int, int]:
     try:
         proc = subprocess.run(
             [
-                "ffprobe", "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=width,height,duration",
-                "-show_entries", "format=duration",
-                "-of", "json", str(mp4_path),
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height,duration",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "json",
+                str(mp4_path),
             ],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         data = json.loads(proc.stdout or "{}")
         streams = data.get("streams") or [{}]
         width = int(streams[0].get("width") or CANVAS_WIDTH)
         height = int(streams[0].get("height") or CANVAS_HEIGHT)
         duration = float(
-            streams[0].get("duration")
-            or (data.get("format") or {}).get("duration")
-            or 0.0
+            streams[0].get("duration") or (data.get("format") or {}).get("duration") or 0.0
         )
         return duration, width, height
     except Exception:

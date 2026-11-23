@@ -167,6 +167,7 @@ from clipforge.brandkits import (
     validate_kit,
 )
 from clipforge.broll import BrollError, BrollOverlay, overlay_spec, validate_broll
+from clipforge.capcut import CapCutError, export_clip_to_capcut
 from clipforge.config import settings
 from clipforge.csv_import import import_csv as csv_import
 from clipforge.db import (
@@ -191,7 +192,6 @@ from clipforge.db import (
     init_db,
     session_factory,
 )
-from clipforge.capcut import CapCutError, export_clip_to_capcut
 from clipforge.ffmpeg_install import FfmpegInstaller, ensure_bundled_on_path
 from clipforge.job_queue import get_job_queue
 from clipforge.licensing import (
@@ -202,7 +202,6 @@ from clipforge.licensing import (
     record_from_obj,
 )
 from clipforge.llm import (
-    GEMINI_DEFAULT_MODEL,
     GEMINI_MODELS,
     PROVIDERS,
     provider_key,
@@ -1105,9 +1104,7 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)):
         from clipforge.facecam import FacecamError, FacecamLayout
 
         try:
-            meta["facecam_layout"] = FacecamLayout.from_dict(
-                payload.facecam_layout
-            ).to_dict()
+            meta["facecam_layout"] = FacecamLayout.from_dict(payload.facecam_layout).to_dict()
         except FacecamError as exc:
             raise HTTPException(422, f"invalid facecam_layout: {exc}") from exc
     job = Job(
@@ -1559,9 +1556,7 @@ def export_clip_to_capcut_endpoint(candidate_id: str, db: Session = Depends(get_
         )
     job = _get_or_404(db, Job, cand.job_id, "job")
     words = _clip_words(cand.job_id)
-    clip_start = (
-        cand.trim_start_s if cand.trim_start_s is not None else cand.start_s
-    )
+    clip_start = cand.trim_start_s if cand.trim_start_s is not None else cand.start_s
     try:
         result = export_clip_to_capcut(
             mp4_path=mp4,
@@ -2568,9 +2563,7 @@ def update_settings(payload: SettingsUpdate):
     if payload.llm_active_provider is not None:
         choice = payload.llm_active_provider.strip().lower()
         if choice not in ("", "auto", *PROVIDERS):
-            raise HTTPException(
-                422, f"unknown LLM provider {payload.llm_active_provider!r}."
-            )
+            raise HTTPException(422, f"unknown LLM provider {payload.llm_active_provider!r}.")
         current.llm_active_provider = choice
     if payload.llm_models is not None:
         merged = dict(current.llm_models or {})
@@ -3696,7 +3689,10 @@ def save_llm_provider_key(provider_id: str, payload: LlmKeyIn):
             "message": (
                 f"{info.label} API key saved."
                 if view["configured"]
-                else f"{info.label} API key cleared — the agent will use another engine or the rule engine."
+                else (
+                    f"{info.label} API key cleared — the agent will use "
+                    "another engine or the rule engine."
+                )
             ),
         }
     return {
@@ -3735,7 +3731,10 @@ def set_active_llm_provider(payload: LlmActiveIn):
         message = (
             f"{info.label} selected."
             if engine == choice
-            else f"{info.label} selected, but it has no key saved yet — the agent uses {engine} until you save one."
+            else (
+                f"{info.label} selected, but it has no key saved yet — "
+                f"the agent uses {engine} until you save one."
+            )
         )
     return {"ok": True, "active": engine, "selected": choice, "message": message}
 

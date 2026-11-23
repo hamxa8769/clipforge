@@ -19,9 +19,8 @@ import json
 import sys as _sys
 
 import pytest
-from fastapi.testclient import TestClient
-
 from clipforge_api.app import app
+from fastapi.testclient import TestClient
 
 app_module = _sys.modules["clipforge_api.app"]
 
@@ -92,12 +91,10 @@ def _seeded_clip(tmp_path):
     yield job_id, candidate_id
     session = session_factory()()
     try:
-        session.query(ClipCandidate).filter(
-            ClipCandidate.job_id == job_id
-        ).delete(synchronize_session=False)
-        session.query(Job).filter(Job.id == job_id).delete(
+        session.query(ClipCandidate).filter(ClipCandidate.job_id == job_id).delete(
             synchronize_session=False
         )
+        session.query(Job).filter(Job.id == job_id).delete(synchronize_session=False)
         session.commit()
     finally:
         session.close()
@@ -168,8 +165,14 @@ def test_list_providers_has_all_v010_providers():
     assert response.status_code == 200
     providers = {p["id"]: p for p in response.json()}
     assert set(providers) == {
-        "gemini", "openai", "grok", "groq", "openrouter",
-        "anthropic", "ollama", "rules",
+        "gemini",
+        "openai",
+        "grok",
+        "groq",
+        "openrouter",
+        "anthropic",
+        "ollama",
+        "rules",
     }
     for provider_id in ("grok", "groq", "openrouter", "anthropic"):
         entry = providers[provider_id]
@@ -230,7 +233,9 @@ def test_set_active_provider_and_rules(monkeypatch):
         app_module,
         "test_provider",
         lambda provider_id, api_key, model=None, **kwargs: {
-            "ok": True, "model": model, "message": "ok",
+            "ok": True,
+            "model": model,
+            "message": "ok",
         },
     )
     client.post("/api/llm/anthropic/save", json={"api_key": "sk-ant-fake-test-key-7777"})
@@ -253,17 +258,15 @@ def test_gemini_endpoints_still_work_via_generic_route(monkeypatch):
         app_module,
         "test_provider",
         lambda provider_id, api_key, model=None, **kwargs: {
-            "ok": True, "model": model, "message": "Gemini is working (model test answered).",
+            "ok": True,
+            "model": model,
+            "message": "Gemini is working (model test answered).",
         },
     )
-    response = client.post(
-        "/api/llm/gemini/test", json={"api_key": "AIza-fake-test-key-1234"}
-    )
+    response = client.post("/api/llm/gemini/test", json={"api_key": "AIza-fake-test-key-1234"})
     assert response.status_code == 200
     assert response.json()["ok"] is True
-    response = client.post(
-        "/api/llm/gemini/save", json={"api_key": "AIza-fake-test-key-1234"}
-    )
+    response = client.post("/api/llm/gemini/save", json={"api_key": "AIza-fake-test-key-1234"})
     assert response.status_code == 200
     assert response.json()["configured"] is True
     assert "AIza-fake" not in response.text

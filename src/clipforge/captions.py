@@ -358,9 +358,7 @@ def _animated_events(
         g_end = max(g_start + 0.02, group[-1].end - start_offset_s)
         if gi + 1 < len(groups):
             g_end = min(g_end, max(g_start + 0.02, groups[gi + 1][0].start - start_offset_s))
-        texts = [
-            (w.text.upper() if spec["upper"] else w.text) for w in group
-        ]
+        texts = [(w.text.upper() if spec["upper"] else w.text) for w in group]
         widths = [_estimate_width(t, size) for t in texts]
         gap = size * 0.35
         total = sum(widths) + gap * (len(texts) - 1)
@@ -451,9 +449,7 @@ def words_to_ass(
     lines = [header]
     y = caption_y or CAPTION_Y
     if style_name in ANIMATED_STYLES:
-        lines.extend(
-            _animated_events(words, style_name, start_offset_s, caption_y or CAPTION_Y)
-        )
+        lines.extend(_animated_events(words, style_name, start_offset_s, caption_y or CAPTION_Y))
         return "\n".join(lines) + "\n"
     # Group words into short lines; each event highlights its words in
     # turn (karaoke-style for karaoke-fill, colour-swap for the others).

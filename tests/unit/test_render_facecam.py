@@ -129,9 +129,7 @@ def test_split_render_is_1080x1920_with_captions(source):
         gameplay={"x": 0.0, "y": 0.5, "w": 1.0, "h": 0.5},
         split_ratio=0.5,
     )
-    result = render_clip(
-        src, _cand(), out, style="bounce", words=_words(), facecam=layout
-    )
+    result = render_clip(src, _cand(), out, style="bounce", words=_words(), facecam=layout)
     assert (result.width, result.height) == (1080, 1920)
     assert result.video_codec == "h264"
     assert abs(result.duration_s - 4.0) < 1.5

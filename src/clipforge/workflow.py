@@ -43,7 +43,13 @@ from clipforge.ytdlp_install import ytdlp_missing_message
 # ---------------------------------------------------------------- stages
 # (name, weight % of total progress, JobStatus while the stage runs)
 STAGES: list[tuple[str, float, str]] = [
-    ("ingest", 10.0, JobStatus.PENDING.value),
+    # Ingest runs under the dispatcher's claim, so its status must stay
+    # an active one ("running"). It used to be PENDING here, which put a
+    # running job back to "pending" for the whole ingest stage: the job
+    # looked never-enqueued (test_job_created_is_auto_enqueued_v090),
+    # showed a queue position as if still waiting, and — worse — was
+    # enqueueable again, so a second run could start the same job twice.
+    ("ingest", 10.0, JobStatus.RUNNING.value),
     ("transcribe", 30.0, JobStatus.TRANSCRIBING.value),
     ("score", 15.0, JobStatus.SCORING.value),
     ("render", 35.0, JobStatus.RENDERING.value),

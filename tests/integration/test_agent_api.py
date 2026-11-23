@@ -269,7 +269,14 @@ def test_llm_providers_list_contract():
     assert isinstance(providers, list)
     by_id = {p["id"]: p for p in providers}
     assert set(by_id) == {
-        "gemini", "openai", "grok", "groq", "openrouter", "anthropic", "ollama", "rules",
+        "gemini",
+        "openai",
+        "grok",
+        "groq",
+        "openrouter",
+        "anthropic",
+        "ollama",
+        "rules",
     }
     assert by_id["rules"]["configured"] is True
     assert by_id["rules"]["active"] is True  # no keys -> rules
@@ -284,7 +291,8 @@ def test_llm_providers_list_contract():
     assert "grok-4" in by_id["grok"]["models"]
     assert by_id["ollama"]["needs_key"] is False
     assert by_id["anthropic"]["models"] == [
-        "claude-3-5-haiku-20241022", "claude-3-5-sonnet-20241022",
+        "claude-3-5-haiku-20241022",
+        "claude-3-5-sonnet-20241022",
     ]
 
 

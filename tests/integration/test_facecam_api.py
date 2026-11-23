@@ -90,9 +90,7 @@ def test_preset_crud_round_trip():
 
     resp = client.delete("/facecam/presets/speed/gta-run")
     assert resp.status_code == 200
-    assert client.get("/facecam/presets", params={"creator": "speed"}).json()[
-        "presets"
-    ] == {}
+    assert client.get("/facecam/presets", params={"creator": "speed"}).json()["presets"] == {}
     assert client.delete("/facecam/presets/speed/gta-run").status_code == 404
 
 

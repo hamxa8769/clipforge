@@ -216,10 +216,7 @@ class AppSettings:
         settings.llm_models = {
             k: v
             for k, v in settings.llm_models.items()
-            if k in _LLM_PROVIDERS
-            and isinstance(v, str)
-            and v
-            and len(v) <= 120
+            if k in _LLM_PROVIDERS and isinstance(v, str) and v and len(v) <= 120
         }
         return settings
 

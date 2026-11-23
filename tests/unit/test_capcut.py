@@ -195,9 +195,7 @@ def test_export_missing_mp4_is_a_plain_error(tmp_path):
 def test_validate_draft_catches_missing_media(tmp_path):
     mp4 = tmp_path / "clip_01.mp4"
     mp4.write_bytes(b"fake")
-    result = export_clip_to_capcut(
-        mp4_path=mp4, duration_s=5.0, data_dir=tmp_path
-    )
+    result = export_clip_to_capcut(mp4_path=mp4, duration_s=5.0, data_dir=tmp_path)
     mp4.unlink()
     validation = validate_draft(Path(result["draft_path"]))
     assert validation["ok"] is False
@@ -233,13 +231,9 @@ def test_drafts_dir_uses_capcut_folder_when_installed(tmp_path, monkeypatch):
 def test_re_export_replaces_previous_draft(tmp_path):
     mp4 = tmp_path / "clip_01.mp4"
     mp4.write_bytes(b"fake")
-    first = export_clip_to_capcut(
-        mp4_path=mp4, duration_s=5.0, title="Same", data_dir=tmp_path
-    )
+    first = export_clip_to_capcut(mp4_path=mp4, duration_s=5.0, title="Same", data_dir=tmp_path)
     marker = Path(first["draft_path"]) / "stale.txt"
     marker.write_text("old", encoding="utf-8")
-    second = export_clip_to_capcut(
-        mp4_path=mp4, duration_s=5.0, title="Same", data_dir=tmp_path
-    )
+    second = export_clip_to_capcut(mp4_path=mp4, duration_s=5.0, title="Same", data_dir=tmp_path)
     assert first["draft_path"] == second["draft_path"]
     assert not marker.exists()

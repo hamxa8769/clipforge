@@ -82,41 +82,61 @@ class ProviderInfo:
 
 PROVIDERS: dict[str, ProviderInfo] = {
     "gemini": ProviderInfo(
-        id="gemini", label="Gemini", kind="gemini",
-        base_url=GEMINI_API_BASE, default_model=GEMINI_DEFAULT_MODEL,
-        models=GEMINI_MODELS, needs_key=True,
+        id="gemini",
+        label="Gemini",
+        kind="gemini",
+        base_url=GEMINI_API_BASE,
+        default_model=GEMINI_DEFAULT_MODEL,
+        models=GEMINI_MODELS,
+        needs_key=True,
         key_url="https://aistudio.google.com/app/apikey",
-        key_prefix="AIza", env_var="GEMINI_API_KEY",
+        key_prefix="AIza",
+        env_var="GEMINI_API_KEY",
         blurb="Google's Gemini — free tier, fast, good at hooks and titles.",
     ),
     "openai": ProviderInfo(
-        id="openai", label="OpenAI", kind="openai-compatible",
-        base_url="https://api.openai.com/v1", default_model=OPENAI_DEFAULT_MODEL,
-        models=("gpt-4o-mini", "gpt-4o"), needs_key=True,
+        id="openai",
+        label="OpenAI",
+        kind="openai-compatible",
+        base_url="https://api.openai.com/v1",
+        default_model=OPENAI_DEFAULT_MODEL,
+        models=("gpt-4o-mini", "gpt-4o"),
+        needs_key=True,
         key_url="https://platform.openai.com/api-keys",
-        key_prefix="sk-", env_var="CLIPFORGE_LLM_API_KEY",
+        key_prefix="sk-",
+        env_var="CLIPFORGE_LLM_API_KEY",
         blurb="OpenAI's chat models — GPT-4o mini is cheap and fast.",
     ),
     "grok": ProviderInfo(
-        id="grok", label="Grok (xAI)", kind="openai-compatible",
-        base_url="https://api.x.ai/v1", default_model="grok-4",
-        models=("grok-4", "grok-4-fast-reasoning"), needs_key=True,
+        id="grok",
+        label="Grok (xAI)",
+        kind="openai-compatible",
+        base_url="https://api.x.ai/v1",
+        default_model="grok-4",
+        models=("grok-4", "grok-4-fast-reasoning"),
+        needs_key=True,
         key_url="https://console.x.ai",
-        key_prefix="xai-", env_var="XAI_API_KEY",
+        key_prefix="xai-",
+        env_var="XAI_API_KEY",
         blurb="xAI's Grok — sharp, witty hooks and titles.",
     ),
     "groq": ProviderInfo(
-        id="groq", label="Groq", kind="openai-compatible",
+        id="groq",
+        label="Groq",
+        kind="openai-compatible",
         base_url="https://api.groq.com/openai/v1",
         default_model="llama-3.3-70b-versatile",
         models=("llama-3.3-70b-versatile", "llama-3.1-8b-instant"),
         needs_key=True,
         key_url="https://console.groq.com/keys",
-        key_prefix="gsk_", env_var="GROQ_API_KEY",
+        key_prefix="gsk_",
+        env_var="GROQ_API_KEY",
         blurb="Groq's ultra-fast inference — free tier, Llama models.",
     ),
     "openrouter": ProviderInfo(
-        id="openrouter", label="OpenRouter", kind="openai-compatible",
+        id="openrouter",
+        label="OpenRouter",
+        kind="openai-compatible",
         base_url="https://openrouter.ai/api/v1",
         default_model="meta-llama/llama-3.3-70b-instruct:free",
         models=(
@@ -126,25 +146,34 @@ PROVIDERS: dict[str, ProviderInfo] = {
         ),
         needs_key=True,
         key_url="https://openrouter.ai/keys",
-        key_prefix="sk-or-", env_var="OPENROUTER_API_KEY",
+        key_prefix="sk-or-",
+        env_var="OPENROUTER_API_KEY",
         blurb="OpenRouter — one key, many models, including free ones.",
     ),
     "anthropic": ProviderInfo(
-        id="anthropic", label="Claude (Anthropic)", kind="anthropic",
+        id="anthropic",
+        label="Claude (Anthropic)",
+        kind="anthropic",
         base_url="https://api.anthropic.com/v1",
         default_model="claude-3-5-haiku-20241022",
         models=("claude-3-5-haiku-20241022", "claude-3-5-sonnet-20241022"),
         needs_key=True,
         key_url="https://console.anthropic.com/settings/keys",
-        key_prefix="sk-ant-", env_var="ANTHROPIC_API_KEY",
+        key_prefix="sk-ant-",
+        env_var="ANTHROPIC_API_KEY",
         blurb="Anthropic's Claude — strong, human-like writing.",
     ),
     "ollama": ProviderInfo(
-        id="ollama", label="Ollama (on this machine)", kind="openai-compatible",
-        base_url="http://127.0.0.1:11434/v1", default_model="llama3.1",
-        models=("llama3.1", "llama3.2", "llava"), needs_key=False,
+        id="ollama",
+        label="Ollama (on this machine)",
+        kind="openai-compatible",
+        base_url="http://127.0.0.1:11434/v1",
+        default_model="llama3.1",
+        models=("llama3.1", "llama3.2", "llava"),
+        needs_key=False,
         key_url="https://ollama.com",
-        key_prefix="", env_var="",
+        key_prefix="",
+        env_var="",
         blurb="A model running on your own machine — free, private, no key. "
         "Needs Ollama running (https://ollama.com) with a model pulled.",
     ),
@@ -314,7 +343,8 @@ class GeminiProvider(LlmProvider):
         try:
             client = client or _new_client()
             data = _post_json(
-                client, self._url(),
+                client,
+                self._url(),
                 headers={"x-goog-api-key": self.api_key, "Content-Type": "application/json"},
                 payload={"contents": [{"parts": [{"text": prompt}]}]},
                 provider_label="Gemini",
@@ -376,7 +406,8 @@ class OpenAICompatibleProvider(LlmProvider):
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
             data = _post_json(
-                client, f"{self.base_url}/chat/completions",
+                client,
+                f"{self.base_url}/chat/completions",
                 headers=headers,
                 payload={
                     "model": self.model,
@@ -447,7 +478,8 @@ class AnthropicProvider(LlmProvider):
         try:
             client = client or _new_client()
             data = _post_json(
-                client, f"{self.base_url}/messages",
+                client,
+                f"{self.base_url}/messages",
                 headers=self._headers(),
                 payload={
                     "model": self.model,
@@ -483,7 +515,10 @@ class AnthropicProvider(LlmProvider):
 
 
 def build_provider(
-    provider_id: str, api_key: str = "", *, model: str | None = None,
+    provider_id: str,
+    api_key: str = "",
+    *,
+    model: str | None = None,
     base_url: str | None = None,
 ) -> LlmProvider:
     """Build the provider object for an id (raises ValueError if unknown)."""
@@ -545,9 +580,7 @@ def test_provider(
                 "model": model,
                 "message": "That model name looks wrong — use letters, digits and . - : / only.",
             }
-    return build_provider(provider_id, key, model=model, base_url=base_url).test(
-        client=client
-    )
+    return build_provider(provider_id, key, model=model, base_url=base_url).test(client=client)
 
 
 def resolve_engine(settings_store) -> tuple[str, LlmProvider | None]:
@@ -578,13 +611,16 @@ def resolve_engine(settings_store) -> tuple[str, LlmProvider | None]:
                     except Exception:
                         base = None
                 return active_choice, build_provider(
-                    active_choice, "", model=provider_model(settings_store, active_choice),
+                    active_choice,
+                    "",
+                    model=provider_model(settings_store, active_choice),
                     base_url=base,
                 )
             key = provider_key(settings_store, active_choice)
             if key:
                 return active_choice, build_provider(
-                    active_choice, key,
+                    active_choice,
+                    key,
                     model=provider_model(settings_store, active_choice),
                 )
             # Explicit choice but no key saved: fall through to auto so
@@ -593,7 +629,8 @@ def resolve_engine(settings_store) -> tuple[str, LlmProvider | None]:
         key = provider_key(settings_store, provider_id)
         if key:
             return provider_id, build_provider(
-                provider_id, key,
+                provider_id,
+                key,
                 model=provider_model(settings_store, provider_id),
             )
     return "rules", None

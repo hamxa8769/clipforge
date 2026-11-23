@@ -196,11 +196,7 @@ class FacecamLayout:
                 pip_pos=str(raw.get("pip_pos", "top-right")),
                 pip_size_frac=float(raw.get("pip_size_frac", 0.35)),
                 divider=bool(raw.get("divider", True)),
-                caption_y=(
-                    int(raw["caption_y"])
-                    if raw.get("caption_y") is not None
-                    else None
-                ),
+                caption_y=(int(raw["caption_y"]) if raw.get("caption_y") is not None else None),
             )
         except FacecamError:
             raise
@@ -358,10 +354,7 @@ def build_facecam_filter(
             f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2[v0]"
         )
     else:  # fullscreen
-        graph = (
-            f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,"
-            f"crop={w}:{h},setsar=1[v0]"
-        )
+        graph = f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},setsar=1[v0]"
 
     if ass_path:
         graph += f";[v0]ass={_escape_filter_path(ass_path)}[vout]"
@@ -415,9 +408,7 @@ class FacecamPresetStore:
         """``{creator: {preset_name: layout_dict}}`` for every creator."""
         data = self._load()
         return {
-            creator: dict(presets)
-            for creator, presets in data.items()
-            if isinstance(presets, dict)
+            creator: dict(presets) for creator, presets in data.items() if isinstance(presets, dict)
         }
 
     def save_preset(self, creator: str, name: str, layout: FacecamLayout) -> dict:

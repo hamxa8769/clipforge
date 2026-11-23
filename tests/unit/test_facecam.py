@@ -91,16 +91,12 @@ def test_split_filter_uses_vstack_and_divider():
 
 
 def test_split_filter_without_divider_has_no_drawbox():
-    graph, _ = build_facecam_filter(
-        FacecamLayout(mode="split", divider=False), 1920, 1080
-    )
+    graph, _ = build_facecam_filter(FacecamLayout(mode="split", divider=False), 1920, 1080)
     assert "drawbox" not in graph
 
 
 def test_pip_filter_overlays_corner_cam():
-    graph, _ = build_facecam_filter(
-        FacecamLayout(mode="pip", pip_pos="top-right"), 1920, 1080
-    )
+    graph, _ = build_facecam_filter(FacecamLayout(mode="pip", pip_pos="top-right"), 1920, 1080)
     assert "overlay=676:26" in graph
     assert "scale=1080:1920" in graph  # gameplay fills the frame
 

@@ -45,9 +45,7 @@ def _chat_ok_handler(expected_host: str, expected_key: str | None):
             assert request.headers["Authorization"] == f"Bearer {expected_key}"
         body = json.loads(request.content.decode("utf-8"))
         assert body["messages"][0]["content"]
-        return httpx.Response(
-            200, json={"choices": [{"message": {"content": "OK"}}]}
-        )
+        return httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
 
     return _handler
 
@@ -55,7 +53,13 @@ def _chat_ok_handler(expected_host: str, expected_key: str | None):
 # ------------------------------------------------------------------ registry
 def test_registry_has_all_v010_providers():
     assert set(PROVIDERS) == {
-        "gemini", "openai", "grok", "groq", "openrouter", "anthropic", "ollama",
+        "gemini",
+        "openai",
+        "grok",
+        "groq",
+        "openrouter",
+        "anthropic",
+        "ollama",
     }
     assert PROVIDERS["grok"].base_url == "https://api.x.ai/v1"
     assert PROVIDERS["groq"].base_url == "https://api.groq.com/openai/v1"
@@ -161,8 +165,10 @@ def test_anthropic_provider_uses_messages_api():
         assert body["messages"][0]["content"] == "hi"
         return httpx.Response(
             200,
-            json={"content": [{"type": "text", "text": "OK"}],
-                  "usage": {"input_tokens": 5, "output_tokens": 2}},
+            json={
+                "content": [{"type": "text", "text": "OK"}],
+                "usage": {"input_tokens": 5, "output_tokens": 2},
+            },
         )
 
     provider = AnthropicProvider(ANTHROPIC_KEY)
@@ -200,11 +206,13 @@ def test_test_provider_empty_key_is_plain_language():
 
 
 def test_test_provider_ollama_needs_no_key():
-    result = llm_test_provider("ollama", "", client=_mock_client(
-        lambda request: httpx.Response(
-            200, json={"choices": [{"message": {"content": "OK"}}]}
-        )
-    ))
+    result = llm_test_provider(
+        "ollama",
+        "",
+        client=_mock_client(
+            lambda request: httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})
+        ),
+    )
     assert result["ok"] is True
 
 
@@ -318,8 +326,14 @@ def test_generate_copy_with_grok_engine_mocked():
 
     provider = OpenAICompatibleProvider("grok", GROK_KEY)
     copy = generate_copy_with_engine(
-        "grok", provider, "ranked games", "Stop making this mistake",
-        "gaming", "youtube", 30.0, client=_mock_client(_handler),
+        "grok",
+        provider,
+        "ranked games",
+        "Stop making this mistake",
+        "gaming",
+        "youtube",
+        30.0,
+        client=_mock_client(_handler),
     )
     assert copy["engine"] == "grok"
     assert copy["title"] == "Ranked games: the clutch"
@@ -331,8 +345,13 @@ def test_generate_copy_anthropic_failure_falls_back_to_rules():
             raise LlmError("Could not reach the Claude API.")
 
     copy = generate_copy_with_engine(
-        "anthropic", _Failing(ANTHROPIC_KEY), "ranked games",
-        "Stop making this mistake", "gaming", "youtube", 30.0,
+        "anthropic",
+        _Failing(ANTHROPIC_KEY),
+        "ranked games",
+        "Stop making this mistake",
+        "gaming",
+        "youtube",
+        30.0,
     )
     assert copy["engine"] == "rules"
     assert copy["engine_fallback"] == "anthropic"
