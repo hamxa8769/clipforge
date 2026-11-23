@@ -456,13 +456,17 @@ fn finish_launch(
 fn start_supervisor(app: AppHandle) {
     let generation = {
         let state = app.state::<AppState>();
-        match state.supervisor_gen.lock() {
+        // Bind the match to a local first: as the block's tail
+        // expression, the temporary `Result<MutexGuard>` from `.lock()`
+        // would outlive `state` (E0597) — the guard must drop before it.
+        let generation = match state.supervisor_gen.lock() {
             Ok(mut guard) => {
                 *guard += 1;
                 *guard
             }
             Err(_) => return,
-        }
+        };
+        generation
     };
     std::thread::spawn(move || supervisor_loop(app, generation));
 }

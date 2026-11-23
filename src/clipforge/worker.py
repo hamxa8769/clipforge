@@ -988,12 +988,21 @@ def _run_stages(
                 "high-score rule — job ready to schedule",
             )
         )
+        # Status + progress in ONE commit (v0.9.3): the old code committed
+        # the status first and the progress in a second commit, so a
+        # poller could observe status "review" with the previous stage's
+        # progress (90.0) — CI caught it as `assert 90.0 == 95.0`.
+        meta = dict(job.meta_json or {})
+        meta.update({"stage": "review", "progress_pct": 100.0})
+        job.meta_json = meta
         session.commit()
-        _set_job_meta(session, job, stage="review", progress_pct=100.0)
     else:
         job.status = JobStatus.REVIEW.value
+        # Same single-commit rule as above (status + progress together).
+        meta = dict(job.meta_json or {})
+        meta.update({"stage": "review", "progress_pct": 95.0})
+        job.meta_json = meta
         session.commit()
-        _set_job_meta(session, job, stage="review", progress_pct=95.0)
     return source, transcript, candidates
 
 
