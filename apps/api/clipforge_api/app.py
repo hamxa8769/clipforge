@@ -1,4 +1,4 @@
-"""ClipForge API v0.9.0 — FastAPI app.
+"""ClipForge API v0.9.1 — FastAPI app.
 
 Endpoints (all dry-run by default; nothing publishes live without an
 approved Post record, explicit credentials, and ``dry_run=false``):

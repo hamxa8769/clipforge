@@ -8,10 +8,14 @@ captions, writes a different title / description / hashtag set for each
 platform, and publishes **only after a human approves** — through the
 platforms' official APIs, and nothing else.
 
-> **Status: v0.9.0 — production SaaS rebuild.** The clipping
-> pipeline, review UI, and publishing adapters are under active
-> development. Nothing in this repo posts to any platform automatically,
-> and `DRY_RUN=true` is the default. v0.9.0 is the dashboard-first
+> **Status: v0.9.1 — agent runs start, yt-dlp is detected, licence is
+> advisory.** The clipping pipeline, review UI, and publishing adapters
+> are under active development. Nothing in this repo posts to any
+> platform automatically, and `DRY_RUN=true` is the default. v0.9.1
+> fixes the v0.9.0 dashboard agent run that never started, detects
+> yt-dlp installed via PowerShell / pip / winget / Scoop / Chocolatey
+> without a restart, and turns the licence hard block into a rights
+> notice — any pasted video link proceeds. v0.9.0 is the dashboard-first
 > production rebuild: channels stay connected (proactive token refresh
 > + health monitor), a real job queue (one job at a time, pause /
 > resume / cancel, auto-run on creation), a notifications centre with
@@ -249,6 +253,25 @@ Things to know:
 
 Building the exe yourself: `python scripts/build_exe.py --with-web`
 (see `clipforge-server.spec`).
+
+## What's new in v0.9.1 — agent runs start, yt-dlp detected, licence advisory
+
+- **Agent runs actually start.** The dashboard agent start now saves the
+  config with `enabled: true` (v0.9.0 saved it off, so `POST
+  /api/agent/start` always 422d "agent is off"), the pipeline records
+  the current job early, and a "Start clip job — my own video" button
+  starts an own-content job with no licence check in the way.
+- **yt-dlp is detected wherever Windows puts it.** PATH, pip user
+  Scripts, the winget shim, Scoop / Chocolatey, and the bundled copy
+  are all probed; the registry PATH is refreshed in-process and
+  `POST /yt-dlp/recheck` + a Re-check button re-detect without a
+  restart. Version + path are shown in the UI.
+- **Licence is advisory, not a block.** The hard licence gate is gone:
+  any pasted video link proceeds, a rights notice is shown instead,
+  and CC-BY attribution is still added automatically for CC videos.
+  (User's call after checking YouTube's terms: clipping is officially
+  allowed on YouTube. The user is responsible for the rights to what
+  they post.)
 
 ## What's new in v0.9.0 — production SaaS rebuild
 
