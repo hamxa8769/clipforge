@@ -29,6 +29,13 @@ dependencies = [
     # Encrypted token/credential storage (clipforge.auth): Fernet file
     # fallback when no OS keyring backend is available.
     "cryptography>=42",
+    # Live monitoring (v0.10.0): replay analysis does its RMS / peak
+    # maths with numpy, and live + YouTube ingest open streams with
+    # yt-dlp. Both are hard deps of the server, not optional extras —
+    # CI installs from this file, so leaving them out made the live
+    # tests fail there with plain ImportErrors (no numpy / no yt-dlp).
+    "numpy>=1.26",
+    "yt-dlp>=2024.1",
     # OS keyring (Credential Manager / Keychain / Secret Service) for
     # secrets; optional at runtime — import failure falls back to the
     # encrypted file, so the server never fails to start without it.

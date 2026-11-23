@@ -44,7 +44,7 @@ import {
 } from "@/lib/facecam";
 import {
   Badge, Card, CardHeader, EmptyState, ErrorBanner, PageHeader,
-  PrimaryButton, SecondaryButton, Skeleton,
+  ExternalLink, PrimaryButton, SecondaryButton, Skeleton,
 } from "@/components/ui";
 
 const GUARDRAIL =
@@ -592,8 +592,8 @@ export default function StudioPage() {
                     <p className="font-medium text-emerald-100">Rendered — {renderResult.render.width}×{renderResult.render.height} · {renderResult.render.duration_s.toFixed(1)} s · {renderResult.render.video_codec} · {(renderResult.render.size_bytes / 1024).toFixed(0)} KB</p>
                     <video src={`${API_URL}${renderResult.media_url}`} controls className="aspect-[9/16] w-full max-w-[220px] rounded-lg bg-black" aria-label="Rendered facecam clip" />
                     <p>
-                      <a className="text-cyan-300 hover:underline" href={`${API_URL}${renderResult.media_url}`} target="_blank" rel="noreferrer">Download the clip</a>
-                      {renderResult.ass_media_url && (<> · <a className="text-cyan-300 hover:underline" href={`${API_URL}${renderResult.ass_media_url}`} target="_blank" rel="noreferrer">Captions (.ass)</a></>)}
+                      <ExternalLink className="text-cyan-300 hover:underline" href={`${API_URL}${renderResult.media_url}`}>Download the clip</ExternalLink>
+                      {renderResult.ass_media_url && (<> · <ExternalLink className="text-cyan-300 hover:underline" href={`${API_URL}${renderResult.ass_media_url}`}>Captions (.ass)</ExternalLink></>)}
                     </p>
                   </div>
                 )}
