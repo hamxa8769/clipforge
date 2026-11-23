@@ -261,6 +261,9 @@ class JobCreate(BaseModel):
     transcript_text: str | None = None  # deterministic fallback transcript
     top_n: int = Field(default=3, ge=1, le=10)
     caption_style: str = "bold-pop"
+    # Facecam Studio layout (v0.10.0): validated by the worker; renders
+    # every candidate with the layout instead of the centre crop.
+    facecam_layout: dict | None = None
 
     def declared(self) -> bool:
         return bool(self.own_content or self.own_content_declaration)
@@ -569,6 +572,7 @@ app.include_router(videos_router)
 # are served as HTML and API calls still return JSON.
 from clipforge_api.batch import router as batch_router  # noqa: E402
 from clipforge_api.detection import router as detection_router  # noqa: E402
+from clipforge_api.facecam import router as facecam_router  # noqa: E402
 from clipforge_api.monetization_api import (  # noqa: E402
     publish_router,
 )
@@ -581,6 +585,7 @@ from clipforge_api.x_platform import router as x_router  # noqa: E402
 app.include_router(detection_router)
 app.include_router(perf_router)
 app.include_router(batch_router)
+app.include_router(facecam_router)
 app.include_router(x_router)
 app.include_router(monetization_router)
 app.include_router(publish_router)
@@ -1077,6 +1082,16 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)):
     meta: dict = {"top_n": payload.top_n, "caption_style": payload.caption_style}
     if payload.transcript_text:
         meta["transcript_text"] = payload.transcript_text
+    if payload.facecam_layout is not None:
+        # Validate now so a bad layout is a 422, not a failed job.
+        from clipforge.facecam import FacecamError, FacecamLayout
+
+        try:
+            meta["facecam_layout"] = FacecamLayout.from_dict(
+                payload.facecam_layout
+            ).to_dict()
+        except FacecamError as exc:
+            raise HTTPException(422, f"invalid facecam_layout: {exc}") from exc
     job = Job(
         source_type=payload.source_type,
         source_url=payload.source_url,

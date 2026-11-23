@@ -347,6 +347,16 @@ def run_job(
     top_n = int(meta.get("top_n") or 3)
     caption_style = meta.get("caption_style") or "bold-pop"
     transcript_text = meta.get("transcript_text")
+    # Facecam Studio layout (v0.10.0): validated here so a bad layout
+    # fails the job with a plain message instead of mid-render.
+    facecam_layout = None
+    if meta.get("facecam_layout"):
+        from clipforge.facecam import FacecamError, FacecamLayout
+
+        try:
+            facecam_layout = FacecamLayout.from_dict(meta["facecam_layout"])
+        except FacecamError as exc:
+            raise ValueError(f"invalid facecam layout on job {job.id}: {exc}") from exc
     started = time.time()
     title = job.title or job.id
 
@@ -375,6 +385,7 @@ def run_job(
             transcript_text,
             summary,
             control,
+            facecam_layout=facecam_layout,
         )
     except (LiveCaptureCancelled, JobCancelled) as exc:
         # The user cancelled: the run is cancelled (not failed) and a
@@ -468,6 +479,7 @@ def _run_stages(
     transcript_text: str | None,
     summary: dict,
     control: JobControl,
+    facecam_layout=None,
 ) -> tuple[object, Transcript, list[Candidate]]:
     """The six stages. Raises MissingDependencyError on a blocked step."""
     # ---------------------------------------------------------- 1. ingest
@@ -842,14 +854,19 @@ def _run_stages(
         )
         out_path = out_dir / f"clip_{row.n:02d}.mp4"
         try:
-            plan = compute_crop_path(
-                str(source.path),
-                source.duration_s,
-                source.width,
-                source.height,
-                start_s=cand.start_s,
-                end_s=cand.end_s,
-            )
+            # A facecam layout defines its own crops, so the
+            # face-tracked ReframePlan is skipped for those jobs
+            # (render_clip refuses plan + facecam together).
+            plan = None
+            if facecam_layout is None:
+                plan = compute_crop_path(
+                    str(source.path),
+                    source.duration_s,
+                    source.width,
+                    source.height,
+                    start_s=cand.start_s,
+                    end_s=cand.end_s,
+                )
             result = render_clip(
                 source.path,
                 cand,
@@ -857,6 +874,7 @@ def _run_stages(
                 style=caption_style,
                 words=transcript.words,
                 plan=plan,
+                facecam=facecam_layout,
                 control=control,
             )
             row.file_path = str(result.path)
