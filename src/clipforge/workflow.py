@@ -39,7 +39,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from clipforge.db import Job, JobStageEvent, JobStatus, WorkerRun
-from clipforge.ytdlp_install import bundled_yt_dlp_path, ytdlp_missing_message
+from clipforge.ytdlp_install import resolve_yt_dlp_path, ytdlp_missing_message
 
 # ---------------------------------------------------------------- stages
 # (name, weight % of total progress, JobStatus while the stage runs)
@@ -178,8 +178,13 @@ def check_dependencies() -> list[Dependency]:
             )
             found = bundled.is_file()
         if not found and name == "yt-dlp":
+            # v0.9.1: yt-dlp counts wherever detection finds it — PATH,
+            # the bundled install, or a standard install location (pip
+            # user Scripts, winget shim, …), including installs made
+            # after this process started. A bare shutil.which() misses
+            # those (see clipforge.ytdlp_install).
             data_dir = os.environ.get("CLIPFORGE_DATA_DIR") or "./data"
-            found = bundled_yt_dlp_path(data_dir).is_file()
+            found = resolve_yt_dlp_path(data_dir) is not None
         return Dependency(
             name=name,
             kind="tool",
@@ -246,8 +251,11 @@ def require_tool(name: str, detail: str, required_action: str) -> None:
         )
         found = bundled.is_file()
     if not found and name == "yt-dlp":
+        # v0.9.1: same full detection as check_dependencies above —
+        # a pip/winget install made after this process started still
+        # counts (see clipforge.ytdlp_install).
         data_dir = os.environ.get("CLIPFORGE_DATA_DIR") or "./data"
-        found = bundled_yt_dlp_path(data_dir).is_file()
+        found = resolve_yt_dlp_path(data_dir) is not None
     if not found:
         raise MissingDependencyError(
             code=f"{name.replace('-', '_')}_missing",

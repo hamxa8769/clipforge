@@ -268,7 +268,14 @@ def test_job_run_end_to_end_demo(test_video):
 
 
 def test_blocked_youtube_job_names_missing_ytdlp():
-    if subprocess.run(["which", "yt-dlp"], capture_output=True).returncode == 0:
+    # Skip when yt-dlp is installed ANYWHERE the app looks (PATH,
+    # bundled dir, or a standard install location such as
+    # ~/.local/bin) — v0.9.1 detection finds those, so the "missing"
+    # simulation needs the same check the worker uses, not just
+    # `which yt-dlp` on PATH.
+    from clipforge.ytdlp_install import resolve_yt_dlp_path  # noqa: PLC0415
+
+    if resolve_yt_dlp_path() is not None:
         pytest.skip("yt-dlp is installed in this environment")
     resp = client.post(
         "/jobs",

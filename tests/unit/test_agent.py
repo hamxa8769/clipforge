@@ -7,7 +7,6 @@ for approval. Live publishing is never attempted — dry-run only.
 
 from __future__ import annotations
 
-import shutil
 import threading
 import time
 
@@ -196,9 +195,13 @@ def test_run_once_requires_enabled(tmp_path):
 
 
 def test_run_once_channel_without_ytdlp_plain_error(tmp_path):
-    import shutil
+    # Skip when yt-dlp is installed ANYWHERE the agent looks (PATH,
+    # bundled dir, or a standard install location) — v0.9.1 detection
+    # finds those, so the guard must use the same resolver, not just
+    # `shutil.which` on PATH.
+    from clipforge.ytdlp_install import resolve_yt_dlp_path  # noqa: PLC0415
 
-    if shutil.which("yt-dlp"):
+    if resolve_yt_dlp_path(tmp_path) is not None:
         pytest.skip("yt-dlp is installed here — channel path is live")
     agent = _agent(tmp_path)
     with pytest.raises(AgentError, match="yt-dlp"):
@@ -294,7 +297,11 @@ def test_start_real_video_without_yt_dlp_fails_fast(tmp_path, monkeypatch):
     """A real-video run with no yt-dlp fails BEFORE any thread starts
     (plain AgentError at click time) instead of briefly reporting
     "running" and then silently landing in "error" with ON still shown."""
-    monkeypatch.setattr(shutil, "which", lambda name: None)
+    # v0.9.1: the agent gate uses resolve_yt_dlp_path (PATH + bundled
+    # + standard install locations), not shutil.which — stub that.
+    import clipforge.agent as agent_mod
+
+    monkeypatch.setattr(agent_mod, "resolve_yt_dlp_path", lambda *args, **kwargs: None)
     agent = _agent(tmp_path)
     with pytest.raises(AgentError, match="yt-dlp"):
         agent.start(_config(transcript_text=None))

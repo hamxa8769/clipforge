@@ -691,6 +691,7 @@ Building the exe yourself: `python scripts/build_exe.py --with-web`
 | `POST` | `/ffmpeg/install` | Start the one-click FFmpeg install (202; `?force=true` re-installs) |
 | `GET` | `/yt-dlp/status` | Pollable yt-dlp install state + live detection |
 | `POST` | `/yt-dlp/install` | Start the one-click yt-dlp install (202; `?force=true` re-installs) |
+| `POST` | `/yt-dlp/recheck` | Re-probe for a manually installed yt-dlp, no restart |
 
 Full reference: [docs/api.md](docs/api.md).
 

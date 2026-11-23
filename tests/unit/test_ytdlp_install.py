@@ -12,6 +12,14 @@ check (``_check_binary_magic``) — the check itself is unit-tested
 directly below with crafted byte prefixes. The Windows branch
 (registry user-PATH update) is tested with a stubbed
 ``add_to_user_path_windows``, like the FFmpeg tests.
+
+v0.9.1 detection tests (at the end of this file) simulate the Windows
+installs the app used to miss — a pip user Scripts install and a
+winget shim, neither on the process PATH — plus the re-check endpoint
+and the found-but-broken report. The Windows platform is simulated by
+monkeypatching ``platform.system`` and the APPDATA / LOCALAPPDATA
+folders; the fake ``yt-dlp.exe`` is a shell script, which runs on
+Linux via its shebang.
 """
 
 from __future__ import annotations
@@ -571,3 +579,249 @@ def test_check_dependencies_counts_bundled_yt_dlp(
     assert _wait_done(installer)["state"] == "done"
     after = {d.name: d.available for d in check_dependencies()}
     assert after["yt-dlp"] is True
+
+
+# ------------------------------------------------------- detection (v0.9.1)
+# Regression tests for the user report "yt-dlp IS installed (via
+# PowerShell) but the app says it is missing": the old detection only
+# checked the stored path, the bundled dir, and shutil.which() on the
+# process PATH — which misses a pip user Scripts install (never on
+# PATH) and any install made after the server started (frozen PATH).
+
+FAKE_YTDLP_EXE_SCRIPT = f"#!/bin/sh\necho '{FAKE_VERSION}'\n".encode()
+
+
+def _fake_windows_exe(directory: Path) -> Path:
+    """A fake yt-dlp.exe (shell script) in ``directory``."""
+    directory.mkdir(parents=True, exist_ok=True)
+    fake = directory / "yt-dlp.exe"
+    fake.write_bytes(FAKE_YTDLP_EXE_SCRIPT)
+    fake.chmod(0o755)
+    return fake
+
+
+@pytest.fixture
+def windows_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Simulate Windows: platform + per-user folders under tmp_path."""
+    import clipforge.ytdlp_install as mod
+
+    monkeypatch.setattr(mod.platform, "system", lambda: "Windows")
+    appdata = tmp_path / "AppData" / "Roaming"
+    localappdata = tmp_path / "AppData" / "Local"
+    monkeypatch.setenv("APPDATA", str(appdata))
+    monkeypatch.setenv("LOCALAPPDATA", str(localappdata))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("ProgramData", str(tmp_path / "ProgramData"))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "Program Files"))
+    monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path / "Program Files (x86)"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.delenv("CLIPFORGE_DATA_DIR", raising=False)
+    return tmp_path
+
+
+def test_resolve_finds_pip_user_scripts_location_not_on_path(tmp_path: Path, windows_env) -> None:
+    """The reported case: `pip install yt-dlp` puts yt-dlp.exe in
+    %APPDATA%\\Python\\Python3XX\\Scripts, which is NOT on PATH — the
+    old shutil.which() detection missed it entirely."""
+    from clipforge.ytdlp_install import probe_yt_dlp, resolve_yt_dlp_path
+
+    scripts = tmp_path / "AppData" / "Roaming" / "Python" / "Python313" / "Scripts"
+    fake = _fake_windows_exe(scripts)
+    assert resolve_yt_dlp_path(tmp_path, system="Windows") == str(fake)
+    probe = probe_yt_dlp(tmp_path, system="Windows")
+    assert probe["found"] is True
+    assert probe["version"] == FAKE_VERSION
+    assert probe["path"] == str(fake)
+    assert "pip install" in probe["source"]
+
+
+def test_resolve_finds_winget_shim_location_not_on_path(tmp_path: Path, windows_env) -> None:
+    """A winget install (WindowsApps shim) is found even when the
+    process PATH does not contain the shim dir."""
+    from clipforge.ytdlp_install import probe_yt_dlp, resolve_yt_dlp_path
+
+    shim_dir = tmp_path / "AppData" / "Local" / "Microsoft" / "WindowsApps"
+    fake = _fake_windows_exe(shim_dir)
+    assert resolve_yt_dlp_path(tmp_path, system="Windows") == str(fake)
+    probe = probe_yt_dlp(tmp_path, system="Windows")
+    assert probe["found"] is True
+    assert probe["source"] == "winget (WindowsApps)"
+
+
+def test_status_reports_version_path_and_source_for_path_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Detection finds a PATH-installed yt-dlp and the status reports
+    its version, its path, and where it was found."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "yt-dlp"
+    fake.write_bytes(FAKE_YTDLP_SCRIPT)
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLIPFORGE_DATA_DIR", raising=False)
+    status = YtDlpInstaller(tmp_path).status()
+    assert status["found"] is True
+    assert status["version"] == FAKE_VERSION
+    assert status["path"] == str(fake)
+    assert status["source"] == "PATH"
+    assert status["broken"] is False
+
+
+def test_api_recheck_finds_path_install_after_server_start(
+    api_client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stale-status regression: the server started before yt-dlp
+    was installed, so GET /yt-dlp/status says missing. Installing it
+    into a new PATH dir and POSTing /yt-dlp/recheck finds it — no
+    server restart, no one-click install."""
+    client, _installer = api_client
+    empty = tmp_path / "empty-path"
+    empty.mkdir()
+    new_dir = tmp_path / "newbin"
+    monkeypatch.setenv("PATH", str(empty))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert client.get("/yt-dlp/status").json()["found"] is False
+    # The user installs yt-dlp (PowerShell) after the server started.
+    new_dir.mkdir()
+    fake = new_dir / "yt-dlp"
+    fake.write_bytes(FAKE_YTDLP_SCRIPT)
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(new_dir) + os.pathsep + str(empty))
+    resp = client.post("/yt-dlp/recheck")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["found"] is True, body
+    assert body["version"] == FAKE_VERSION
+    assert body["path"] == str(fake)
+    assert body["source"] == "PATH"
+    assert body["path_refreshed"] == []
+    # The fresh result sticks: a plain status poll agrees.
+    assert client.get("/yt-dlp/status").json()["found"] is True
+
+
+def test_recheck_refreshes_path_from_windows_registry(
+    tmp_path: Path, windows_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows core of the fix: the registry PATH gains the install
+    dir after the server started. Re-check merges it into the running
+    process's PATH and finds the binary — the old code needed a full
+    app restart for this."""
+    import clipforge.ytdlp_install as mod
+
+    new_dir = tmp_path / "newbin"
+    fake = _fake_windows_exe(new_dir)
+    installer = YtDlpInstaller(tmp_path)
+    assert installer.status()["found"] is False
+    assert str(new_dir) not in os.environ["PATH"].split(os.pathsep)
+    # The user installs yt-dlp; the registry PATH gains the new dir
+    # (the running process's PATH does not).
+    monkeypatch.setattr(mod, "_read_windows_registry_path", lambda: [str(new_dir)])
+    status = installer.recheck()
+    assert status["found"] is True, status
+    assert status["version"] == FAKE_VERSION
+    assert status["path"] == str(fake)
+    assert status["path_refreshed"] == [str(new_dir)]
+    assert str(new_dir) in os.environ["PATH"].split(os.pathsep)
+
+
+def test_status_reports_broken_binary_plainly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A yt-dlp file that exists but does not run (--version fails)
+    is reported as broken with its path — never as 'found' / ready."""
+    bin_dir = tmp_path / "brokenbin"
+    bin_dir.mkdir()
+    fake = bin_dir / "yt-dlp"
+    fake.write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLIPFORGE_DATA_DIR", raising=False)
+    status = YtDlpInstaller(tmp_path).status()
+    assert status["found"] is False
+    assert status["broken"] is True
+    assert status["path"] == str(fake)
+    assert status["version"] == ""
+    assert str(fake) in status["broken_reason"]
+    assert "does not run" in status["broken_reason"]
+
+
+def test_probe_prefers_working_binary_over_broken_path_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken yt-dlp earlier on PATH must not shadow a working one
+    later on PATH."""
+    from clipforge.ytdlp_install import probe_yt_dlp
+
+    broken_dir = tmp_path / "broken"
+    broken_dir.mkdir()
+    broken = broken_dir / "yt-dlp"
+    broken.write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
+    broken.chmod(0o755)
+    good_dir = tmp_path / "good"
+    good_dir.mkdir()
+    good = good_dir / "yt-dlp"
+    good.write_bytes(FAKE_YTDLP_SCRIPT)
+    good.chmod(0o755)
+    monkeypatch.setenv("PATH", str(broken_dir) + os.pathsep + str(good_dir))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLIPFORGE_DATA_DIR", raising=False)
+    probe = probe_yt_dlp(tmp_path)
+    assert probe["found"] is True
+    assert probe["path"] == str(good)
+    assert probe["version"] == FAKE_VERSION
+    assert probe["broken"] is False
+
+
+def test_require_tool_finds_scripts_location(
+    tmp_path: Path, windows_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The worker gate that blocked the agent run (require_tool /
+    check_dependencies) uses the same full detection, so a pip
+    Scripts install unblocks the run without a restart."""
+    from clipforge.workflow import MissingDependencyError, check_dependencies, require_tool
+
+    scripts = tmp_path / "AppData" / "Roaming" / "Python" / "Python313" / "Scripts"
+    _fake_windows_exe(scripts)
+    monkeypatch.setenv("CLIPFORGE_DATA_DIR", str(tmp_path))
+    require_tool("yt-dlp", "yt-dlp downloads the YouTube source", "Install yt-dlp")
+    deps = {d.name: d.available for d in check_dependencies()}
+    assert deps["yt-dlp"] is True
+    # And it still raises when nothing is installed anywhere.
+    missing_env = tmp_path / "no-yt-dlp-here"
+    missing_env.mkdir()
+    monkeypatch.setenv("APPDATA", str(missing_env))
+    monkeypatch.setenv("LOCALAPPDATA", str(missing_env))
+    monkeypatch.setenv("HOME", str(missing_env))
+    with pytest.raises(MissingDependencyError):
+        require_tool("yt-dlp", "yt-dlp downloads the YouTube source", "Install yt-dlp")
+
+
+def test_settings_ytdlp_info_reports_source_and_broken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GET /settings reports the same verified detection (version +
+    path + source, broken plainly)."""
+    from clipforge.auth.settings_store import ytdlp_info
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "yt-dlp"
+    fake.write_bytes(FAKE_YTDLP_SCRIPT)
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLIPFORGE_DATA_DIR", raising=False)
+    info = ytdlp_info(tmp_path)
+    assert info["found"] is True
+    assert info["version"] == FAKE_VERSION
+    assert info["path"] == str(fake)
+    assert info["source"] == "PATH"
+    fake.write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
+    info = ytdlp_info(tmp_path)
+    assert info["found"] is False
+    assert info["broken"] is True
+    assert info["path"] == str(fake)

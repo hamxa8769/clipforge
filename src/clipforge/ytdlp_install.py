@@ -25,6 +25,26 @@ so no PATH restart is needed):
   ``HKCU\\Environment``, via :func:`clipforge.ffmpeg_install.add_to_user_path_windows`),
   so future runs and other tools find it too.
 
+Detection (v0.9.1 — the user installed yt-dlp via PowerShell and the
+app still said "missing"): finding yt-dlp is not just ``shutil.which``
+on the process's PATH. A server process inherits PATH when it starts,
+so a yt-dlp installed *after* the server started (pip, winget, or any
+other installer updating the user PATH) is invisible to the running
+process until a restart — and a default Windows ``pip install yt-dlp``
+lands in ``%APPDATA%\\Python\\Python3XX\\Scripts``, which is not on
+PATH at all (pip warns about it). So detection now
+(:func:`probe_yt_dlp` / :func:`resolve_yt_dlp_path`) searches, in
+order: the saved install path, the bundled ``<data_dir>/yt-dlp/``
+binary, every entry of the *current* PATH, and the standard install
+locations (pip user Scripts, winget shims, Scoop, Chocolatey,
+Program Files, ``~/.local/bin``). On Windows the re-check
+(:meth:`YtDlpInstaller.recheck`, ``POST /yt-dlp/recheck``) first
+re-reads the user + system PATH from the registry into this process,
+so a PATH install made after startup is picked up with no restart.
+A candidate only counts as *found* when ``yt-dlp --version`` runs;
+a file that exists but does not run is reported as ``broken`` with
+its path, never as "installed and ready".
+
 Download sources (verified 2026-11-22 — the live ``SHA2-256SUMS``
 for the latest release, 2026.10.26, was fetched and lists every asset
 below):
@@ -75,7 +95,6 @@ import hashlib
 import json
 import os
 import platform
-import shutil
 import stat
 import subprocess
 import sys
@@ -175,7 +194,9 @@ def ytdlp_missing_message() -> str:
         "yt-dlp is not installed — ClipForge needs it to download YouTube sources. "
         "Press 'Install yt-dlp' in ClipForge (Pipeline or Agent page, or "
         "Settings) to install it automatically, or get it from "
-        f"{YTDLP_DOWNLOAD_PAGE} and make sure it is on PATH."
+        f"{YTDLP_DOWNLOAD_PAGE} and make sure it is on PATH. "
+        "If you just installed it yourself, press 'Re-check' in ClipForge "
+        "first — no restart needed."
     )
 
 
@@ -215,6 +236,202 @@ def _is_usable(path: Path) -> bool:
     return path.is_file() and os.access(path, os.X_OK)
 
 
+# ------------------------------------------------------- detection (v0.9.1)
+# Why this exists: v0.9.0 detection was ``shutil.which("yt-dlp")`` on
+# the process's PATH (plus the stored / bundled paths). That misses
+# two real installs the user hit on Windows:
+#   * a yt-dlp installed AFTER the server started — the process's
+#     PATH is frozen at launch, and a pip/winget install only updates
+#     the registry user PATH, never the running process;
+#   * a default ``pip install yt-dlp`` — the binary lands in
+#     ``%APPDATA%\\Python\\Python3XX\\Scripts``, which is NOT on PATH
+#     (pip itself warns about it), so even a fresh process misses it.
+# Detection therefore (a) re-reads the registry PATH on Windows before
+# probing, and (b) scans the standard install locations explicitly.
+
+#: Human-readable labels for where a binary was found, shown in the UI
+#: so the user can see *which* install the app is using.
+_SOURCE_PATH = "PATH"
+_SOURCE_STORED = "saved install location"
+_SOURCE_BUNDLED = "app data folder (one-click install)"
+
+
+def _read_windows_registry_path() -> list[str]:
+    """User + system PATH, as the Windows registry currently has them.
+
+    A running process never sees registry PATH edits (an installer
+    updating ``HKCU\\Environment\\Path`` does not touch it), so a
+    re-check reads the registry directly instead of trusting the
+    frozen process PATH. Returns [] off Windows or when the registry
+    cannot be read. ``%VAR%`` references are expanded.
+    """
+    try:
+        import winreg  # noqa: PLC0415  (Windows-only stdlib module)
+    except ImportError:
+        return []
+    entries: list[str] = []
+    for root, subkey in (
+        (winreg.HKEY_CURRENT_USER, r"Environment"),
+        (
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        ),
+    ):
+        try:
+            with winreg.OpenKey(root, subkey, 0, winreg.KEY_READ) as key:
+                raw, _ = winreg.QueryValueEx(key, "Path")
+        except OSError:
+            continue
+        if raw:
+            entries.extend(part for part in str(raw).split(";") if part.strip())
+    return [os.path.expandvars(entry) for entry in entries]
+
+
+def refresh_process_path_from_registry() -> list[str]:
+    """Merge the registry PATH into this process's PATH (Windows only).
+
+    Returns the dirs that were added ([] when nothing was new, or off
+    Windows). Idempotent: entries already in the process PATH are not
+    duplicated, and the existing order is kept.
+    """
+    if platform.system() != "Windows":
+        return []
+    current = os.environ.get("PATH", "")
+    parts = current.split(os.pathsep) if current else []
+    seen = {os.path.normcase(part) for part in parts}
+    added: list[str] = []
+    for entry in _read_windows_registry_path():
+        if os.path.normcase(entry) not in seen:
+            parts.append(entry)
+            seen.add(os.path.normcase(entry))
+            added.append(entry)
+    if added:
+        os.environ["PATH"] = os.pathsep.join(parts)
+    return added
+
+
+def _windows_home_dirs() -> dict[str, Path]:
+    """Per-user Windows folders, from the environment with home-based
+    fallbacks (a service process may not have APPDATA set)."""
+    home = Path.home()
+    appdata = os.environ.get("APPDATA") or str(home / "AppData" / "Roaming")
+    localappdata = os.environ.get("LOCALAPPDATA") or str(home / "AppData" / "Local")
+    return {
+        "home": home,
+        "appdata": Path(appdata),
+        "localappdata": Path(localappdata),
+        "programdata": Path(os.environ.get("ProgramData") or r"C:\ProgramData"),
+        "programfiles": Path(os.environ.get("ProgramFiles") or r"C:\Program Files"),
+        "programfiles_x86": Path(os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)"),
+    }
+
+
+def _known_location_candidates(system: str | None = None) -> list[tuple[Path, str]]:
+    """Standard yt-dlp install locations that are often NOT on PATH.
+
+    Windows first (the reported case): pip user installs, winget
+    shims, Scoop, Chocolatey, Program Files. POSIX: ``pip install
+    --user`` (``~/.local/bin``), Homebrew, pyenv shims. Paths that do
+    not exist are harmless — the probe skips them.
+    """
+    system = system or platform.system()
+    found: list[tuple[Path, str]] = []
+    if system == "Windows":
+        dirs = _windows_home_dirs()
+        exe = "yt-dlp.exe"
+        # Winget puts a shim in WindowsApps (usually on PATH, but a
+        # process started before the install still misses it).
+        found.append(
+            (dirs["localappdata"] / "Microsoft" / "WindowsApps" / exe, "winget (WindowsApps)")
+        )
+        # pip install yt-dlp (user): %APPDATA%\Python\Python3XX\Scripts
+        # — NOT on PATH by default, so this is the install the user
+        # actually had and the app missed. Newest Python first.
+        for scripts in sorted(dirs["appdata"].glob("Python/Python3*/Scripts"), reverse=True):
+            found.append((scripts / exe, "Python user Scripts folder (pip install)"))
+        found.append(
+            (
+                dirs["appdata"] / "Python" / "Scripts" / exe,
+                "Python user Scripts folder (pip install)",
+            )
+        )
+        # System-wide Python installs: %LOCALAPPDATA%\Programs\Python\...
+        for scripts in sorted(
+            dirs["localappdata"].glob("Programs/Python/Python3*/Scripts"), reverse=True
+        ):
+            found.append((scripts / exe, "Python Scripts folder (pip install)"))
+        found.append((dirs["home"] / "scoop" / "shims" / exe, "Scoop"))
+        found.append((dirs["programdata"] / "chocolatey" / "bin" / exe, "Chocolatey"))
+        found.append((dirs["programfiles"] / "yt-dlp" / exe, "Program Files"))
+        found.append((dirs["programfiles_x86"] / "yt-dlp" / exe, "Program Files (x86)"))
+        found.append((dirs["localappdata"] / "Programs" / "yt-dlp" / exe, "user programs folder"))
+        return found
+    home = Path.home()
+    return [
+        (home / ".local" / "bin" / "yt-dlp", "user bin folder (pip install --user)"),
+        (Path("/usr/local/bin/yt-dlp"), "system bin folder"),
+        (Path("/opt/homebrew/bin/yt-dlp"), "Homebrew"),
+        (home / ".pyenv" / "shims" / "yt-dlp", "pyenv"),
+    ]
+
+
+def _path_dir_candidates(system: str | None = None) -> list[tuple[Path, str]]:
+    """Every yt-dlp on the *current* process PATH, in PATH order.
+
+    ``shutil.which`` only returns the first hit; a broken binary
+    earlier on PATH would otherwise shadow a working one later, so
+    the probe walks the dirs itself.
+    """
+    system = system or platform.system()
+    name = "yt-dlp.exe" if system == "Windows" else "yt-dlp"
+    out: list[tuple[Path, str]] = []
+    seen: set[str] = set()
+    for entry in (os.environ.get("PATH", "") or "").split(os.pathsep):
+        if not entry:
+            continue
+        candidate = Path(entry) / name
+        key = os.path.normcase(str(candidate))
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.is_file():
+            out.append((candidate, _SOURCE_PATH))
+    return out
+
+
+def candidate_yt_dlp_paths(
+    data_dir: str | Path | None = None,
+    stored_path: str | None = None,
+    system: str | None = None,
+) -> list[tuple[str, str]]:
+    """All yt-dlp locations worth probing, in priority order.
+
+    Each item is ``(path, source-label)``: the saved install path,
+    the bundled ``<data_dir>/yt-dlp/`` binary, every PATH hit, then
+    the standard install locations. Paths that do not exist are
+    included (the probe skips them); duplicates are removed, first
+    occurrence winning.
+    """
+    system = system or platform.system()
+    ordered: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def _add(path: str | Path, source: str) -> None:
+        key = os.path.normcase(str(path))
+        if key not in seen:
+            seen.add(key)
+            ordered.append((str(path), source))
+
+    if stored_path:
+        _add(stored_path, _SOURCE_STORED)
+    _add(bundled_yt_dlp_path(data_dir, system), _SOURCE_BUNDLED)
+    for path, source in _path_dir_candidates(system):
+        _add(path, source)
+    for path, source in _known_location_candidates(system):
+        _add(path, source)
+    return ordered
+
+
 def resolve_yt_dlp_path(
     data_dir: str | Path | None = None,
     stored_path: str | None = None,
@@ -225,27 +442,99 @@ def resolve_yt_dlp_path(
     1. The path saved in settings after a one-click install.
     2. The installer-managed ``<data_dir>/yt-dlp/`` binary.
     3. Whatever is on PATH (a manual install).
+    4. The standard install locations (pip user Scripts, winget
+       shims, Scoop / Chocolatey, ``~/.local/bin`` …).
+
+    On Windows the registry PATH is merged into this process first,
+    so a yt-dlp installed after the server started is found without
+    a restart. Returns the first candidate that exists and is
+    executable (a bundled binary on a non-executable filesystem is
+    still returned as a last resort — the installer chmods it, this
+    is the fallback). Does NOT check that the binary runs; use
+    :func:`probe_yt_dlp` for a verified answer.
     """
-    if stored_path:
-        candidate = Path(stored_path)
-        if _is_usable(candidate):
-            return str(candidate)
+    system = system or platform.system()
+    if system == "Windows":
+        refresh_process_path_from_registry()
+    for path, _source in candidate_yt_dlp_paths(data_dir, stored_path, system):
+        if _is_usable(Path(path)):
+            return path
     bundled = bundled_yt_dlp_path(data_dir, system)
-    if _is_usable(bundled):
-        return str(bundled)
-    # A bundled binary on a non-executable filesystem (or a download
-    # that lost its exec bit) is still usable — it just needs invoking
-    # by path; the installer chmods it on install, this is the fallback.
     if bundled.is_file():
         return str(bundled)
-    return shutil.which("yt-dlp")
+    return None
 
 
-def ytdlp_version(binary: str | Path) -> str:
+def probe_yt_dlp(
+    data_dir: str | Path | None = None,
+    stored_path: str | None = None,
+    system: str | None = None,
+    timeout: float = 10.0,
+) -> dict:
+    """Verified yt-dlp detection: found, where, and which version.
+
+    Walks :func:`candidate_yt_dlp_paths` and returns the first
+    candidate whose ``yt-dlp --version`` actually runs. A candidate
+    that exists but does not run is skipped (a broken binary earlier
+    on PATH must not shadow a working one later) and, when nothing
+    runs, reported honestly as ``broken`` with its path — never as
+    "found". ``found`` is True only when a binary both exists and
+    runs. ``source`` is the human-readable location label
+    (e.g. ``"Python user Scripts folder (pip install)"``).
+    """
+    system = system or platform.system()
+    if system == "Windows":
+        refresh_process_path_from_registry()
+    first_existing: tuple[str, str, str] | None = None
+    for path, source in candidate_yt_dlp_paths(data_dir, stored_path, system):
+        candidate = Path(path)
+        if not candidate.is_file():
+            continue
+        if not os.access(candidate, os.X_OK):
+            if first_existing is None:
+                first_existing = (path, source, "exists but is not executable")
+            continue
+        version = ytdlp_version(path, timeout=timeout)
+        if version:
+            return {
+                "found": True,
+                "path": path,
+                "version": version,
+                "broken": False,
+                "broken_reason": "",
+                "source": source,
+            }
+        if first_existing is None:
+            first_existing = (path, source, "does not run (yt-dlp --version failed)")
+    if first_existing is not None:
+        path, source, why = first_existing
+        return {
+            "found": False,
+            "path": path,
+            "version": "",
+            "broken": True,
+            "broken_reason": (
+                f"yt-dlp was found at {path} ({source}) but {why}. "
+                "Reinstall it with the 'Install yt-dlp' button, or remove "
+                "the broken copy and press 'Re-check'."
+            ),
+            "source": source,
+        }
+    return {
+        "found": False,
+        "path": "",
+        "version": "",
+        "broken": False,
+        "broken_reason": "",
+        "source": "",
+    }
+
+
+def ytdlp_version(binary: str | Path, timeout: float = 30.0) -> str:
     """``yt-dlp --version`` output (``""`` when it does not run)."""
     try:
         proc = subprocess.run(
-            [str(binary), "--version"], capture_output=True, text=True, timeout=30
+            [str(binary), "--version"], capture_output=True, text=True, timeout=timeout
         )
     except (OSError, ValueError, subprocess.SubprocessError):
         return ""
@@ -473,6 +762,14 @@ class InstallState:
     #: Non-fatal Windows PATH warning on an otherwise successful install
     #: ("" when the PATH update worked or did not apply).
     path_warning: str = ""
+    #: v0.9.1 detection: True when a yt-dlp file exists but none runs
+    #: (``--version`` fails) — reported plainly, never as "found".
+    broken: bool = False
+    #: Plain-language reason when ``broken`` is True.
+    broken_reason: str = ""
+    #: Where the working (or broken) yt-dlp was found, e.g. "PATH" or
+    #: "Python user Scripts folder (pip install)".
+    source: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -491,6 +788,9 @@ class InstallState:
             "checksum_verified": self.checksum_verified,
             "failed_step": self.failed_step,
             "path_warning": self.path_warning,
+            "broken": self.broken,
+            "broken_reason": self.broken_reason,
+            "source": self.source,
         }
 
 
@@ -583,17 +883,56 @@ class YtDlpInstaller:
             pass  # state file is best-effort; the in-memory state is live
 
     def status(self) -> dict:
-        """Current install state, enriched with live yt-dlp detection."""
+        """Current install state, enriched with live yt-dlp detection.
+
+        ``found`` is True only when a yt-dlp binary both exists and
+        runs (``--version``); ``path`` / ``version`` / ``source`` say
+        where it was found and which version it is. When a binary
+        exists but does not run, ``found`` is False and ``broken`` /
+        ``broken_reason`` name the broken copy instead of claiming
+        "installed and ready".
+        """
         with self._lock:
             snapshot = self._state.to_dict()
-        found_path = resolve_yt_dlp_path(self.data_dir)
-        snapshot["found"] = bool(found_path)
-        snapshot["path"] = found_path or snapshot["path"]
-        if found_path:
-            snapshot["version"] = ytdlp_version(found_path) or snapshot["version"]
+        probe = probe_yt_dlp(self.data_dir)
+        snapshot["found"] = probe["found"]
+        snapshot["path"] = probe["path"]
+        snapshot["version"] = probe["version"]
+        snapshot["broken"] = probe["broken"]
+        snapshot["broken_reason"] = probe["broken_reason"]
+        snapshot["source"] = probe["source"]
         if not snapshot["download_url"]:
             snapshot["download_url"] = download_url_for_platform() or ""
         return snapshot
+
+    def recheck(self) -> dict:
+        """Re-probe for yt-dlp right now, without restarting anything.
+
+        First merges the Windows registry PATH into this process (a
+        yt-dlp installed after the server started only updated the
+        registry, never the running process's PATH), then re-runs live
+        detection and persists the fresh result. Returns the same dict
+        as :meth:`status`, plus ``path_refreshed``: the PATH dirs the
+        registry added to this process ([] when none, or off Windows).
+        A re-check never starts an install; while a run is active it
+        just returns the live status.
+        """
+        added = refresh_process_path_from_registry()
+        status = self.status()
+        if not self.is_running:
+            # Persist the fresh detection so the state file agrees
+            # with what the UI just showed (best-effort write, like
+            # every other state update).
+            self._set_state(
+                found=status["found"],
+                path=status["path"],
+                version=status["version"],
+                broken=status["broken"],
+                broken_reason=status["broken_reason"],
+                source=status["source"],
+            )
+        status["path_refreshed"] = added
+        return status
 
     @property
     def is_running(self) -> bool:
@@ -625,21 +964,26 @@ class YtDlpInstaller:
                 path_warning="",
             )
             return self.status()
-        existing = resolve_yt_dlp_path(self.data_dir)
-        if existing and not force:
-            version = ytdlp_version(existing)
+        probe = probe_yt_dlp(self.data_dir)
+        if probe["found"] and not force:
             self._set_state(
                 state="done",
                 progress_pct=100.0,
                 message="yt-dlp is already installed.",
                 error="",
-                version=version,
-                path=existing,
+                version=probe["version"],
+                path=probe["path"],
                 found=True,
+                broken=False,
+                broken_reason="",
+                source=probe["source"],
                 failed_step="",
                 path_warning="",
             )
             return self.status()
+        # A binary that exists but does not run (probe["broken"]) falls
+        # through to a real install: the bundled binary replaces the
+        # broken one as the preferred candidate, which is the fix.
         self._set_state(
             state="downloading",
             progress_pct=0.0,
@@ -894,9 +1238,12 @@ __all__ = [
     "InstallState",
     "asset_for_platform",
     "bundled_yt_dlp_path",
+    "candidate_yt_dlp_paths",
     "download_url_for_platform",
     "download_urls_for_platform",
     "ensure_bundled_yt_dlp_on_path",
+    "probe_yt_dlp",
+    "refresh_process_path_from_registry",
     "resolve_yt_dlp_path",
     "ytdlp_missing_message",
     "ytdlp_version",

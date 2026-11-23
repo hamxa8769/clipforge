@@ -31,7 +31,7 @@ from clipforge.auth.secrets import SecretStore, mask_secret
 from clipforge.ffmpeg_install import resolve_ffmpeg_path
 from clipforge.monetization import THRESHOLDS
 from clipforge.workflow import FFMPEG_DOWNLOAD_URL
-from clipforge.ytdlp_install import YTDLP_DOWNLOAD_PAGE, resolve_yt_dlp_path
+from clipforge.ytdlp_install import YTDLP_DOWNLOAD_PAGE, probe_yt_dlp
 
 # Secret names in the SecretStore (never shown, never logged).
 SECRET_NAMES = {
@@ -132,34 +132,26 @@ def ffmpeg_info(data_dir: str | Path | None = None, stored_path: str | None = No
 def ytdlp_info(data_dir: str | Path | None = None, stored_path: str | None = None) -> dict:
     """Honest yt-dlp report: found, where, and which version.
 
-    Resolution order: the path saved by the one-click install, then
-    the installer-managed ``<data_dir>/yt-dlp/`` binary, then whatever
-    is on PATH. ``version`` is the output of ``yt-dlp --version``
+    Same verified detection as the installer status
+    (:func:`clipforge.ytdlp_install.probe_yt_dlp`): the saved install
+    path, the installer-managed ``<data_dir>/yt-dlp/`` binary, PATH,
+    and the standard install locations (pip user Scripts, winget
+    shims, …). ``version`` is the output of ``yt-dlp --version``
     (e.g. ``2026.10.26``) when the binary runs, else "" — never a
-    guessed version, never a crash when the binary is absent.
+    guessed version, never a crash when the binary is absent. When a
+    binary exists but does not run, ``found`` is False and ``broken``
+    / ``broken_reason`` say so plainly.
     """
-    path: str | None = None
-    if data_dir is not None:
-        path = resolve_yt_dlp_path(data_dir, stored_path)
-    else:
-        path = stored_path if stored_path and Path(stored_path).is_file() else None
-        if path is None:
-            path = shutil.which("yt-dlp")
-    info = {
-        "found": bool(path),
-        "path": path or "",
-        "version": "",
+    probe = probe_yt_dlp(data_dir, stored_path)
+    return {
+        "found": probe["found"],
+        "path": probe["path"],
+        "version": probe["version"],
         "install_url": YTDLP_DOWNLOAD_PAGE,
+        "broken": probe["broken"],
+        "broken_reason": probe["broken_reason"],
+        "source": probe["source"],
     }
-    if not path:
-        return info
-    try:
-        proc = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=10)
-        first = (proc.stdout or "").strip().splitlines()[0].strip() if proc.stdout else ""
-        info["version"] = first
-    except (OSError, ValueError, subprocess.SubprocessError):
-        pass
-    return info
 
 
 @dataclass
