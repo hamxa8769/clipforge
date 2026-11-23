@@ -1,4 +1,11 @@
 // Clip Studio (v0.8.0) — AI clip suggestions + manual timeline editing.
+// Facecam Studio (v0.10.0) — a REAL render step: split-screen
+// facecam/gameplay layouts, draggable boxes on a 9:16 phone canvas,
+// PiP / Zoom / Blur Fill / Fullscreen modes, per-creator presets, and
+// animated captions, all rendered by POST /facecam/render through the
+// same render_clip the job queue uses. The layout + caption style are
+// also accepted on POST /jobs (facecam_layout) so queued jobs render
+// every candidate with the layout.
 //
 //   - Paste your own video URL (or a clip file URL) for the preview, the
 //     duration, and transcript lines ("start-end: text") — the analysis
@@ -8,19 +15,33 @@
 //   - The timeline at the bottom shows the chosen clip range; drag the
 //     handles or type start/end. Trim snaps the range to the selected
 //     suggestion; Ripple-cut marks the range as cut out of the clip.
-//   - Manual Pro Mode (caption style, punch-in zoom, aspect ratio) is a
-//     clearly-labelled preview-only section — simple by default. The
-//     settings are not saved or sent to the renderer: Studio has no
-//     render step yet, so the section says so plainly instead of
-//     promising the settings are "applied when rendered".
 //
 // Rights guardrail: clips are made ONLY from your own videos or Creative
 // Commons / licensed / public-domain videos — never another creator's
 // standard-licensed video. Until the analysis endpoint lands, the page
 // says so plainly and never shows invented suggestions.
 "use client";
-import { useCallback, useRef, useState } from "react";
-import { analyzeDetection, type DetectionCandidate } from "@/lib/api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { analyzeDetection, API_URL, type DetectionCandidate } from "@/lib/api";
+import {
+  boxToStyle,
+  captionYFrac,
+  clampBox,
+  defaultFacecamLayout,
+  deleteFacecamPreset,
+  getFacecamPresets,
+  getFacecamStyles,
+  pipRectFrac,
+  renderFacecamClip,
+  saveFacecamPreset,
+  splitBandFrac,
+  transcriptLinesToWords,
+  type CaptionStyleInfo,
+  type FacecamBox,
+  type FacecamLayout,
+  type FacecamMode,
+  type FacecamRenderResult,
+} from "@/lib/facecam";
 import {
   Badge, Card, CardHeader, EmptyState, ErrorBanner, PageHeader,
   PrimaryButton, SecondaryButton, Skeleton,
@@ -80,11 +101,151 @@ export default function StudioPage() {
   const [clipEnd, setClipEnd] = useState(60);
   const [cuts, setCuts] = useState<{ start: number; end: number }[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
-  const [captionStyle, setCaptionStyle] = useState("bold");
-  const [punchIn, setPunchIn] = useState(false);
+  const [captionStyle, setCaptionStyle] = useState("bounce");
   const [aspect, setAspect] = useState<"9:16" | "1:1" | "16:9">("9:16");
   const [notice, setNotice] = useState<string | null>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
+
+  // Facecam Studio (v0.10.0) — layout, presets, render.
+  const [facecamLayout, setFacecamLayout] = useState<FacecamLayout>(() => defaultFacecamLayout("split"));
+  const [captionStyles, setCaptionStyles] = useState<CaptionStyleInfo[]>([]);
+  const [presetCreator, setPresetCreator] = useState("default");
+  const [presetName, setPresetName] = useState("");
+  const [presetNames, setPresetNames] = useState<string[]>([]);
+  const [ownContent, setOwnContent] = useState(false);
+  const [rendering, setRendering] = useState(false);
+  const [renderResult, setRenderResult] = useState<FacecamRenderResult | null>(null);
+  const [renderError, setRenderError] = useState<string | null>(null);
+  const [videoDims, setVideoDims] = useState<{ w: number; h: number } | null>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getFacecamStyles().then((s) => {
+      if (!cancelled && s) setCaptionStyles(s.caption_styles);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    getFacecamPresets(presetCreator).then((p) => {
+      if (!cancelled && p) setPresetNames(Object.keys(p).sort());
+    });
+    return () => { cancelled = true; };
+  }, [presetCreator]);
+
+  async function refreshPresets() {
+    const p = await getFacecamPresets(presetCreator);
+    if (p) setPresetNames(Object.keys(p).sort());
+  }
+
+  async function onSavePreset() {
+    if (!presetName.trim()) { setNotice("Give the preset a name first."); return; }
+    const res = await saveFacecamPreset(presetCreator, presetName.trim(), facecamLayout);
+    if (res === null) { setNotice("Could not reach the server to save the preset."); return; }
+    if (res.error) { setNotice(`Could not save preset: ${res.error}`); return; }
+    setNotice(`Preset “${presetName.trim()}” saved for creator “${presetCreator}”.`);
+    await refreshPresets();
+  }
+
+  async function onLoadPreset(name: string) {
+    const p = await getFacecamPresets(presetCreator);
+    if (!p || !p[name]) { setNotice(`Preset “${name}” not found.`); return; }
+    setFacecamLayout(p[name]);
+    setPresetName(name);
+    setNotice(`Preset “${name}” loaded — drag the boxes to adjust it.`);
+  }
+
+  async function onDeletePreset(name: string) {
+    const ok = await deleteFacecamPreset(presetCreator, name);
+    setNotice(ok ? `Preset “${name}” deleted.` : `Could not delete preset “${name}”.`);
+    await refreshPresets();
+  }
+
+  async function onRenderFacecam() {
+    setRendering(true);
+    setRenderError(null);
+    setRenderResult(null);
+    if (!videoUrl.trim()) {
+      setRendering(false);
+      setRenderError("Paste a video file URL above first — the render needs a source video.");
+      return;
+    }
+    if (clipEnd - clipStart < 0.5) {
+      setRendering(false);
+      setRenderError("Pick a clip range of at least 0.5 s on the timeline.");
+      return;
+    }
+    const words = transcriptLinesToWords(parseSegments());
+    const res = await renderFacecamClip({
+      source_url: videoUrl.trim(),
+      own_content_declaration: ownContent,
+      start_s: clipStart,
+      end_s: clipEnd,
+      layout: facecamLayout,
+      caption_style: captionStyle === "none" ? "bold-pop" : captionStyle,
+      words: captionStyle === "none" ? [] : words,
+    });
+    setRendering(false);
+    if (res === null) { setRenderError("Could not reach the server to render."); return; }
+    if (res.error) { setRenderError(res.error); return; }
+    if (res.result) {
+      setRenderResult(res.result);
+      setNotice(`Facecam clip rendered: ${res.result.render.width}×${res.result.render.height}, ${res.result.render.duration_s.toFixed(1)} s, ${res.result.render.video_codec}.`);
+    }
+  }
+
+  // Drag a layout box on the 9:16 canvas: pointer position (in the
+  // displayed video rect) -> normalised source-frame coordinates.
+  // The video is fitted (object-contain) into the 9:16 canvas, so the
+  // video rect is a pure function of the two aspect ratios.
+  const videoRect = useCallback(() => {
+    if (!videoDims) return { x: 0, y: 0, w: 1, h: 1 };
+    const canvasAspect = 9 / 16;
+    const videoAspect = videoDims.w / Math.max(1, videoDims.h);
+    if (videoAspect >= canvasAspect) {
+      const h = canvasAspect / videoAspect;
+      return { x: 0, y: (1 - h) / 2, w: 1, h };
+    }
+    const w = videoAspect / canvasAspect;
+    return { x: (1 - w) / 2, y: 0, w, h: 1 };
+  }, [videoDims])();
+
+  function overlayStyle(box: FacecamBox): React.CSSProperties {
+    const b = clampBox(box);
+    return {
+      left: `${(videoRect.x + b.x * videoRect.w) * 100}%`,
+      top: `${(videoRect.y + b.y * videoRect.h) * 100}%`,
+      width: `${b.w * videoRect.w * 100}%`,
+      height: `${b.h * videoRect.h * 100}%`,
+    };
+  }
+
+  const dragBox = useCallback((which: "facecam" | "gameplay", resize: boolean) => (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const vw = rect.width * videoRect.w;
+    const vh = rect.height * videoRect.h;
+    if (vw <= 0 || vh <= 0) return;
+    const startBox = { ...(which === "facecam" ? facecamLayout.facecam : facecamLayout.gameplay) };
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const move = (ev: PointerEvent) => {
+      const dx = (ev.clientX - startX) / vw;
+      const dy = (ev.clientY - startY) / vh;
+      const next = clampBox(resize
+        ? { ...startBox, w: startBox.w + dx, h: startBox.h + dy }
+        : { ...startBox, x: startBox.x + dx, y: startBox.y + dy });
+      setFacecamLayout((prev) => ({ ...prev, [which]: next }));
+    };
+    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }, [facecamLayout.facecam, facecamLayout.gameplay, videoRect]);
 
   const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 600;
   const startPct = (clipStart / safeDuration) * 100;
@@ -262,33 +423,182 @@ export default function StudioPage() {
           </Card>
 
           <Card className="glass">
-            <details>
-              <summary className="cursor-pointer text-lg font-semibold text-neutral-100">Manual Pro Mode <span className="ml-1 text-xs font-normal text-neutral-500">— caption style, zoom &amp; aspect ratio</span></summary>
-              <div className="mt-4 space-y-4">
-                <label className="block text-sm">
-                  <span className="text-neutral-400">Caption style</span>
-                  <select className="mt-1 w-full max-w-xs rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm" value={captionStyle} onChange={(e) => setCaptionStyle(e.target.value)} aria-label="Caption style">
-                    <option value="bold">Bold bottom (default)</option>
-                    <option value="karaoke">Karaoke (word by word)</option>
-                    <option value="minimal">Minimal</option>
-                    <option value="none">No captions</option>
-                  </select>
-                </label>
-                <label className="flex items-start gap-3 text-sm">
-                  <input type="checkbox" className="mt-0.5 h-4 w-4 accent-amber-400" checked={punchIn} onChange={(e) => setPunchIn(e.target.checked)} />
-                  <span><span className="font-medium text-neutral-100">Punch-in zoom</span><span className="mt-0.5 block text-xs text-neutral-400">Zoom in slightly on the speaker during the clip for a punchier look.</span></span>
-                </label>
+            <CardHeader title="Facecam Studio" hint="Drag the boxes on the 9:16 phone canvas — then render the clip for real" />
+            <div className="flex flex-wrap gap-6">
+              {/* 9:16 phone canvas with draggable layout boxes */}
+              <div className="shrink-0">
+                <div ref={canvasRef} className="relative aspect-[9/16] w-[280px] overflow-hidden rounded-lg border border-neutral-700 bg-black">
+                  {videoUrl ? (
+                    <video
+                      key={videoUrl}
+                      src={videoUrl}
+                      controls
+                      className="absolute inset-0 h-full w-full object-contain"
+                      aria-label="Facecam Studio canvas preview"
+                      onLoadedMetadata={(e) => {
+                        const v = e.currentTarget;
+                        if (v.videoWidth > 0) setVideoDims({ w: v.videoWidth, h: v.videoHeight });
+                      }}
+                    />
+                  ) : (
+                    <div className="absolute inset-0 flex items-center justify-center p-4 text-center text-sm text-neutral-500">
+                      Paste a video file URL above to see the source under the boxes.
+                    </div>
+                  )}
+                  {/* Split divider + caption line (canvas fractions) */}
+                  {facecamLayout.mode === "split" && (
+                    <div className="pointer-events-none absolute inset-x-0 h-0.5 bg-cyan-400" style={{ top: `${splitBandFrac(facecamLayout) * 100}%` }} title="Facecam / gameplay divider" />
+                  )}
+                  <div className="pointer-events-none absolute inset-x-0 border-t border-dashed border-amber-300/70" style={{ top: `${captionYFrac(facecamLayout) * 100}%` }} title="Caption line" />
+                  {/* PiP rect (canvas fractions) */}
+                  {facecamLayout.mode === "pip" && (
+                    <div className="pointer-events-none absolute rounded border-2 border-dashed border-cyan-300/80" style={boxToStyle(pipRectFrac(facecamLayout))} title="Facecam PiP position" />
+                  )}
+                  {/* Draggable source boxes (facecam cyan, gameplay amber) */}
+                  <div
+                    role="slider" aria-label="Facecam box" aria-valuetext={`x ${Math.round(facecamLayout.facecam.x * 100)}%, y ${Math.round(facecamLayout.facecam.y * 100)}%, ${Math.round(facecamLayout.facecam.w * 100)}% wide`}
+                    onPointerDown={dragBox("facecam", false)}
+                    className="absolute cursor-move touch-none rounded border-2 border-cyan-400 bg-cyan-400/10"
+                    style={overlayStyle(facecamLayout.facecam)}
+                    title="Facecam box — drag to move, drag the corner to resize"
+                  >
+                    <span className="absolute left-1 top-0.5 text-[10px] font-bold uppercase tracking-wide text-cyan-200">Facecam</span>
+                    <div onPointerDown={dragBox("facecam", true)} className="absolute -bottom-1.5 -right-1.5 h-4 w-4 cursor-nwse-resize rounded-sm border border-cyan-200 bg-cyan-400" title="Resize facecam box" />
+                  </div>
+                  <div
+                    role="slider" aria-label="Gameplay box" aria-valuetext={`x ${Math.round(facecamLayout.gameplay.x * 100)}%, y ${Math.round(facecamLayout.gameplay.y * 100)}%, ${Math.round(facecamLayout.gameplay.w * 100)}% wide`}
+                    onPointerDown={dragBox("gameplay", false)}
+                    className="absolute cursor-move touch-none rounded border-2 border-amber-400 bg-amber-400/10"
+                    style={overlayStyle(facecamLayout.gameplay)}
+                    title="Gameplay box — drag to move, drag the corner to resize"
+                  >
+                    <span className="absolute left-1 top-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-200">Gameplay</span>
+                    <div onPointerDown={dragBox("gameplay", true)} className="absolute -bottom-1.5 -right-1.5 h-4 w-4 cursor-nwse-resize rounded-sm border border-amber-200 bg-amber-400" title="Resize gameplay box" />
+                  </div>
+                </div>
+                <p className="mt-2 w-[280px] text-xs text-neutral-500">
+                  Boxes are fractions of the source frame, so a preset works on any resolution. Cyan = facecam crop, amber = gameplay crop, dashed line = caption line.
+                </p>
+              </div>
+
+              {/* Layout + caption + preset controls */}
+              <div className="min-w-[240px] flex-1 space-y-4">
                 <fieldset>
-                  <legend className="text-sm font-medium text-neutral-100">Aspect ratio</legend>
-                  <div className="mt-2 flex flex-wrap gap-2" role="radiogroup" aria-label="Aspect ratio">
-                    {(["9:16", "1:1", "16:9"] as const).map((a) => (
-                      <button key={a} type="button" role="radio" aria-checked={aspect === a} onClick={() => setAspect(a)} className={`rounded-md border px-3 py-1.5 text-sm ${aspect === a ? "border-amber-400 bg-amber-400/10 text-neutral-100" : "border-neutral-700 bg-neutral-950 text-neutral-300 hover:border-neutral-500"}`}>{a}{a === "9:16" ? " (Shorts / Reels)" : a === "1:1" ? " (Feed)" : " (Landscape)"}</button>
+                  <legend className="text-sm font-medium text-neutral-100">Layout mode</legend>
+                  <div className="mt-2 flex flex-wrap gap-2" role="radiogroup" aria-label="Layout mode">
+                    {(["split", "pip", "zoom", "blur_fill", "fullscreen"] as const).map((m) => (
+                      <button key={m} type="button" role="radio" aria-checked={facecamLayout.mode === m} onClick={() => setFacecamLayout((prev) => ({ ...prev, mode: m as FacecamMode }))} className={`rounded-md border px-3 py-1.5 text-sm ${facecamLayout.mode === m ? "border-cyan-400 bg-cyan-400/10 text-neutral-100" : "border-neutral-700 bg-neutral-950 text-neutral-300 hover:border-neutral-500"}`}>
+                        {m === "split" ? "Split screen" : m === "pip" ? "Picture-in-picture" : m === "zoom" ? "Zoom + blur" : m === "blur_fill" ? "Blur fill" : "Fullscreen"}
+                      </button>
                     ))}
                   </div>
+                  <p className="mt-1 text-xs text-neutral-500">
+                    {facecamLayout.mode === "split" && "Facecam on top, gameplay below, glowing divider between them."}
+                    {facecamLayout.mode === "pip" && "Gameplay fills the frame; the facecam sits in a corner."}
+                    {facecamLayout.mode === "zoom" && "Gameplay zoomed over a blurred copy of the frame."}
+                    {facecamLayout.mode === "blur_fill" && "16:9 video over a blurred background — no facecam box used."}
+                    {facecamLayout.mode === "fullscreen" && "Gameplay fills the frame — no facecam box used."}
+                  </p>
                 </fieldset>
-                <p className="text-xs text-neutral-500">Preview only for now — these settings are not saved and are not sent to the renderer yet; there is no render step from Studio. Use them to preview the look, then create the clip from a job. Captions: {captionStyle} · Punch-in: {punchIn ? "on" : "off"} · Aspect: {aspect}.</p>
+                {facecamLayout.mode === "split" && (
+                  <label className="block text-sm">
+                    <span className="text-neutral-400">Facecam share of the height ({Math.round(facecamLayout.split_ratio * 100)}%)</span>
+                    <input type="range" min={0.2} max={0.8} step={0.05} value={facecamLayout.split_ratio} onChange={(e) => setFacecamLayout((prev) => ({ ...prev, split_ratio: Number(e.target.value) }))} className="mt-1 w-full accent-cyan-400" aria-label="Facecam share of the height" />
+                  </label>
+                )}
+                {facecamLayout.mode === "pip" && (
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="block text-sm">
+                      <span className="text-neutral-400">PiP corner</span>
+                      <select className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm" value={facecamLayout.pip_pos} onChange={(e) => setFacecamLayout((prev) => ({ ...prev, pip_pos: e.target.value as FacecamLayout["pip_pos"] }))} aria-label="PiP corner">
+                        <option value="top-right">Top right</option>
+                        <option value="top-left">Top left</option>
+                        <option value="bottom-left">Bottom left</option>
+                        <option value="bottom-right">Bottom right</option>
+                      </select>
+                    </label>
+                    <label className="block text-sm">
+                      <span className="text-neutral-400">PiP width ({Math.round(facecamLayout.pip_size_frac * 100)}% of frame)</span>
+                      <input type="range" min={0.1} max={0.6} step={0.05} value={facecamLayout.pip_size_frac} onChange={(e) => setFacecamLayout((prev) => ({ ...prev, pip_size_frac: Number(e.target.value) }))} className="mt-1 w-full accent-cyan-400" aria-label="PiP width" />
+                    </label>
+                  </div>
+                )}
+                {facecamLayout.mode === "split" && (
+                  <label className="flex items-start gap-3 text-sm">
+                    <input type="checkbox" className="mt-0.5 h-4 w-4 accent-cyan-400" checked={facecamLayout.divider} onChange={(e) => setFacecamLayout((prev) => ({ ...prev, divider: e.target.checked }))} />
+                    <span><span className="font-medium text-neutral-100">Glowing divider line</span><span className="mt-0.5 block text-xs text-neutral-400">Dark bar + cyan line between facecam and gameplay.</span></span>
+                  </label>
+                )}
+                <label className="block text-sm">
+                  <span className="text-neutral-400">Caption style (word-by-word, burned into the render)</span>
+                  <select className="mt-1 w-full max-w-xs rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm" value={captionStyle} onChange={(e) => setCaptionStyle(e.target.value)} aria-label="Caption style">
+                    <option value="none">No captions</option>
+                    {captionStyles.length > 0 ? captionStyles.map((s) => (
+                      <option key={s.id} value={s.id}>{s.label}{s.animated ? " (animated)" : ""}</option>
+                    )) : (
+                      <>
+                        <option value="bounce">Bounce (animated)</option>
+                        <option value="hormozi">Hormozi (Cyan Pop) (animated)</option>
+                        <option value="mrbeast">MrBeast (Yellow/Orange) (animated)</option>
+                        <option value="karaoke">Karaoke (Color Wipe) (animated)</option>
+                        <option value="hype">Hype (animated)</option>
+                        <option value="clean">Clean (animated)</option>
+                        <option value="bold-pop">Bold Pop</option>
+                        <option value="karaoke-fill">Karaoke Fill</option>
+                        <option value="boxed">Boxed</option>
+                      </>
+                    )}
+                  </select>
+                </label>
+                <p className="text-xs text-neutral-500">Caption words come from the transcript lines above, spaced evenly across each line — estimated timing, labelled as such in the render. For exact word timing, run a job (Whisper) instead.</p>
+
+                <fieldset className="rounded-lg border border-neutral-800 p-3">
+                  <legend className="px-1 text-sm font-medium text-neutral-100">Per-creator preset</legend>
+                  <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
+                    <label className="block text-sm">
+                      <span className="text-neutral-400">Creator</span>
+                      <input className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm" value={presetCreator} onChange={(e) => setPresetCreator(e.target.value)} aria-label="Creator name" />
+                    </label>
+                    <label className="block text-sm">
+                      <span className="text-neutral-400">Preset name</span>
+                      <input className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-sm" value={presetName} onChange={(e) => setPresetName(e.target.value)} placeholder="e.g. GTA facecam" aria-label="Preset name" />
+                    </label>
+                    <span className="self-end"><SecondaryButton onClick={onSavePreset}>Save preset</SecondaryButton></span>
+                  </div>
+                  {presetNames.length > 0 && (
+                    <ul className="mt-3 space-y-1">
+                      {presetNames.map((n) => (
+                        <li key={n} className="flex items-center gap-2 text-sm">
+                          <button type="button" onClick={() => onLoadPreset(n)} className="font-medium text-cyan-300 hover:underline">{n}</button>
+                          <span className="text-neutral-500">— load</span>
+                          <button type="button" onClick={() => onDeletePreset(n)} className="text-neutral-500 hover:text-red-300">delete</button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </fieldset>
+
+                <label className="flex items-start gap-3 text-sm">
+                  <input type="checkbox" className="mt-0.5 h-4 w-4 accent-amber-400" checked={ownContent} onChange={(e) => setOwnContent(e.target.checked)} />
+                  <span><span className="font-medium text-neutral-100">This is my own video (or I have the right to clip it)</span><span className="mt-0.5 block text-xs text-neutral-400">Needed for YouTube sources. You are responsible for the rights to what you post.</span></span>
+                </label>
+                <div className="flex flex-wrap items-center gap-2">
+                  <PrimaryButton onClick={onRenderFacecam} disabled={rendering}>{rendering ? "Rendering…" : `Render facecam clip (${fmtTime(clipStart)} – ${fmtTime(clipEnd)})`}</PrimaryButton>
+                  <span className="text-xs text-neutral-500">Renders the timeline range (max 5 min) with this layout + captions, 1080×1920.</span>
+                </div>
+                {renderError && <ErrorBanner message={renderError} onRetry={onRenderFacecam} />}
+                {renderResult && (
+                  <div className="space-y-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-3 text-sm">
+                    <p className="font-medium text-emerald-100">Rendered — {renderResult.render.width}×{renderResult.render.height} · {renderResult.render.duration_s.toFixed(1)} s · {renderResult.render.video_codec} · {(renderResult.render.size_bytes / 1024).toFixed(0)} KB</p>
+                    <video src={`${API_URL}${renderResult.media_url}`} controls className="aspect-[9/16] w-full max-w-[220px] rounded-lg bg-black" aria-label="Rendered facecam clip" />
+                    <p>
+                      <a className="text-cyan-300 hover:underline" href={`${API_URL}${renderResult.media_url}`} target="_blank" rel="noreferrer">Download the clip</a>
+                      {renderResult.ass_media_url && (<> · <a className="text-cyan-300 hover:underline" href={`${API_URL}${renderResult.ass_media_url}`} target="_blank" rel="noreferrer">Captions (.ass)</a></>)}
+                    </p>
+                  </div>
+                )}
               </div>
-            </details>
+            </div>
           </Card>
         </div>
 

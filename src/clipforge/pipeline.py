@@ -36,6 +36,7 @@ def run_pipeline(
     top_n: int = 3,
     caption_style: str = "bold-pop",
     blurred_background: bool = False,
+    facecam_layout: dict | None = None,
     transcript_text: str | None = None,
     transcribe_engine: str | None = None,
     use_llm: bool | None = None,
@@ -86,15 +87,19 @@ def run_pipeline(
     for i, cand in enumerate(candidates):
         entry: dict = {"rank": i + 1, "candidate": cand.to_dict()}
         try:
-            plan = compute_crop_path(
-                str(source.path),
-                source.duration_s,
-                source.width,
-                source.height,
-                start_s=cand.start_s,
-                end_s=cand.end_s,
-                blurred_background=blurred_background,
-            )
+            # A facecam layout defines its own crops (see render.py);
+            # the face-tracked plan is skipped for those runs.
+            plan = None
+            if facecam_layout is None:
+                plan = compute_crop_path(
+                    str(source.path),
+                    source.duration_s,
+                    source.width,
+                    source.height,
+                    start_s=cand.start_s,
+                    end_s=cand.end_s,
+                    blurred_background=blurred_background,
+                )
             result = render_clip(
                 source.path,
                 cand,
@@ -103,6 +108,7 @@ def run_pipeline(
                 words=transcript.words,
                 plan=plan,
                 blurred_background=blurred_background,
+                facecam=facecam_layout,
             )
             entry["render"] = result.to_dict()
             entry["status"] = "rendered"

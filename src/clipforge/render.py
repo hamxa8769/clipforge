@@ -20,6 +20,7 @@ import json
 import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from clipforge.broll import BrollOverlay, build_broll_filter
 from clipforge.captions import write_ass
@@ -28,6 +29,9 @@ from clipforge.job_control import JobControl, popen_kwargs, wait_for_process
 from clipforge.reframe import ReframePlan
 from clipforge.transcribe import Word
 from clipforge.workflow import ffmpeg_missing_message
+
+if TYPE_CHECKING:  # facecam.py imports TARGET_* from this module
+    from clipforge.facecam import FacecamLayout
 
 
 def _run(
@@ -236,6 +240,7 @@ def render_clip(
     ass_path: str | Path | None = None,
     loudness_lufs: float = TARGET_LUFS,
     broll: list[BrollOverlay] | None = None,
+    facecam: FacecamLayout | dict | None = None,
     control: JobControl | None = None,
 ) -> RenderResult:
     """Render one candidate to 1080x1920 MP4; returns verified result.
@@ -251,6 +256,16 @@ def render_clip(
     combined with ``blurred_background`` (the two modes both rebuild
     the frame). Each overlay must have a positive duration
     (``clip_end_s`` or ``source_end_s`` set).
+
+    ``facecam`` (v0.10.0, :mod:`clipforge.facecam`) renders the clip
+    with a Facecam Studio layout instead of the plain centre crop:
+    split-screen facecam/gameplay, corner PiP, zoom or blur fill.
+    The layout's boxes are normalised fractions of the source frame
+    and are converted to pixels from the probed source size; the
+    caption line moves onto the gameplay area for split / bottom-PiP
+    layouts. It cannot be combined with ``broll``,
+    ``blurred_background`` (use mode ``blur_fill`` instead) or a
+    face-tracked ``plan`` (the layout defines its own crops).
 
     ``control`` (v0.9.0 job queue): when the user cancels the job the
     ffmpeg process is killed mid-render and :class:`JobCancelled` is
@@ -287,14 +302,104 @@ def render_clip(
     else:
         src_w, src_h = plan.source_width, plan.source_height
 
+    # Facecam Studio layout (v0.10.0): local import — facecam.py
+    # imports TARGET_WIDTH/TARGET_HEIGHT from this module, so a
+    # top-level import would be circular.
+    facecam_layout = None
+    facecam_caption_y = None
+    if facecam is not None:
+        from clipforge.facecam import (
+            FacecamLayout,
+            build_facecam_filter,
+            layout_geometry,
+        )
+
+        facecam_layout = (
+            facecam
+            if isinstance(facecam, FacecamLayout)
+            else FacecamLayout.from_dict(facecam)
+        )
+        if broll:
+            raise RenderError("B-roll cannot be combined with a facecam layout")
+        if blurred_background:
+            raise RenderError(
+                "blurred_background cannot be combined with a facecam layout "
+                "(use facecam mode 'blur_fill' instead)"
+            )
+        if plan is not None:
+            raise RenderError(
+                "a facecam layout cannot be combined with a face-tracked "
+                "ReframePlan (the layout defines its own crops)"
+            )
+        facecam_caption_y = layout_geometry(facecam_layout, src_w, src_h).caption_y
+
     if ass_path is None and words:
         from clipforge.captions import clip_words
 
         clip_ws = clip_words(words, clip.start_s, clip.end_s)
         if clip_ws:
             ass_file = out.with_suffix(".ass")
-            write_ass(clip_ws, ass_file, style_name=style, start_offset_s=clip.start_s)
+            write_ass(
+                clip_ws,
+                ass_file,
+                style_name=style,
+                start_offset_s=clip.start_s,
+                caption_y=facecam_caption_y,
+            )
             ass_path = ass_file
+
+    if facecam_layout is not None:
+        # Facecam path: one filter-complex for the whole layout; the
+        # audio chain is appended here (the plain path uses -af).
+        video_filter, final_label = build_facecam_filter(
+            facecam_layout, src_w, src_h, str(ass_path) if ass_path else None
+        )
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-v",
+            "error",
+            "-ss",
+            f"{clip.start_s:.3f}",
+            "-t",
+            f"{duration:.3f}",
+            "-i",
+            str(source),
+            "-filter_complex",
+            video_filter
+            + f";[0:a]loudnorm=I={loudness_lufs}:TP=-1.5:LRA=11[aout]",
+            "-map",
+            f"[{final_label}]",
+            "-map",
+            "[aout]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+            str(out),
+        ]
+        proc = _run(cmd, timeout=3600, tool="ffmpeg", control=control)
+        if proc.returncode != 0:
+            raise RenderError(
+                f"ffmpeg facecam render failed for {out}: {proc.stderr.strip()[-800:]}"
+            )
+        if not out.exists() or out.stat().st_size == 0:
+            raise RenderError(f"ffmpeg produced no output at {out}")
+        result = ffprobe_verify(out, control=control)
+        if abs(result.duration_s - duration) > 1.5:
+            raise RenderError(
+                f"rendered duration {result.duration_s:.2f}s differs from "
+                f"requested {duration:.2f}s by more than 1.5s"
+            )
+        return result
 
     video_filter = build_filter(
         plan,

@@ -329,6 +329,49 @@ Multipart upload (`.mp4` / `.mov`, up to 10 GiB) with the same
 fields as `POST /jobs`. Creates the job in `pending`; run it with
 `POST /jobs/{id}/run`.
 
+### Facecam Studio (v0.10.0)
+
+- `GET /facecam/styles` → `{caption_styles: [{id, label, animated,
+  fontsize}], layout_modes: [{id, label}], pip_positions: [...]}`.
+  Animated caption styles: `bounce`, `hormozi`, `mrbeast`, `karaoke`,
+  `hype`, `clean`. Classic styles (`bold-pop`, `karaoke-fill`,
+  `boxed`) are listed too.
+- `GET /facecam/presets?creator=default` →
+  `{creator, presets: {name: layout}}`; `GET /facecam/presets?all=true`
+  lists every creator. `POST /facecam/presets` → `201`
+  `{creator, name, layout}` (save/overwrite). `DELETE
+  /facecam/presets/{creator}/{name}` → `200` or `404`. Preset names
+  are 1–64 chars, letters/digits/space/`_`/`-`/`.`. Stored in
+  `<data_dir>/facecam_presets.json`.
+- `POST /jobs` accepts `facecam_layout` (a layout object, see below):
+  the job runs through the normal queue and renders every candidate
+  with that layout instead of the centre crop. Invalid layouts are
+  **422** at creation.
+- `POST /facecam/render` → `201`: one-shot Studio render of one clip
+  range (max 300 s) with a layout + caption style, through the same
+  `render_clip` the queue uses. Body: `{source_path | source_url,
+  own_content_declaration, start_s, end_s, layout, caption_style,
+  words: [{text, start, end}]}`. `source_path` must be inside the data
+  dir; `source_url` is a direct `.mp4`/`.mov` URL (downloaded, 10 GiB
+  cap) or a YouTube URL (downloaded with `own_content_declaration`).
+  → `{file, filename, media_url, ass_file, ass_media_url, layout,
+  caption_style, render: {width, height, duration_s, video_codec,
+  size_bytes}}`. The render is verified 1080×1920 by ffprobe.
+- `GET /facecam/media/{filename}` serves a rendered facecam clip
+  (`.mp4`/`.mov`) or its captions (`.ass`).
+
+A layout object: `{mode, facecam: {x, y, w, h}, gameplay: {x, y, w,
+h}, split_ratio, pip_pos, pip_size_frac, divider, caption_y}`.
+Boxes are fractions of the source frame (0..1). Modes: `split`
+(facecam top / gameplay bottom, `split_ratio` 0.20–0.80 of the
+height, glowing divider), `pip` (gameplay full screen, facecam in a
+corner: `pip_pos` top/bottom-left/right, `pip_size_frac` 0.10–0.60 of
+the width), `zoom` (gameplay zoomed over a blurred background),
+`blur_fill` (16:9 over a blurred background), `fullscreen` (gameplay
+fills the frame, no facecam). `caption_y` (px in the 1080×1920
+output) overrides the layout's default caption line (split: on the
+gameplay half; bottom-PiP: above the PiP).
+
 ### `POST /jobs/{id}/run` · `POST /jobs/{id}/retry` · `POST /jobs/{id}/cancel`
 
 - `run`: run a pending/queued job synchronously (200, job detail).
