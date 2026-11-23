@@ -488,6 +488,7 @@ def _run_stages(
                 out_dir=data / "uploads",
                 data_dir=data,
                 control=control,
+                job_id=job.id,
             )
         elif job.source_type == "live":
             # Live capture (v0.7.0): record a bounded segment of the

@@ -87,6 +87,23 @@ def plain_error(exc: BaseException, stage: str | None = None) -> dict:
             "code": "live_capture_failed",
         }
     if isinstance(exc, IngestError):
+        from clipforge.ingest import looks_like_download_lock  # noqa: PLC0415
+
+        if looks_like_download_lock(str(exc)):
+            # v0.9.2: a download that died on a Windows file lock
+            # (usually antivirus real-time scanning holding a fragment).
+            # The message itself is already plain language; give it the
+            # specific title and the exclusion fix as the action.
+            return {
+                "title": "The download was blocked by a file lock",
+                "message": sanitize_error_message(str(exc)),
+                "action": (
+                    "Add the ClipForge data folder to your antivirus "
+                    "exclusions (Windows Security > Virus & threat protection "
+                    "> Exclusions), then retry the job."
+                ),
+                "code": "download_file_lock",
+            }
         return {
             "title": "Could not use this video",
             "message": sanitize_error_message(str(exc)),

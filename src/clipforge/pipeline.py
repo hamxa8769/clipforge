@@ -67,6 +67,7 @@ def run_pipeline(
             youtube_url,
             own_content=own_content,
             out_dir=data / "uploads",
+            job_id=job_id,
         )
     else:
         source = ingest_local(str(source_path))
