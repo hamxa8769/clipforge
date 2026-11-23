@@ -171,15 +171,23 @@ def test_public_view_caches_tool_probes_within_ttl(
     def _ffmpeg(*_args: object, **_kwargs: object) -> dict:
         calls["ffmpeg"] += 1
         return {
-            "found": True, "path": "/usr/bin/ffmpeg", "version": "ffmpeg version 8.1.2",
-            "broken": False, "broken_reason": "", "source": "PATH",
+            "found": True,
+            "path": "/usr/bin/ffmpeg",
+            "version": "ffmpeg version 8.1.2",
+            "broken": False,
+            "broken_reason": "",
+            "source": "PATH",
         }
 
     def _yt_dlp(*_args: object, **_kwargs: object) -> dict:
         calls["yt_dlp"] += 1
         return {
-            "found": True, "path": "/usr/bin/yt-dlp", "version": "2026.10.26",
-            "broken": False, "broken_reason": "", "source": "PATH",
+            "found": True,
+            "path": "/usr/bin/yt-dlp",
+            "version": "2026.10.26",
+            "broken": False,
+            "broken_reason": "",
+            "source": "PATH",
         }
 
     monkeypatch.setattr(settings_module, "probe_ffmpeg", _ffmpeg)
@@ -206,8 +214,12 @@ def test_set_ffmpeg_path_invalidates_tool_probe_cache(
     def _ffmpeg(*_args: object, **_kwargs: object) -> dict:
         calls["n"] += 1
         return {
-            "found": False, "path": "", "version": "",
-            "broken": False, "broken_reason": "", "source": "",
+            "found": False,
+            "path": "",
+            "version": "",
+            "broken": False,
+            "broken_reason": "",
+            "source": "",
         }
 
     monkeypatch.setattr(settings_module, "probe_ffmpeg", _ffmpeg)

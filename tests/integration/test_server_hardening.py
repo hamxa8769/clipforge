@@ -162,7 +162,6 @@ def test_launcher_runs_uvicorn_as_one_explicit_worker(
     so a second worker would be a second queue and a second writer.
     """
     import uvicorn  # noqa: PLC0415
-
     from clipforge_api.__main__ import main  # noqa: PLC0415
 
     calls: dict = {}
@@ -187,7 +186,6 @@ def test_bind_failure_exits_2_with_plain_message(
     "Address already in use" text the Rust shell extracts from the
     log — instead of a bare traceback."""
     import uvicorn  # noqa: PLC0415
-
     from clipforge_api.__main__ import main  # noqa: PLC0415
 
     def _fake_run(*args, **kwargs) -> None:  # noqa: ANN001, ANN002

@@ -542,6 +542,7 @@ async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSON
         },
     )
 
+
 # --- v0.5.0 worker 3: setup-wizard state router (NEW FILE
 # apps/api/clipforge_api/setup.py — GET/POST /api/setup/state only).
 # It owns its own setup.json; it does NOT touch the agent engine or the
