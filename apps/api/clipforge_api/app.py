@@ -72,11 +72,14 @@ Run:  PYTHONPATH=src uvicorn clipforge_api.app:app --port 8000
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 # Make `src/clipforge/...` importable whether uvicorn is launched from
 # apps/api, from the repo root, or from anywhere else.
@@ -958,11 +961,13 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)):
     # v0.9.0 auto-run: enqueue at once (user priority). Best-effort —
     # a queue failure must never turn a successful creation into a
     # 500; the job stays pending and POST /jobs/{id}/run starts it.
+    # The failure is still logged: a silent swallow here left every
+    # job ``pending`` forever with no error anywhere (v0.9.1 DB split).
     try:
         get_job_queue().enqueue(db, job.id, priority=1)
         db.refresh(job)
     except Exception:
-        pass
+        _log.exception("auto-enqueue failed for job %s", job.id)
     return _job_out(job, db)
 
 
@@ -1012,11 +1017,13 @@ async def upload_job(
     db.add(job)
     db.commit()
     # v0.9.0 auto-run (same as POST /jobs) — best-effort, never a 500.
+    # The failure is still logged (see POST /jobs: silent swallowing
+    # left jobs ``pending`` forever with no error anywhere, v0.9.1).
     try:
         get_job_queue().enqueue(db, job.id, priority=1)
         db.refresh(job)
     except Exception:
-        pass
+        _log.exception("auto-enqueue failed for job %s", job.id)
     return _job_out(job, db)
 
 
