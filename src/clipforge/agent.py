@@ -613,6 +613,13 @@ class Agent:
         )
         session.add(job)
         session.commit()
+        # The run's job is visible from the moment it exists — the
+        # Agent page (and GET /api/agent/status) shows the current job
+        # while the pipeline runs, and still names it when the run
+        # dies inside the pipeline (previously current_job was only
+        # set after _process_source returned, so a run that failed in
+        # ingest/transcribe showed no job at all).
+        self._set_state(current_job=job.id)
         summary = run_job(session, job.id)
         session.refresh(job)
         if job.status in {JobStatus.BLOCKED.value, JobStatus.FAILED.value}:
