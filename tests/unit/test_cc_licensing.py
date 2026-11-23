@@ -121,17 +121,20 @@ def test_append_attribution_replaces_stale_block_on_licence_change():
     assert old not in updated
 
 
-def test_publish_blocked_reason_only_for_standard_licence():
-    assert publish_blocked_reason("standard") is not None
-    assert "Standard licence" in publish_blocked_reason("standard")
-    assert publish_blocked_reason("cc-by-4.0") is None
-    assert publish_blocked_reason("cc0") is None
-    assert publish_blocked_reason("public-domain") is None
-    assert publish_blocked_reason(None) is None  # unrecorded (own/local) passes
-    assert publish_blocked_reason("standard", own_content=True) is None
+def test_publish_blocked_reason_never_blocks_since_v091_advisory():
+    """v0.9.1: the licence hard block was removed — no licence value
+    blocks publishing any more. publish_blocked_reason is kept for
+    compatibility and always returns None."""
+    for licence in ("standard", "cc-by-4.0", "cc0", "public-domain", None, "some weird licence"):
+        assert publish_blocked_reason(licence) is None
+        assert publish_blocked_reason(licence, own_content=True) is None
 
 
-def test_is_lawful_source():
+def test_is_lawful_source_is_a_classifier_not_a_gate():
+    """v0.9.1: is_lawful_source still classifies own / public-domain /
+    CC sources, but it gates nothing — a False result must never
+    refuse a run, clip, schedule or publish (see
+    test_publish_blocked_reason_never_blocks_since_v091_advisory)."""
     assert is_lawful_source("cc-by-4.0")
     assert is_lawful_source("public-domain")
     assert is_lawful_source(None, own_content=True)

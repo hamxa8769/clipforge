@@ -169,9 +169,10 @@ def test_live_with_saved_key_returns_live_streams(monkeypatch):
     assert cc["started_at"] == "2026-11-21T09:30:00Z"
     assert std["video_id"] == LIVE_ID_STD
     assert std["licence"] == "youtube"
-    assert std["can_clip"] is False
-    assert "cannot clip" in std["clip_reason"].lower()
-    assert "Creative Commons" in body["notice"]
+    # v0.9.1 advisory: the standard-licence stream is reported, never refused.
+    assert std["can_clip"] is True
+    assert "You are responsible for the rights" in std["clip_reason"]
+    assert "You are responsible for the rights" in body["notice"]
 
 
 def test_live_licensed_only_passes_video_license(monkeypatch):
@@ -219,19 +220,24 @@ def test_capture_rejects_bad_duration(monkeypatch):
     assert resp.status_code == 422  # pydantic: 60–300s only
 
 
-def test_capture_standard_licence_third_party_is_refused(monkeypatch):
-    """GUARDRAIL: a standard-licence live stream by another creator
-    is refused at the endpoint — the licence is re-verified live,
-    never trusted from the request body."""
+def test_capture_standard_licence_third_party_proceeds(monkeypatch):
+    """v0.9.1 ADVISORY: a standard-licence live stream by another
+    creator is captured — the licence is re-verified live for an
+    accurate record, but the verdict never blocks capture."""
     _save_api_key()
     fake = _fake_youtube_client()
     monkeypatch.setattr(trending_router.httpx, "Client", lambda **kwargs: fake)
+    monkeypatch.setattr(trending_router, "worker_run_job", _fake_worker_run)
     resp = client.post(
         "/api/trending/live/capture",
         json={"video_url": LIVE_URL_STD, "duration_s": 120, "rights_confirmed": True},
     )
-    assert resp.status_code == 422
-    assert "cannot be re-uploaded" in resp.json()["detail"].lower()
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["video_id"] == LIVE_ID_STD
+    assert body["licence"] == "youtube"
+    assert body["is_own"] is False
 
 
 def test_capture_cc_live_starts_live_job(monkeypatch):

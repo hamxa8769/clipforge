@@ -1,5 +1,8 @@
 """Integration tests for the v0.7.0 CC pipeline API: thumbnails, attribution,
-licence records, and the publish refusal for Standard-licence sources.
+licence records — advisory since v0.9.1 (the Standard-licence publish
+refusal was removed at the user's explicit instruction after they
+checked YouTube's terms; any licence proceeds, the rights notice is
+shown instead, and CC sources still get their attribution block).
 
 Endpoints / fields under test (see ``clipforge.licensing`` for the shared
 field names):
@@ -9,7 +12,7 @@ field names):
   POST /clips/{id}/thumbnail/select
   GET  /media/thumbnails/{job_id}/{filename}
   POST /posts | GET /posts (licence record on the approval-queue item)
-  POST /posts/{id}/publish (refuses Standard-licence sources, 409)
+  POST /posts/{id}/publish (dry-run publish, any licence)
 """
 
 from __future__ import annotations
@@ -137,8 +140,8 @@ def _delete_post(post_id: str) -> None:
 
 
 def _seed_post(candidate_id: str, status: str = "approved", **overrides) -> str:
-    """Seed a Post directly (bypasses the create-post licence gate — this
-    is how a pre-existing / slipped-through post is simulated)."""
+    """Seed a Post directly (bypasses the API — this is how a
+    pre-existing post is simulated)."""
     session = get_session()
     try:
         post = Post(
@@ -182,7 +185,9 @@ def test_create_youtube_job_with_cc_licence_needs_no_declaration():
     assert body["attribution_text"] == CREDIT
 
 
-def test_create_youtube_job_with_standard_licence_refused():
+def test_create_youtube_job_with_standard_licence_proceeds():
+    """v0.9.1 ADVISORY: a standard-licence source proceeds — the licence
+    is recorded, never a refusal."""
     res = client.post(
         "/jobs",
         json={
@@ -193,16 +198,19 @@ def test_create_youtube_job_with_standard_licence_refused():
             "own_content_declaration": True,
         },
     )
-    assert res.status_code == 422
-    assert "Standard licence" in res.text
+    assert res.status_code == 201, res.text
+    assert res.json()["source_license"] == "standard"
 
 
-def test_create_youtube_job_without_declaration_or_licence_refused():
+def test_create_youtube_job_without_declaration_or_licence_proceeds():
+    """v0.9.1 ADVISORY: a YouTube job with no declaration and no
+    licence proceeds too — the rights notice is shown in the UI
+    instead of a 422."""
     res = client.post(
         "/jobs",
         json={"source_type": "youtube", "source_url": CC_URL, "title": "No rights"},
     )
-    assert res.status_code == 422
+    assert res.status_code == 201, res.text
 
 
 # ------------------------------------------------- candidates + attribution
@@ -339,23 +347,31 @@ def test_approval_queue_post_displays_licence_record():
     _delete_post(post["id"])
 
 
-def test_create_post_refuses_standard_licence_source():
+def test_create_post_accepts_standard_licence_source():
+    """v0.9.1 ADVISORY: post creation no longer refuses a
+    standard-licence source — the licence record travels onto the post."""
     job_id = _seed_job(source_license="standard")
     cand_id = _seed_candidate(job_id, status="approved", source_license="standard")
     res = client.post("/posts", json={"clip_candidate_id": cand_id, "platform": "youtube"})
-    assert res.status_code == 409
-    assert "Standard licence" in res.text
+    assert res.status_code == 201, res.text
+    assert res.json()["source_license"] == "standard"
+    _delete_post(res.json()["id"])
 
 
-def test_publish_refuses_standard_licence_even_if_post_exists():
+def test_publish_standard_licence_dry_run_succeeds():
+    """v0.9.1 ADVISORY: publishing a standard-licence post (dry-run)
+    proceeds — no 409, and the post lands in dry_run like a CC post."""
     job_id = _seed_job(source_license="standard")
     cand_id = _seed_candidate(job_id, status="approved", source_license="standard")
-    post_id = _seed_post(cand_id, status="approved", source_license="standard")
+    post_id = _seed_post(
+        cand_id,
+        status="approved",
+        source_license="standard",
+        video_path="/tmp/clipforge-test-clip.mp4",
+    )
     res = client.post(f"/posts/{post_id}/publish", params={"dry_run": True})
-    assert res.status_code == 409
-    assert "Standard licence" in res.text
-    # The post was NOT published and NOT failed — it stays approved.
-    assert client.get(f"/posts/{post_id}").json()["status"] == "approved"
+    assert res.status_code == 200, res.text
+    assert res.json()["status"] == "dry_run"
     _delete_post(post_id)
 
 
@@ -383,7 +399,10 @@ def test_publish_cc_clip_dry_run_succeeds_with_credit():
     _delete_post(post_id)
 
 
-def test_scheduler_skips_standard_licence_post():
+def test_scheduler_publishes_standard_licence_post():
+    """v0.9.1 ADVISORY: the scheduler no longer skips standard-licence
+    posts — a due standard-licence post publishes (dry-run) like any
+    other, with no ``skipped_licence`` result."""
     from datetime import UTC, datetime, timedelta
 
     job_id = _seed_job(source_license="standard")
@@ -393,6 +412,7 @@ def test_scheduler_skips_standard_licence_post():
         status="scheduled",
         source_license="standard",
         scheduled_for=datetime.now(UTC) - timedelta(minutes=1),
+        video_path="/tmp/clipforge-test-clip.mp4",
     )
     session = get_session()
     try:
@@ -400,6 +420,6 @@ def test_scheduler_skips_standard_licence_post():
     finally:
         session.close()
     mine = [r for r in results if r["post_id"] == post_id]
-    assert mine and mine[0]["status"] == "skipped_licence"
-    assert client.get(f"/posts/{post_id}").json()["status"] == "scheduled"
+    assert mine and mine[0]["status"] != "skipped_licence"
+    assert client.get(f"/posts/{post_id}").json()["status"] == "dry_run"
     _delete_post(post_id)

@@ -27,6 +27,7 @@ from clipforge.auth.secrets import SecretStore
 from clipforge.auth.token_store import TokenRecord, TokenStore
 from clipforge.db import Job, JobStatus, init_db, session_factory
 from clipforge.ingest import SourceInfo
+from clipforge.licensing import RIGHTS_ADVISORY
 from clipforge.live import (
     LIVE_DEFAULT_DURATION_S,
     LiveCaptureCancelled,
@@ -106,22 +107,28 @@ def test_clip_decision_cc_live_clippable():
     assert "Creative Commons" in reason
 
 
-def test_clip_decision_standard_third_party_refused_plainly():
+def test_clip_decision_standard_third_party_is_advisory():
+    """v0.9.1: a standard-licence live stream is reported (licence +
+    rights notice) and proceeds — never refused."""
     can_clip, reason = clip_decision("youtube", is_own=False)
-    assert can_clip is False
+    assert can_clip is True
     assert "standard" in reason.lower()
-    assert "cannot clip" in reason.lower()
+    assert RIGHTS_ADVISORY in reason
 
 
-def test_clip_decision_unknown_licence_refused():
+def test_clip_decision_unknown_licence_is_advisory():
+    """v0.9.1: an unconfirmed licence is reported, never refused."""
     can_clip, reason = clip_decision("unknown", is_own=False)
-    assert can_clip is False
+    assert can_clip is True
     assert "could not be confirmed" in reason
+    assert RIGHTS_ADVISORY in reason
 
 
-def test_check_can_clip_raises_plain_message():
-    with pytest.raises(LiveCaptureError, match="cannot clip"):
-        check_can_clip("youtube", False)
+def test_check_can_clip_never_raises_for_a_licence():
+    """v0.9.1: the licence is advisory — check_can_clip never raises
+    for any licence value."""
+    check_can_clip("youtube", False)  # standard third-party: no raise
+    check_can_clip("unknown", False)  # unconfirmed: no raise
     check_can_clip("creativeCommon", False)  # no raise
     check_can_clip("youtube", True)  # own: no raise
 
@@ -242,7 +249,7 @@ def _oauth_creds():
 
 
 # ------------------------------------------------------------------ live discovery
-def test_search_live_marks_cc_clippable_and_standard_not():
+def test_search_live_marks_cc_and_standard_both_clippable_advisory():
     client = _fake_live_client()
     results = search_live("gaming", credentials=_api_key_creds(), client=client)
     assert len(results) == 2
@@ -253,9 +260,10 @@ def test_search_live_marks_cc_clippable_and_standard_not():
     assert cc.viewers == 1234
     assert cc.started_at == "2026-11-21T09:30:00Z"
     assert cc.url == LIVE_URL_CC
-    assert std.can_clip is False
+    # v0.9.1: the standard-licence stream is reported, never refused.
+    assert std.can_clip is True
     assert std.licence == "youtube"
-    assert "cannot clip" in std.clip_reason.lower()
+    assert RIGHTS_ADVISORY in std.clip_reason
 
 
 def test_search_live_uses_event_type_live():
@@ -380,12 +388,13 @@ def test_verify_live_video_cc_is_clippable():
     assert video.can_clip is True
 
 
-def test_verify_live_video_standard_third_party_is_not():
+def test_verify_live_video_standard_third_party_is_advisory():
+    """v0.9.1: verification reports the licence; it never refuses."""
     client = _fake_live_client()
     video = verify_live_video(LIVE_ID_STD, credentials=_api_key_creds(), client=client)
-    assert video.can_clip is False
+    assert video.can_clip is True
     assert "standard" in video.clip_reason.lower()
-    assert "cannot be re-uploaded" in video.clip_reason.lower()
+    assert RIGHTS_ADVISORY in video.clip_reason
 
 
 def test_verify_live_video_missing_video_is_plain_error():
@@ -683,12 +692,15 @@ def test_worker_live_capture_cancel_is_cancelled_not_failed(_worker_env, monkeyp
         session.close()
 
 
-def test_worker_live_standard_licence_never_captured(_worker_env, monkeypatch):
-    """Defence in depth: a standard-licence third-party job fails
-    before capture is even attempted, whatever the job row claims."""
+def test_worker_live_standard_licence_is_captured_advisory(_worker_env, monkeypatch):
+    """v0.9.1 ADVISORY: a standard-licence third-party live job proceeds
+    to capture — the worker's licence re-check was removed at the user's
+    explicit instruction after they checked YouTube's terms."""
     from clipforge import worker as worker_mod  # noqa: PLC0415
+    from clipforge.ingest import validate_local_file  # noqa: PLC0415
 
     tmp_path = _worker_env
+    assert FIXTURE_MP4.exists(), "recorded-video fixture missing"
     session = session_factory()()
     job = _live_job(
         session,
@@ -700,15 +712,15 @@ def test_worker_live_standard_licence_never_captured(_worker_env, monkeypatch):
 
     def _capture(*args, **kwargs):
         called["n"] += 1
-        raise AssertionError("capture must not run for a standard-licence stream")
+        return validate_local_file(FIXTURE_MP4)
 
     monkeypatch.setattr(worker_mod, "capture_live_stream", _capture)
     try:
         summary = worker_mod.run_job(session, job.id, data_dir=tmp_path / "data")
-        assert summary["status"] == JobStatus.FAILED.value
-        assert called["n"] == 0
+        assert summary["status"] in {JobStatus.REVIEW.value, JobStatus.READY.value}, summary
+        assert called["n"] == 1
         refreshed = session.get(Job, job.id)
-        assert "cannot clip" in (refreshed.error or "").lower()
+        assert refreshed.error is None
     finally:
         session.close()
 

@@ -64,7 +64,6 @@ from clipforge.live import (
     LiveCaptureCancelled,
     LiveCaptureError,
     capture_live_stream,
-    check_can_clip,
     clear_live_cancel,
     live_cancel_event,
 )
@@ -493,10 +492,11 @@ def _run_stages(
         elif job.source_type == "live":
             # Live capture (v0.7.0): record a bounded segment of the
             # live stream, then the normal stages run on the recording.
-            # The licence was verified by the capture endpoint, but the
-            # worker re-checks the stored meta — a standard-licence
-            # third-party stream is never captured, whatever the job
-            # row claims.
+            # Advisory since v0.9.1: the licence stored in the job meta
+            # is reported, never enforced — the v0.7.0 re-check that
+            # failed standard-licence / unknown-licence live jobs
+            # (``live_not_clippable``) was removed at the user's
+            # explicit instruction after they checked YouTube's terms.
             require_tool(
                 "yt-dlp",
                 "yt-dlp records the live stream",
@@ -505,17 +505,6 @@ def _run_stages(
                 "file upload.",
             )
             live_meta = dict(job.meta_json or {})
-            try:
-                check_can_clip(
-                    str(live_meta.get("live_licence") or "unknown"),
-                    bool(live_meta.get("live_is_own")),
-                )
-            except LiveCaptureError as exc:
-                tracker.fail("ingest", str(exc), error_code="live_not_clippable")
-                job.status = JobStatus.FAILED.value
-                job.error = str(exc)
-                session.commit()
-                raise
             duration = int(live_meta.get("live_duration_s") or LIVE_DEFAULT_DURATION_S)
             last_pct = {"value": -1.0}
 

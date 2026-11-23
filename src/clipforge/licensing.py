@@ -1,8 +1,8 @@
-"""Source-licence record for the lawful CC / public-domain pipeline (v0.7.0).
+"""Source-licence record (v0.7.0) — advisory since v0.9.1.
 
-Shared field names (Worker A licence detection + Worker B thumbnail /
-attribution + web UI all use exactly these — do not rename without
-updating every consumer):
+Shared field names (licence detection + thumbnail / attribution + web
+UI all use exactly these — do not rename without updating every
+consumer):
 
   ``source_license``   canonical licence key, see :data:`CC_LICENSES` /
                        :data:`STANDARD_LICENSE` (``None`` = unknown / not
@@ -13,15 +13,23 @@ updating every consumer):
   ``attribution_text`` the credit block appended to every generated
                        description (built by :func:`build_attribution_text`)
 
-Rules:
-- Only Creative Commons, CC0, public-domain and own content may be
-  clipped and posted. A third-party video under the YouTube Standard
-  licence must NEVER be published — :func:`publish_blocked_reason`
-  is the defence-in-depth check the publish path calls even if the
-  agent / job-creation checks were bypassed.
-- Attribution is built into SEO generation (see :mod:`clipforge.seo`),
-  never pasted by hand, and :func:`append_attribution` is idempotent:
-  re-running SEO keeps exactly one credit block, never two.
+Licence model (v0.9.1, advisory): the licence is REPORTED, never
+enforced. The v0.7.0 hard block — refusing standard-licence or
+unknown-licence sources with a 409 / ``skipped_licence`` — was
+removed at the user's explicit instruction (2026-11-23) after they
+checked YouTube's terms and confirmed clipping is officially allowed.
+Any pasted video link proceeds through the pipeline; the UI shows the
+non-blocking rights notice (:data:`RIGHTS_ADVISORY`) where the link is
+entered and before publishing, and the user is responsible for the
+rights to what they post. ClipForge does not guarantee rights
+clearance. Where the licence is known to be Creative Commons,
+:func:`build_attribution_text` still auto-adds the CC-BY credit block
+(idempotent, as in v0.7.0).
+
+:func:`publish_blocked_reason` is kept for backward compatibility and
+always returns ``None`` now; :func:`is_lawful_source` is kept as a
+pure classifier (own / public-domain / CC) and no longer gates
+anything.
 """
 
 from __future__ import annotations
@@ -29,7 +37,7 @@ from __future__ import annotations
 import re
 
 # Canonical licence keys. ``own`` = the user's own video; ``standard`` =
-# the YouTube Standard licence (third-party, NOT publishable).
+# the YouTube Standard licence (reported, never blocking since v0.9.1).
 STANDARD_LICENSE = "standard"
 OWN_LICENSE = "own"
 PUBLIC_DOMAIN_LICENSE = "public-domain"
@@ -155,7 +163,12 @@ def is_creative_commons(license_key: str | None) -> bool:
 
 
 def is_lawful_source(license_key: str | None, own_content: bool = False) -> bool:
-    """True when the source may be clipped: own, public-domain, or any CC."""
+    """Classifier only (v0.9.1: advisory — this no longer gates anything).
+
+    True when the source is own, public-domain, or any CC licence.
+    Kept so callers can still describe a source's licence; a ``False``
+    result must never refuse a run, clip, schedule or publish.
+    """
     if own_content:
         return True
     if license_key in (OWN_LICENSE, PUBLIC_DOMAIN_LICENSE):
@@ -163,23 +176,26 @@ def is_lawful_source(license_key: str | None, own_content: bool = False) -> bool
     return is_creative_commons(license_key)
 
 
-def publish_blocked_reason(license_key: str | None, own_content: bool = False) -> str | None:
-    """Plain-language refusal reason, or ``None`` when publishing is allowed.
+#: Non-blocking rights notice (v0.9.1, advisory). Shown where a video
+#: link is entered and before publishing. ClipForge does not guarantee
+#: rights clearance — the user is responsible for the rights to what
+#: they post.
+RIGHTS_ADVISORY = (
+    "Make sure you have the right to use this video — your own video, "
+    "a licensed video, or a use YouTube permits. You are responsible "
+    "for the rights to what you post."
+)
 
-    Only an explicitly recorded Standard-licence third-party source is
-    refused here. An unrecorded licence (``None``) is allowed through —
-    local own-content jobs never record one — because the job-creation
-    gate (YouTube ingest requires a declaration or a lawful licence)
-    is what keeps unknown YouTube sources out in the first place.
+
+def publish_blocked_reason(license_key: str | None, own_content: bool = False) -> str | None:
+    """Kept for backward compatibility — always ``None`` since v0.9.1.
+
+    The v0.7.0 hard block (refusing Standard-licence sources) was
+    removed at the user's explicit instruction after they checked
+    YouTube's terms. No licence value blocks publishing any more; the
+    licence is reported and the advisory notice
+    (:data:`RIGHTS_ADVISORY`) is shown instead.
     """
-    if own_content:
-        return None
-    if normalize_license(license_key) == STANDARD_LICENSE:
-        return (
-            "This clip comes from a video under the YouTube Standard licence, "
-            "so ClipForge cannot publish it. Only your own videos, public-domain "
-            "videos, or Creative Commons videos may be posted."
-        )
     return None
 
 
@@ -215,7 +231,8 @@ def build_attribution_text(
 
     Public-domain sources get the same block without a licence URL.
     Own content and Standard-licence sources get no block (own content
-    needs no credit; Standard-licence content must never be posted).
+    needs no credit; a Standard-licence source carries no CC licence
+    to credit — the licence is advisory since v0.9.1, not a block).
     """
     key = normalize_license(source_license)
     if key is None or key in (OWN_LICENSE, STANDARD_LICENSE):
@@ -320,6 +337,7 @@ __all__ = [
     "PUBLIC_DOMAIN_LICENSE",
     "CC_LICENSES",
     "KNOWN_LICENSES",
+    "RIGHTS_ADVISORY",
     "SOURCE_LICENSE_FIELDS",
     "normalize_license",
     "is_creative_commons",

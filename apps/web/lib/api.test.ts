@@ -48,6 +48,7 @@ import {
   jobSourceLicense,
   licenseBadgeLabel,
   deriveCanClip,
+  RIGHTS_ADVISORY,
   attributionForClip,
   normalizeWorkerQueue,
   normalizeNotifications,
@@ -743,16 +744,28 @@ test("licenseBadgeLabel names each licence in plain language", () => {
   assert.equal(licenseBadgeLabel("unknown"), "Licence unknown");
 });
 
-test("deriveCanClip allows own + CC and fails closed otherwise", () => {
+test("RIGHTS_ADVISORY is the non-blocking rights notice shown in the UI", () => {
+  assert.match(RIGHTS_ADVISORY, /Make sure you have the right to use this video/);
+  assert.match(RIGHTS_ADVISORY, /You are responsible for the rights to what you post/);
+  // The notice never claims the app guarantees rights clearance.
+  assert.doesNotMatch(RIGHTS_ADVISORY, /guarantee/i);
+  // Standard and unknown licences carry the notice in their reason.
+  assert.match(deriveCanClip("standard", null).reason, /You are responsible for the rights/);
+  assert.match(deriveCanClip("unknown", null).reason, /You are responsible for the rights/);
+});
+
+test("deriveCanClip is advisory since v0.9.1 — every licence can clip", () => {
   assert.equal(deriveCanClip("cc", null).canClip, true);
   assert.equal(deriveCanClip("own", null).canClip, true);
-  assert.equal(deriveCanClip("standard", null).canClip, false);
-  assert.equal(deriveCanClip("unknown", null).canClip, false);
-  // The API verdict wins over the derived one.
-  assert.equal(deriveCanClip("cc", false).canClip, false);
+  assert.equal(deriveCanClip("standard", null).canClip, true);
+  assert.equal(deriveCanClip("unknown", null).canClip, true);
+  // The API verdict no longer refuses either: a stale can_clip=false
+  // from an older server must not block the video.
+  assert.equal(deriveCanClip("cc", false).canClip, true);
   assert.equal(deriveCanClip("standard", true).canClip, true);
   assert.match(deriveCanClip("standard", null).reason, /Standard YouTube licence/);
-  assert.match(deriveCanClip("unknown", null).reason, /No licence information/);
+  assert.match(deriveCanClip("standard", null).reason, /You are responsible for the rights/);
+  assert.match(deriveCanClip("unknown", null).reason, /No licence information reported/);
 });
 
 test("normalizeTrendingVideo carries licence, verdict and live fields", () => {
@@ -767,19 +780,22 @@ test("normalizeTrendingVideo carries licence, verdict and live fields", () => {
 
   const std = normalizeTrendingVideo({ video_id: "std1", title: "Hit song", license: "youtube" });
   assert.equal(std?.license, "standard");
-  assert.equal(std?.can_clip, false);
+  // v0.9.1 advisory: a standard-licence video is reported, never refused.
+  assert.equal(std?.can_clip, true);
   assert.match(std?.reason ?? "", /Standard YouTube licence/);
+  assert.match(std?.reason ?? "", /You are responsible for the rights/);
 
-  // No licence at all: fail closed.
+  // No licence at all: reported with the rights notice, never refused.
   const unknown = normalizeTrendingVideo({ video_id: "u1", title: "Mystery" });
   assert.equal(unknown?.license, "unknown");
-  assert.equal(unknown?.can_clip, false);
+  assert.equal(unknown?.can_clip, true);
 
   // Trending search without licensed_only does NOT verify licences:
-  // license "" means "not checked", never a guessed verdict.
+  // license "" means "not checked", never a guessed verdict — but the
+  // video can still be clipped (advisory since v0.9.1).
   const unchecked = normalizeTrendingVideo({ video_id: "u2", title: "Unverified", license: "" });
   assert.equal(unchecked?.license_checked, false);
-  assert.equal(unchecked?.can_clip, false);
+  assert.equal(unchecked?.can_clip, true);
   const checked = normalizeTrendingVideo({ video_id: "u3", title: "Verified CC", license: "creativeCommon" });
   assert.equal(checked?.license_checked, true);
   assert.equal(checked?.license_key, "creativeCommon");
@@ -814,9 +830,11 @@ test("normalizeLicenseCheck normalises the /videos/license contract", () => {
   assert.equal(check?.license, "cc");
   assert.equal(check?.can_clip, true);
   assert.equal(check?.channel, "Open Chan");
+  // v0.9.1 advisory: even a stale can_clip=false from an older server
+  // must not refuse the video — the licence is reported, never enforced.
   const std = normalizeLicenseCheck({ video_id: "xyz", license: "youtube", can_clip: false });
   assert.equal(std?.license, "standard");
-  assert.equal(std?.can_clip, false);
+  assert.equal(std?.can_clip, true);
   assert.equal(std?.license_key, "youtube");
   // The licence check returns the raw YouTube value even for CC videos.
   assert.equal(check?.license_key, "creativeCommons");

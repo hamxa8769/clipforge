@@ -1699,7 +1699,7 @@ export async function saveSetupState(patch: SetupStatePatch): Promise<ApiResult>
 }
 
 // ---------------------------------------------------------------------------
-// Video licences + the CC clipping guardrail (v0.7.0).
+// Video licences (v0.7.0, advisory since v0.9.1).
 //
 // The API reports a licence per video (`license` on trending/live results,
 // `source_license` on clip records) and a plain `can_clip` verdict with a
@@ -1708,10 +1708,13 @@ export async function saveSetupState(patch: SetupStatePatch): Promise<ApiResult>
 // for the user's own videos. Everything normalises to VideoLicense below
 // so the UI never has to compare raw strings.
 //
-// Guardrail (unchanged from v0.6.0, now explicit): a clip may be made from
-// the user's OWN video or a Creative Commons licensed video — never from a
-// standard-licence video by another creator. When the API does not report
-// a licence at all, the video is treated as NOT clippable (fail closed).
+// Advisory (v0.9.1): the licence is REPORTED, never enforced. The v0.7.0
+// hard block — standard-licence / unknown-licence videos refused — was
+// removed at the user's explicit instruction after they checked YouTube's
+// terms and confirmed clipping is officially allowed. `can_clip` is
+// always true now; the UI shows the rights notice where the link is
+// entered and before publishing instead of refusing. CC videos still
+// get their attribution block automatically.
 // ---------------------------------------------------------------------------
 
 /** Normalised licence of a video. "own" = the user's own video.
@@ -1742,26 +1745,23 @@ export function licenseBadgeLabel(license: VideoLicense): string {
   return "Licence unknown";
 }
 
-/** Can this video be clipped? The API's `can_clip` wins when present;
-// otherwise derive it from the licence (own + CC + public-domain = yes,
-// anything else = no). */
+/** The rights notice shown where a video link is entered and before
+ * publishing (v0.9.1, advisory — the licence never blocks). ClipForge
+ * does not guarantee rights clearance; the user is responsible for
+ * the rights to what they post. */
+export const RIGHTS_ADVISORY =
+  "Make sure you have the right to use this video — your own video, a licensed video, or a use YouTube permits. You are responsible for the rights to what you post.";
+
+/** Can this video be clipped? Advisory since v0.9.1: always true — the
+ * licence is reported, never enforced. The reason describes the licence
+ * (CC / own / public-domain keep their positive reasons; standard and
+ * unknown licences get the rights notice). */
 export function deriveCanClip(license: VideoLicense, canClip: boolean | null): { canClip: boolean; reason: string } {
-  if (canClip === true) return { canClip: true, reason: license === "own" ? "Your own video." : license === "cc" ? "Creative Commons licence — free to reuse with attribution." : license === "public-domain" ? "Public domain — free to reuse." : "" };
-  if (canClip === false) {
-    return {
-      canClip: false,
-      reason: license === "standard"
-        ? "Standard YouTube licence — this creator did not allow reuse, so it cannot be clipped."
-        : license === "unknown"
-          ? "No licence information — treated as not clippable until the licence is confirmed."
-          : "Not clippable.",
-    };
-  }
-  if (license === "cc") return { canClip: true, reason: "Creative Commons licence — free to reuse with attribution." };
   if (license === "own") return { canClip: true, reason: "Your own video." };
+  if (license === "cc") return { canClip: true, reason: "Creative Commons licence — free to reuse with attribution." };
   if (license === "public-domain") return { canClip: true, reason: "Public domain — free to reuse." };
-  if (license === "standard") return { canClip: false, reason: "Standard YouTube licence — this creator did not allow reuse, so it cannot be clipped." };
-  return { canClip: false, reason: "No licence information — treated as not clippable until the licence is confirmed." };
+  if (license === "standard") return { canClip: true, reason: `Standard YouTube licence. ${RIGHTS_ADVISORY}` };
+  return { canClip: true, reason: `No licence information reported. ${RIGHTS_ADVISORY}` };
 }
 
 /** Attribution credit for a CC / public-domain source, read-only and
@@ -1797,12 +1797,11 @@ export function jobSourceLicense(video: Pick<TrendingVideo, "license" | "license
 }
 
 /** POST /jobs — create a clip job from a YouTube video (v0.7.0 CC
- * pipeline). This is the correct path for clipping a CC / own video:
- * POST /api/trending/run refuses the trending video itself as a source.
- * The server gates on the licence: standard-licence sources are refused
- * (422), CC / public-domain / own sources are accepted. Returns the
- * ApiResult so the caller can read the new job id (`data.id`) or show
- * the server's plain-language 422. */
+ * pipeline). Advisory since v0.9.1: the server no longer refuses any
+ * licence — a standard-licence source starts like any other, the
+ * licence is recorded, and any CC source still gets its attribution
+ * block. Returns the ApiResult so the caller can read the new job id
+ * (`data.id`) or show the server's plain-language error. */
 export async function createYoutubeClipJob(input: {
   source_url: string; title: string; source_license: string;
   source_title?: string; source_channel?: string; own_content_declaration?: boolean;
@@ -1851,9 +1850,12 @@ export async function selectThumbnailVariant(candidateId: string, variant: numbe
 // POST /api/trending/api-key | /match | /run, GET /api/trending/status
 // and /api/trending/jobs/{id} (apps/api/clipforge_api/trending.py).
 //
-// Rights guardrail: trending shows what topics are working — clips are
-// made from YOUR videos. A trending video URL is never a clip source;
-// the backend refuses it with a plain 422, and the page states it.
+// Rights notice (advisory since v0.9.1): trending shows what topics
+// are working — clips are made from the videos the user pastes. A
+// trending video URL is still not a clip source (the backend refuses
+// it with a plain 422, and the page states it) — that is the
+// topic-vs-source rule, not a licence verdict: any pasted video's
+// licence is reported, never enforced.
 // ---------------------------------------------------------------------------
 
 export interface TrendingVideo {
@@ -1878,9 +1880,11 @@ export interface TrendingVideo {
   license_checked: boolean;
   /** Licence details page, when the API sends one. */
   license_url: string | null;
-  /** Whether this video may be clipped (API verdict, or derived from the licence). */
+  /** Whether this video may be clipped — always true since v0.9.1
+   * (advisory: the licence is reported, never enforced). */
   can_clip: boolean;
-  /** Plain-language reason for the can_clip verdict. */
+  /** Plain-language reason for the licence report (rights notice for
+   * standard / unknown licences). */
   reason: string;
   /** Live videos only (v0.7.0): current concurrent viewers. */
   concurrent_viewers: number | null;
@@ -2025,7 +2029,8 @@ export async function searchTrending(niche: string, maxResults = 10, opts: { lic
 /** GET /api/trending/live — live streams in a niche, right now (v0.7.0,
  * separate endpoint, NOT event_type on search). Each result carries
  * `viewers` (concurrent), `started_at`, `licence` and `can_clip` —
- * true only for the user's own live streams and CC licensed ones. */
+ * always true since v0.9.1 (advisory: the licence is reported, never
+ * enforced). */
 export async function searchLive(niche: string, maxResults = 10, opts: { licensedOnly?: boolean } = {}): Promise<{ result: TrendingSearchResult | null; error: string | null }> {
   const q = new URLSearchParams({ niche, max_results: String(maxResults) });
   if (opts.licensedOnly) q.set("licensed_only", "true");
@@ -2043,14 +2048,14 @@ export async function searchLive(niche: string, maxResults = 10, opts: { license
   };
 }
 
-/** Licence check for one pasted YouTube URL (v0.7.0).
+/** Licence check for one pasted YouTube URL (v0.7.0, advisory since v0.9.1).
  * Contract (apps/api/clipforge_api/trending.py, videos_router):
  * GET /api/videos/license?url=... -> {video_id, title, channel,
  * channel_id, license, license_url, can_clip, reason}. `license` is the
  * raw YouTube value ("creativeCommon" / "youtube" / ""); `can_clip` is
- * true only for a CC video or the user's own video. Null when the
- * endpoint has not landed yet (the page says so instead of inventing a
- * verdict). */
+ * always true — the check reports the licence with the rights notice
+ * and never refuses a video. Null when the endpoint has not landed yet
+ * (the page says so instead of inventing a verdict). */
 export interface LicenseCheck {
   video_id: string; title: string; channel: string;
   license: VideoLicense; license_key: string; license_url: string | null;
@@ -2093,9 +2098,9 @@ export async function checkVideoLicense(url: string): Promise<{ check: LicenseCh
  * clipped. Contract (apps/api/clipforge_api/trending.py):
  * POST /api/trending/live/capture {video_id, duration_s} (202) ->
  * {job_id, video_id, title, licence, is_own, duration_s, message,
- * notice}. The licence is re-verified server-side; only the user's own
- * live stream or a CC licensed one is captured. Returns the ApiResult
- * so the page can show the job id + live progress, or the honest
+ * notice}. The licence is re-verified server-side so the job record is
+ * accurate; since v0.9.1 the verdict never blocks capture (advisory).
+ * Returns the ApiResult so the page can show the job id + live progress,
  * "not available in this build yet" state when the endpoint has not
  * landed (404). `duration_s` is bounded 60–300s server-side. */
 export async function startLiveCapture(videoId: string, durationS: number): Promise<ApiResult> {

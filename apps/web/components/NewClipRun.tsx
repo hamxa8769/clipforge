@@ -1,16 +1,16 @@
 // New clip run (v0.9.0) — the dashboard's one-place start: paste a video
 // URL, pick a niche, and go. Two real paths, no dummy buttons:
 //
-// 1. "Check licence & clip this video" — verifies the licence first
-//    (GET /api/videos/license) and only then starts a clip job
-//    (POST /jobs). A standard-licence video that is not yours is refused
-//    with the server's plain-language reason; CC / public-domain / own
-//    videos start, and CC-BY attribution is added automatically.
+// 1. "Check licence & clip this video" — reports the licence first
+//    (GET /api/videos/license) and then starts a clip job (POST /jobs).
+//    Advisory since v0.9.1: the licence check never refuses a video —
+//    any pasted link proceeds, the rights notice is shown instead, and
+//    CC-BY attribution is added automatically for CC videos.
 // 2. "Run the agent on this source" — saves this URL + niche as the
 //    agent's source (PUT /api/agent/config) and starts the agent
 //    (POST /api/agent/start), exactly the Agent page's flow, surfaced
 //    here so the daily run does not need a tab hop. Needs the rights
-//    checkbox (or a passed licence check) first.
+//    checkbox (or a licence check) first.
 //
 // Everything is disabled with the reason shown when the API is
 // unreachable — a run that cannot start is never presented as working.
@@ -19,6 +19,7 @@ import { useState } from "react";
 import Link from "next/link";
 import {
   checkVideoLicense, createYoutubeClipJob, jobSourceLicense, licenseBadgeLabel,
+  RIGHTS_ADVISORY,
   saveAgentConfig, startAgent, NICHE_PRESETS,
   type LicenseCheck,
 } from "@/lib/api";
@@ -61,7 +62,9 @@ export default function NewClipRun({ live, onJobStarted }: { live: boolean; onJo
   }
 
   async function onStartJob() {
-    if (!check || !check.can_clip) return;
+    // Advisory since v0.9.1: the licence check never refuses a video —
+    // any checked link proceeds; the rights notice is shown instead.
+    if (!check) return;
     setStarting(true);
     setError(null);
     const res = await createYoutubeClipJob({
@@ -112,11 +115,12 @@ export default function NewClipRun({ live, onJobStarted }: { live: boolean; onJo
         hint="Paste a video, check its licence, start clipping — all from here."
         action={<Link href="/trending" className="text-sm font-medium text-amber-300 hover:text-amber-200">Find a licensed video →</Link>}
       />
+      <p className="mb-4 rounded-lg bg-neutral-800/60 px-3 py-2 text-sm text-neutral-300" role="note">{RIGHTS_ADVISORY}</p>
       {!live && (
         <p className="mb-4 rounded-lg bg-amber-500/10 px-3 py-2 text-sm text-amber-200" role="note">{offlineReason}</p>
       )}
       <div className="grid gap-4 lg:grid-cols-[1fr_220px]">
-        <Field label="Source video or channel URL" hint="Your own video, a Creative Commons video, or a public-domain video. Standard-licence videos that aren't yours are refused.">
+        <Field label="Source video or channel URL" hint="Paste any YouTube video link — the licence check below reports its licence, and the rights notice above applies.">
           <TextInput
             id="new-clip-url"
             type="url"
@@ -158,20 +162,21 @@ export default function NewClipRun({ live, onJobStarted }: { live: boolean; onJo
         />
         <span>
           This is my own video (or I have the rights to use it)
-          <span className="block text-xs text-neutral-500">Tick this for your own uploads. For Creative Commons videos the licence check below confirms the rights instead.</span>
+          <span className="block text-xs text-neutral-500">Tick this for your own uploads. For other videos the licence check below reports the video&apos;s licence instead.</span>
         </span>
       </label>
 
-      {/* Licence verdict — never clip on a guess. */}
+      {/* Licence report — advisory since v0.9.1: the licence is reported,
+          never a refusal. Any checked video can be clipped. */}
       {check && (
-        <div className={`mt-4 rounded-lg border px-3 py-2.5 text-sm ${check.can_clip ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200" : "border-red-500/40 bg-red-500/10 text-red-200"}`} role="status">
+        <div className="mt-4 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2.5 text-sm text-emerald-200" role="status">
           <p className="font-medium">
-            {check.can_clip ? "✓ Can be clipped — " : "✕ Cannot be clipped — "}
+            {"✓ Can be clipped — "}
             {licenseBadgeLabel(check.license)} · {check.title || "Untitled video"}
             {check.channel ? ` · by ${check.channel}` : ""}
           </p>
           <p className="mt-0.5 text-xs leading-snug opacity-90">{check.reason}</p>
-          {check.can_clip && check.license === "cc" && (
+          {check.license === "cc" && (
             <p className="mt-0.5 text-xs leading-snug opacity-90">CC-BY attribution will be added to the clip description automatically.</p>
           )}
         </div>
@@ -191,7 +196,7 @@ export default function NewClipRun({ live, onJobStarted }: { live: boolean; onJo
       )}
 
       <div className="mt-4 flex flex-wrap items-center gap-2">
-        {!check || !check.can_clip ? (
+        {!check ? (
           <PrimaryButton onClick={() => void onCheckLicence()} disabled={!live || checking}>
             {checking ? <Spinner label="Checking licence…" /> : "Check licence & clip this video"}
           </PrimaryButton>
@@ -207,11 +212,11 @@ export default function NewClipRun({ live, onJobStarted }: { live: boolean; onJo
           {startingAgent ? "Starting agent…" : "Run the agent on this source"}
         </SecondaryButton>
         {!rightsOk && live && (
-          <span className="text-xs text-neutral-500">Agent run needs the rights checkbox (or a passed licence check) first.</span>
+          <span className="text-xs text-neutral-500">Agent run needs the rights checkbox (or a licence check) first.</span>
         )}
       </div>
       <p className="mt-3 text-xs leading-snug text-neutral-500">
-        Licensed clips only — ClipForge clips your own videos, Creative Commons and public-domain videos. Nothing from a standard-licence video that isn&apos;t yours is ever cut or posted.
+        {RIGHTS_ADVISORY} ClipForge does not guarantee rights clearance.
       </p>
     </Card>
   );

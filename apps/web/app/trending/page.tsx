@@ -7,37 +7,38 @@
 //     ranked by trend score.
 //   - "Licensed only (CC)" toggle (DEFAULT ON, remembered in
 //     localStorage — the server has no settings field for it yet): when
-//     ON, only Creative Commons / licensed videos are shown and only
-//     those can be clipped. When OFF, all trending videos show — but
-//     every result says plainly whether it CAN be clipped ("Can clip —
-//     Creative Commons" / "Can clip — your video") or CANNOT ("Can't
-//     clip — standard licence" + reason), and the Clip buttons stay
-//     disabled for verified non-clippable videos. Videos whose licence
-//     the search did not verify show "Licence not checked" with a
-//     per-video check instead of a guessed verdict. The toggle is never
-//     forced on: the user's last choice is remembered.
+//     ON, only Creative Commons videos are shown (an opt-in discovery
+//     filter). When OFF, all trending videos show — every result says
+//     plainly what licence it has, and any video can be clipped.
+//     Advisory since v0.9.1: the licence is reported, never enforced —
+//     the v0.7.0 hard block was removed at the user's explicit
+//     instruction after they checked YouTube's terms. Videos whose
+//     licence the search did not verify show "Licence not checked" with
+//     a per-video check instead of a guessed verdict. The toggle is
+//     never forced on: the user's last choice is remembered.
 //   - "Check a video URL": paste a YouTube URL -> GET /api/videos/license
-//     -> licence + can_clip verdict + reason, with "Clip this video" only
-//     when clippable.
+//     -> licence + reason, with "Clip this video" always available.
 //   - Pick a trending video as a TOPIC -> the agent matches it to YOUR
 //     OWN source video on that topic (own video URL, or a channel URL
 //     matched by title overlap) -> transcribe -> score -> clip -> SEO
 //     tuned to the trend -> approval queue -> schedule / publish. Or,
-//     for a clippable video, "Clip this video" creates a clip job from
-//     THAT video (POST /jobs with the licence — own video or Creative
-//     Commons, with attribution). /api/trending/run is NOT used for
-//     this: it refuses the trending video itself as a source.
+//     "Clip this video" creates a clip job from THAT video (POST /jobs
+//     with the licence — own video or Creative Commons, with
+//     attribution). /api/trending/run is NOT used for this: it refuses
+//     the trending video itself as a source.
 //   - "Live now" tab: live streams in the niche (GET /api/trending/live),
-//     with viewers + started time + licence badge + can_clip state, and
-//     "Capture & clip" (pick a capture duration, 60–300s) for clippable
-//     live videos (POST /api/trending/live/capture).
+//     with viewers + started time + licence badge, and "Capture & clip"
+//     (pick a capture duration, 60–300s) for live videos
+//     (POST /api/trending/live/capture).
 //   - Live progress: polls GET /api/trending/status while the run is
 //     going, then links to the pipeline and the approval queue.
 //
-// Rights guardrail (stated on the page and enforced by the API): clips
-// are made from YOUR videos or Creative Commons licensed videos — never
-// from standard-licence videos by other creators. A standard-licence
-// video URL is refused as a clip source (422).
+// Rights notice (advisory since v0.9.1, stated on the page): make sure
+// you have the right to use a video — your own video, a licensed video,
+// or a use YouTube permits. You are responsible for the rights to what
+// you post. ClipForge does not guarantee rights clearance. A trending
+// video URL is still refused as a clip source (422) — that is the
+// topic-vs-source rule, not a licence verdict.
 //
 // Until the endpoints land, the page says so plainly and the search
 // controls stay disabled — it never shows invented videos. With no
@@ -48,7 +49,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
   checkVideoLicense, createYoutubeClipJob, getJob, getTrendingCredentials, getTrendingJob, getTrendingStatus,
-  jobSourceLicense, licenseBadgeLabel, matchTrendingTopic, saveYoutubeApiKey, searchLive, searchTrending,
+  jobSourceLicense, licenseBadgeLabel, matchTrendingTopic, RIGHTS_ADVISORY, saveYoutubeApiKey, searchLive, searchTrending,
   startLiveCapture, startTrendingRun, NICHE_PRESETS, type LicenseCheck, type TrendingCredentials, type TrendingJob,
   type TrendingVideo, type VideoLicense,
 } from "@/lib/api";
@@ -58,8 +59,7 @@ import {
 } from "@/components/ui";
 import { openExternal } from "@/lib/tauri";
 
-const GUARDRAIL =
-  "Clips are made from YOUR videos or Creative Commons licensed videos — never from standard-licence videos by other creators.";
+const GUARDRAIL = RIGHTS_ADVISORY;
 
 const LICENSED_ONLY_KEY = "clipforge:licensed-only";
 
@@ -102,23 +102,18 @@ function LicenseBadge({ license }: { license: VideoLicense }) {
 }
 
 function ClipVerdict({ video }: { video: TrendingVideo }) {
-  if (video.can_clip) {
-    return (
-      <p className="mt-1 text-xs font-medium text-emerald-300">
-        ✓ Can clip{video.license === "cc" ? " — Creative Commons — attribution is added automatically for CC sources." : video.license === "own" ? " — your video." : video.license === "public-domain" ? " — public domain." : video.license === "standard" ? ` — ${video.reason}` : "."}
-      </p>
-    );
-  }
+  // Advisory since v0.9.1: every video can be clipped — the licence is
+  // reported, never a refusal.
   if (!video.license_checked) {
     return (
       <p className="mt-1 text-xs text-amber-200">
-        Licence not checked yet — check it before clipping. The search only verifies licences when “Licensed only” is on.
+        Licence not checked yet — check it to see its licence. The search only verifies licences when “Licensed only” is on.
       </p>
     );
   }
   return (
-    <p className="mt-1 text-xs text-neutral-400">
-      ✕ Can&apos;t clip — standard licence. {video.reason}
+    <p className="mt-1 text-xs font-medium text-emerald-300">
+      ✓ Can clip{video.license === "cc" ? " — Creative Commons — attribution is added automatically for CC sources." : video.license === "own" ? " — your video." : video.license === "public-domain" ? " — public domain." : video.license === "standard" ? ` — ${video.reason}` : "."}
     </p>
   );
 }
@@ -262,13 +257,15 @@ export default function TrendingPage() {
       return;
     }
     // Defence in depth: if an older server ignored licensed_only, filter
-    // client-side so ON really means only clippable (CC / own) videos.
-    const shown = licensedOnly ? result.results.filter((v) => v.can_clip) : result.results;
+    // client-side so ON really means only Creative Commons videos.
+    const shown = licensedOnly
+      ? result.results.filter((v) => v.license === "cc" || v.license === "own" || v.license === "public-domain")
+      : result.results;
     if (eventType === "trending") setResults(shown); else setLiveResults(shown);
     setSearchSource(result.source === "oauth" ? `your connected YouTube channel${result.account ? ` (${result.account})` : ""}` : "your saved YouTube Data API key");
     if (shown.length === 0) {
       setSearchError(licensedOnly
-        ? "No Creative Commons licensed videos found trending in this niche in the last 7 days — try a broader niche, or turn “Licensed only” off to see all trending videos (standard-licence ones cannot be clipped)."
+        ? "No Creative Commons licensed videos found trending in this niche in the last 7 days — try a broader niche, or turn “Licensed only” off to see all trending videos."
         : "No trending videos found in this niche in the last 7 days — try a broader niche.");
     }
   }
@@ -316,14 +313,13 @@ export default function TrendingPage() {
     setResults(patch);
     setLiveResults(patch);
     if (picked?.video_id === video.video_id) setPicked(updated);
-    setNotice(check.can_clip
-      ? `“${check.title}” can be clipped — ${check.reason}`
-      : `“${check.title}” cannot be clipped — ${check.reason}`);
+    setNotice(`“${check.title}” can be clipped — ${check.reason}`);
   }
 
   async function onClipVideo(video: TrendingVideo) {
-    // Unchecked video (search without licensed_only): verify the licence
-    // first — never clip on a guess.
+    // Unchecked video (search without licensed_only): check the licence
+    // first so the clip carries the true licence record — the check
+    // reports the licence, it never refuses (advisory since v0.9.1).
     if (!video.license_checked) {
       setNotice("Checking this video's licence first…");
       const { check, error } = await checkVideoLicense(video.url);
@@ -335,13 +331,8 @@ export default function TrendingPage() {
       const patch = (vs: TrendingVideo[]) => vs.map((v) => (v.video_id === video.video_id ? { ...v, ...updated } : v));
       setResults(patch);
       setLiveResults(patch);
-      if (!check.can_clip) {
-        setNotice(`Cannot clip — ${check.reason}`);
-        return;
-      }
       video = updated;
     }
-    if (!video.can_clip) return;
     setPicked(video);
     setCcSource(video);
     setMatched(null);
@@ -353,7 +344,6 @@ export default function TrendingPage() {
   }
 
   async function onCapture(video: TrendingVideo) {
-    if (!video.can_clip) return;
     const durationS = captureDurations[video.video_id] ?? 120;
     setCapturing(true);
     setNotice(null);
@@ -400,9 +390,9 @@ export default function TrendingPage() {
         : "Confirm the rights checkbox first — the agent only works with videos you own or have the rights to use.");
       return;
     }
-    // Clipping a CC / own video goes through POST /jobs (the v0.7.0 CC
-    // pipeline) — NOT /api/trending/run, which refuses the trending
-    // video itself as a source. The clips land in the approval queue.
+    // Clipping a video goes through POST /jobs — NOT /api/trending/run,
+    // which refuses the trending video itself as a source. The clips
+    // land in the approval queue.
     if (ccSource) {
       setStarting(true);
       setNotice(null);
@@ -547,8 +537,8 @@ export default function TrendingPage() {
               onChange={onToggleLicensedOnly}
               label="Licensed only (CC)"
               hint={licensedOnly
-                ? "ON — only Creative Commons / licensed videos are shown, and every result can be clipped. Turn it off any time to see all trending videos."
-                : "OFF — showing all trending videos. Every result says plainly whether it can be clipped; standard-licence videos by other creators cannot be clipped."}
+                ? "ON — only Creative Commons / licensed videos are shown. Turn it off any time to see all trending videos."
+                : "OFF — showing all trending videos. Every result reports its licence; any video can be clipped."}
             />
             <p className="mt-2 text-xs text-neutral-500">
               Your choice is remembered on this device — the toggle is never forced on.
@@ -655,19 +645,15 @@ export default function TrendingPage() {
                               value={captureDurations[v.video_id] ?? 120}
                               onChange={(e) => setCaptureDurations((d) => ({ ...d, [v.video_id]: Number(e.target.value) }))}
                               aria-label={`Capture duration for ${v.title}`}
-                              disabled={!v.can_clip}
                             >
                               {CAPTURE_DURATIONS.map((s) => (
                                 <option key={s} value={s}>{s}s</option>
                               ))}
                             </select>
                           </label>
-                          <PrimaryButton onClick={() => { void onCapture(v); }} disabled={!v.can_clip || capturing}>
+                          <PrimaryButton onClick={() => { void onCapture(v); }} disabled={capturing}>
                             {capturing ? "Starting capture…" : "Capture & clip"}
                           </PrimaryButton>
-                          {!v.can_clip && (
-                            <span className="text-xs text-neutral-500">Capture is disabled — {v.reason}</span>
-                          )}
                         </>
                       ) : (
                         <>
@@ -682,15 +668,11 @@ export default function TrendingPage() {
                           <button
                             type="button"
                             onClick={() => { void onClipVideo(v); }}
-                            disabled={v.license_checked && !v.can_clip}
-                            title={v.can_clip ? "Cut clips from this video" : !v.license_checked ? "Check the licence first, then clip" : v.reason}
-                            className={`rounded-md px-4 py-2 text-sm font-medium ${v.license_checked && !v.can_clip ? "cursor-not-allowed bg-neutral-800 text-neutral-500" : "bg-emerald-600 text-white hover:bg-emerald-500"}`}
+                            title="Cut clips from this video"
+                            className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500"
                           >
                             Clip this video
                           </button>
-                          {v.license_checked && !v.can_clip && (
-                            <span className="text-xs text-neutral-500">Clipping is disabled — standard licence.</span>
-                          )}
                           {!v.license_checked && (
                             <span className="text-xs text-neutral-500">Licence not checked — “Clip this video” checks it first.</span>
                           )}
@@ -734,10 +716,10 @@ export default function TrendingPage() {
       )}
 
       <Card>
-        <CardHeader title="Check a video URL" hint="Licence check — can this video be clipped?" />
+        <CardHeader title="Check a video URL" hint="Licence check — what licence does this video have?" />
         <div className="space-y-3">
           <p className="text-sm text-neutral-400">
-            Paste any YouTube video URL to check its licence before clipping. Only your own videos and Creative Commons licensed videos can be clipped.
+            Paste any YouTube video URL to check its licence before clipping. {RIGHTS_ADVISORY}
           </p>
           <div className="flex flex-wrap gap-2">
             <input
@@ -753,7 +735,7 @@ export default function TrendingPage() {
           </div>
           {checkError && <ErrorBanner message={checkError} />}
           {checkResult && (
-            <div className={`rounded-lg border p-4 ${checkResult.can_clip ? "border-emerald-500/40 bg-emerald-500/5" : "border-neutral-700 bg-neutral-950"}`}>
+            <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-4">
               <div className="flex flex-wrap items-start gap-3">
                 <div className="min-w-0 flex-1">
                   <p className="font-semibold text-neutral-50">{checkResult.title || checkResult.video_id}</p>
@@ -764,8 +746,8 @@ export default function TrendingPage() {
                       <button type="button" className="text-xs text-sky-300 underline" onClick={() => { const url = checkResult.license_url; if (url) void openExternal(url); }}>Licence details</button>
                     )}
                   </div>
-                  <p className={`mt-2 text-sm ${checkResult.can_clip ? "font-medium text-emerald-300" : "text-neutral-300"}`}>
-                    {checkResult.can_clip ? "✓ Can clip" : "✕ Can't clip"} — {checkResult.reason}
+                  <p className="mt-2 text-sm font-medium text-emerald-300">
+                    ✓ Can clip — {checkResult.reason}
                   </p>
                 </div>
               </div>
@@ -774,9 +756,8 @@ export default function TrendingPage() {
                 <button
                   type="button"
                   onClick={() => onClipVideo(clipVideoFromCheck(checkResult))}
-                  disabled={!checkResult.can_clip}
-                  title={checkResult.can_clip ? "Cut clips from this video" : checkResult.reason}
-                  className={`rounded-md px-4 py-2 text-sm font-medium ${checkResult.can_clip ? "bg-emerald-600 text-white hover:bg-emerald-500" : "cursor-not-allowed bg-neutral-800 text-neutral-500"}`}
+                  title="Cut clips from this video"
+                  className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500"
                 >
                   Clip this video
                 </button>

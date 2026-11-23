@@ -334,10 +334,10 @@ export default function Dashboard() {
         }
       />
 
-      {/* Rights guardrail — always visible, never changes. */}
+      {/* Rights notice (advisory since v0.9.1) — always visible, never changes. */}
       <p className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm leading-snug text-amber-200" role="note">
-        <span className="font-semibold">Licensed clips only.</span>{" "}
-        ClipForge clips your own videos, Creative Commons and public-domain videos — never a standard-licence video that isn&apos;t yours.
+        <span className="font-semibold">Rights notice.</span>{" "}
+        Make sure you have the right to use the videos you clip — your own video, a licensed video, or a use YouTube permits. You are responsible for the rights to what you post.
         CC-BY attribution is added to the description automatically.{" "}
         <Link href="/trending" className="font-medium underline hover:text-amber-100">Find licensed videos →</Link>
       </p>
