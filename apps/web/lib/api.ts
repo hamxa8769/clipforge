@@ -2299,6 +2299,96 @@ export async function startLiveCapture(videoId: string, durationS: number): Prom
   return apiPostJson("/api/trending/live/capture", { video_id: videoId, duration_s: durationS });
 }
 
+// ------------------------------------------------------------------
+// Live stream monitoring (v0.10.0, Worker A).
+// Contract (apps/api/clipforge_api/live_monitor.py):
+//   GET  /api/live/platforms  -> {platforms: [{platform, audio,
+//        audio_note, chat, chat_note, transcript, transcript_note}]}
+//   GET  /api/live/status     -> {requirements, all_ready, blocking,
+//        youtube: {connected, kind, account, chat, chat_note}}
+//   POST /api/live/monitor {url|replay_path, max_hours, buffer_min,
+//        trigger_words} (202) -> {session_id, mode, platform, message}
+//   GET  /api/live/monitor    -> {sessions: LiveSession[]}
+//   GET  /api/live/monitor/{id} -> LiveSession (elapsed, level, base,
+//        transcript_tail, recent_chat, peaks[] with job_id)
+//   POST /api/live/monitor/{id}/stop
+//   POST /api/live/monitor/{id}/clip-now {seconds}
+// A session's `mode` is "live" or "replay" — the page always shows
+// which one ran and never presents a replay as a live stream.
+
+export interface LivePeak {
+  n: number; trigger_s: number; start_s: number; end_s: number;
+  reasons: string[]; score: number; kind: string; transcript: string;
+  file: string; job_id: string | null; error: string;
+}
+
+export interface LiveSession {
+  session_id: string; mode: string; platform: string; url: string;
+  title: string; channel: string; status: string; error: string;
+  started_at: number; ended_at: number | null; elapsed_s: number;
+  peaks: LivePeak[]; missed_peaks: number; chat_on: boolean;
+  chat_total: number; transcript_ok: boolean | null; transcript_note: string;
+  words: number; stalled: number;
+  level: number[]; base: Record<string, unknown>; transcript_tail: string;
+  recent_chat: { user: string; msg: string; t: number }[];
+  buffer_s: number;
+}
+
+export interface LivePlatform {
+  platform: string; audio: boolean; audio_note: string;
+  chat: boolean | string; chat_note: string;
+  transcript: boolean; transcript_note: string;
+}
+
+/** GET /api/live/platforms — per-platform capabilities, honestly stated. */
+export async function getLivePlatforms(): Promise<{ platforms: LivePlatform[] | null; error: string | null }> {
+  const res = await apiGetResult("/api/live/platforms");
+  if (!res.ok) return { platforms: null, error: res.error ?? "Could not load platform capabilities." };
+  const r = (res.data ?? {}) as Record<string, unknown>;
+  return { platforms: Array.isArray(r.platforms) ? (r.platforms as LivePlatform[]) : [], error: null };
+}
+
+/** GET /api/live/status — pre-flight: ffmpeg, yt-dlp, transcription, YouTube chat. */
+export async function getLiveStatus(): Promise<{ status: Record<string, unknown> | null; error: string | null }> {
+  const res = await apiGetResult("/api/live/status");
+  if (!res.ok) return { status: null, error: res.error ?? "Could not check live-monitoring requirements." };
+  return { status: (res.data ?? {}) as Record<string, unknown>, error: null };
+}
+
+/** POST /api/live/monitor — start monitoring a live URL (202, session id). */
+export async function startLiveMonitor(url: string, opts: { maxHours?: number; triggerWords?: string[] } = {}): Promise<ApiResult> {
+  return apiPostJson("/api/live/monitor", {
+    url,
+    max_hours: opts.maxHours ?? 2,
+    trigger_words: opts.triggerWords ?? [],
+  });
+}
+
+/** GET /api/live/monitor — all sessions, newest first. */
+export async function listLiveMonitors(): Promise<{ sessions: LiveSession[] | null; error: string | null }> {
+  const res = await apiGetResult("/api/live/monitor");
+  if (!res.ok) return { sessions: null, error: res.error ?? "Could not list live monitors." };
+  const r = (res.data ?? {}) as Record<string, unknown>;
+  return { sessions: Array.isArray(r.sessions) ? (r.sessions as LiveSession[]) : [], error: null };
+}
+
+/** GET /api/live/monitor/{id} — one session's live state. */
+export async function getLiveMonitor(sessionId: string): Promise<{ session: LiveSession | null; error: string | null }> {
+  const res = await apiGetResult(`/api/live/monitor/${encodeURIComponent(sessionId)}`);
+  if (!res.ok) return { session: null, error: res.error ?? "Could not load the monitor session." };
+  return { session: (res.data ?? {}) as LiveSession, error: null };
+}
+
+/** POST /api/live/monitor/{id}/stop — stop a monitor. */
+export async function stopLiveMonitor(sessionId: string): Promise<ApiResult> {
+  return apiPostJson(`/api/live/monitor/${encodeURIComponent(sessionId)}/stop`, {});
+}
+
+/** POST /api/live/monitor/{id}/clip-now — clip the last N seconds now. */
+export async function clipNowLive(sessionId: string, seconds: number): Promise<ApiResult> {
+  return apiPostJson(`/api/live/monitor/${encodeURIComponent(sessionId)}/clip-now`, { seconds });
+}
+
 export interface TrendingMatch {
   own_video_url: string;
   own_title: string;
