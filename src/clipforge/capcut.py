@@ -254,7 +254,7 @@ def _video_segment(
     return seg
 
 
-def _text_style(size: float, bold: bool, align: int, text_len: int) -> dict:
+def _text_style(size: float, bold: bool, text_len: int) -> dict:
     """One style run: white text with a black stroke, so it reads over video."""
     return {
         "fill": {
@@ -281,7 +281,7 @@ def _text_style(size: float, bold: bool, align: int, text_len: int) -> dict:
 def _text_material(text: str, *, size: float, bold: bool) -> tuple[dict, str]:
     """A text material entry; returns (entry, material_id)."""
     material_id = _new_id()
-    content = {"styles": [_text_style(size, bold, 1, len(text))], "text": text}
+    content = {"styles": [_text_style(size, bold, len(text))], "text": text}
     entry = {
         "id": material_id,
         "content": json.dumps(content, ensure_ascii=False),
