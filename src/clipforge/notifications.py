@@ -155,9 +155,7 @@ def notify_best_effort(
         pass
 
 
-def list_notifications(
-    session: Session, limit: int = 100, unread_only: bool = False
-) -> list[dict]:
+def list_notifications(session: Session, limit: int = 100, unread_only: bool = False) -> list[dict]:
     """Newest first, capped at ``limit`` (1..200)."""
     return _store().list_notifications(session, unread_only=unread_only, limit=limit)
 

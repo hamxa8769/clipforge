@@ -19,7 +19,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en">
       <body>
         <div className="flex h-screen overflow-hidden bg-neutral-950">
-          <Sidebar version="0.8.2" />
+          <Sidebar version="0.9.0" />
           <div className="flex min-w-0 flex-1 flex-col">
             <UpdateBanner />
             <DryRunBanner />

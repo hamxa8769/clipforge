@@ -392,9 +392,7 @@ def run_job(
         # by _run_stages — keep the message plain (no exception type
         # prefix) and close the run the same way.
         _close_run(session, run, "failed", str(exc), started)
-        _notify_job(
-            session, job, "error", "Job failed", f"“{title}” failed: {job.error or exc}"
-        )
+        _notify_job(session, job, "error", "Job failed", f"“{title}” failed: {job.error or exc}")
         summary.update(
             {
                 "status": JobStatus.FAILED.value,
@@ -425,9 +423,7 @@ def run_job(
         job.status = JobStatus.FAILED.value
         _set_job_error(session, job, error)
         _close_run(session, run, "failed", job.error, started)
-        _notify_job(
-            session, job, "error", "Job failed", f"“{title}” failed: {error['message']}"
-        )
+        _notify_job(session, job, "error", "Job failed", f"“{title}” failed: {error['message']}")
         summary.update({"status": JobStatus.FAILED.value, "error": job.error})
         return summary
     finally:

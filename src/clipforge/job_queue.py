@@ -131,9 +131,7 @@ class JobQueue:
         written per job so the restart is visible, not silent.
         """
         requeued: list[str] = []
-        interrupted = (
-            session.query(Job).filter(Job.status.in_(sorted(ACTIVE_JOB_STATUSES))).all()
-        )
+        interrupted = session.query(Job).filter(Job.status.in_(sorted(ACTIVE_JOB_STATUSES))).all()
         paused = session.query(Job).filter_by(status=JobStatus.PAUSED.value).all()
         for job in interrupted + paused:
             job.status = JobStatus.QUEUED.value
@@ -214,9 +212,7 @@ class JobQueue:
         return state
 
     # ------------------------------------------------------------ enqueue
-    def enqueue(
-        self, session: Session, job_id: str, priority: int = 0
-    ) -> dict:
+    def enqueue(self, session: Session, job_id: str, priority: int = 0) -> dict:
         """Put a job in the queue. Returns ``{job_id, status, queue_position}``.
 
         Idempotent: a job already queued keeps its place (priority is
@@ -245,9 +241,7 @@ class JobQueue:
             session.query(Job)
             .filter(
                 Job.id == job_id,
-                Job.status.in_(
-                    [JobStatus.PENDING.value, JobStatus.QUEUED.value]
-                ),
+                Job.status.in_([JobStatus.PENDING.value, JobStatus.QUEUED.value]),
             )
             .update(
                 {"status": JobStatus.QUEUED.value, "meta_json": meta},
@@ -263,8 +257,7 @@ class JobQueue:
             # Claimed in the meantime — report its real state.
             fresh = session.get(Job, job_id)
             if fresh is not None and (
-                fresh.status in ACTIVE_JOB_STATUSES
-                or fresh.status == JobStatus.RUNNING.value
+                fresh.status in ACTIVE_JOB_STATUSES or fresh.status == JobStatus.RUNNING.value
             ):
                 raise ValueError(f"job {job_id} is already running")
             # A concurrent enqueue already applied — idempotent.
@@ -286,9 +279,7 @@ class JobQueue:
             "queue_position": self.queue_position(session, job_id),
         }
 
-    def wait_for(
-        self, job_id: str, timeout: float | None = None, pause_check=None
-    ) -> bool:
+    def wait_for(self, job_id: str, timeout: float | None = None, pause_check=None) -> bool:
         """Block until the job reaches a terminal state (or timeout).
 
         ``pause_check`` (optional, used by the batch processor) is
@@ -422,9 +413,7 @@ class JobQueue:
         control = get_control(job_id)
         was_running = control.is_paused and self._active_job_id == job_id
         control.request_resume()
-        job.status = (
-            JobStatus.RUNNING.value if was_running else JobStatus.QUEUED.value
-        )
+        job.status = JobStatus.RUNNING.value if was_running else JobStatus.QUEUED.value
         session.commit()
         with self._condition:
             self._condition.notify_all()
@@ -558,11 +547,23 @@ class JobQueue:
             # The runner records failures on the job itself; a runner
             # that raises outright (bug, not a job failure) must still
             # release the queue — otherwise every later job stalls.
-            import traceback
-
-            traceback.print_exc()
+            # A pause / cancel that landed between the claim and the
+            # runner start is a user action, not a bug: the job stays
+            # paused / cancelled and no traceback is printed.
             try:
-                failed = run_session.get(Job, job_id)
+                current = run_session.get(Job, job_id)
+            except Exception:
+                current = None
+            user_stopped = current is not None and current.status in {
+                JobStatus.PAUSED.value,
+                JobStatus.CANCELLED.value,
+            }
+            if not user_stopped:
+                import traceback
+
+                traceback.print_exc()
+            try:
+                failed = current
                 if failed is not None and failed.status in ACTIVE_JOB_STATUSES:
                     failed.status = JobStatus.FAILED.value
                     failed.error = (

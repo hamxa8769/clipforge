@@ -63,19 +63,22 @@ def test_dedupe_sends_one_unread_per_key_per_day():
     session = _session()
     try:
         first = notify(
-            session, "error", "FFmpeg install failed", "boom",
+            session,
+            "error",
+            "FFmpeg install failed",
+            "boom",
             dedupe_key="install-failed:ffmpeg",
         )
         second = notify(
-            session, "error", "FFmpeg install failed", "boom again",
+            session,
+            "error",
+            "FFmpeg install failed",
+            "boom again",
             dedupe_key="install-failed:ffmpeg",
         )
         assert first["id"] == second["id"]
         assert (
-            session.query(Notification)
-            .filter_by(dedupe_key="install-failed:ffmpeg")
-            .count()
-            == 1
+            session.query(Notification).filter_by(dedupe_key="install-failed:ffmpeg").count() == 1
         )
     finally:
         session.close()
@@ -120,8 +123,15 @@ def test_to_ui_item_maps_tone_and_link():
     assert item["link"] == "/jobs/abc123"
     assert item["read"] is False
     success = to_ui_item(
-        {"id": "n2", "title": "Done", "message": "", "level": "success",
-         "action": None, "read": True, "created_at": None}
+        {
+            "id": "n2",
+            "title": "Done",
+            "message": "",
+            "level": "success",
+            "action": None,
+            "read": True,
+            "created_at": None,
+        }
     )
     assert success["tone"] == "success"
     assert success["link"] is None

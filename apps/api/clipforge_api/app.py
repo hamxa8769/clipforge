@@ -1,4 +1,4 @@
-"""ClipForge API v0.8.2 — FastAPI app.
+"""ClipForge API v0.9.0 — FastAPI app.
 
 Endpoints (all dry-run by default; nothing publishes live without an
 approved Post record, explicit credentials, and ``dry_run=false``):
@@ -908,6 +908,16 @@ def media_upload(filename: str):
 # ------------------------------------------------------------------ jobs
 @app.post("/jobs", status_code=201)
 def create_job(payload: JobCreate, db: Session = Depends(get_db)):
+    """Create a clip job — and start it (v0.9.0 auto-run).
+
+    A job created from the dashboard (or any client) is enqueued at
+    once with user priority: the dispatcher runs it as soon as the
+    currently active job finishes, and a second job QUEUES behind it
+    instead of running in parallel. Creating a job no longer leaves
+    it sitting ``pending`` forever with nothing to run it (the v0.9.0
+    audit's top defect). ``POST /jobs/{id}/run`` stays available for
+    pending / failed / blocked jobs (e.g. after a retry).
+    """
     # v0.7.0 lawful-source gate: a YouTube job needs either the
     # own-content declaration or a lawful licence (own / public-domain /
     # any Creative Commons). A Standard-licence source is refused here
@@ -952,6 +962,14 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)):
     )
     db.add(job)
     db.commit()
+    # v0.9.0 auto-run: enqueue at once (user priority). Best-effort —
+    # a queue failure must never turn a successful creation into a
+    # 500; the job stays pending and POST /jobs/{id}/run starts it.
+    try:
+        get_job_queue().enqueue(db, job.id, priority=1)
+        db.refresh(job)
+    except Exception:
+        pass
     return _job_out(job, db)
 
 
@@ -970,6 +988,8 @@ async def upload_job(
     stored under ``data/uploads/`` with a random prefix; the job's
     ``source_path`` points at it. YouTube uploads are not accepted
     here — use POST /jobs with source_type=youtube + the declaration.
+
+    Like POST /jobs, the job is enqueued at once (v0.9.0 auto-run).
     """
     from clipforge.ingest import MAX_SOURCE_BYTES
 
@@ -998,6 +1018,12 @@ async def upload_job(
     )
     db.add(job)
     db.commit()
+    # v0.9.0 auto-run (same as POST /jobs) — best-effort, never a 500.
+    try:
+        get_job_queue().enqueue(db, job.id, priority=1)
+        db.refresh(job)
+    except Exception:
+        pass
     return _job_out(job, db)
 
 
@@ -1071,13 +1097,44 @@ def run_job_endpoint(job_id: str, wait: bool = Query(default=True), db: Session 
     dependency leaves the job ``blocked`` with ``blocked_by`` naming
     it — the response is still 200 with the job detail, because the
     block is a state, not a request error.
+
+    Idempotent (v0.9.0 auto-run): a job that is already queued or
+    running — e.g. auto-started on creation — is NOT an error. The
+    call simply waits for (``wait=true``) or returns (``wait=false``)
+    the in-flight run, so double-clicking Run on an auto-started job
+    never 409s and never starts a duplicate.
     """
     job = _get_or_404(db, Job, job_id, "job")
+    if job.status in {
+        JobStatus.QUEUED.value,
+        JobStatus.RUNNING.value,
+        JobStatus.TRANSCRIBING.value,
+        JobStatus.SCORING.value,
+        JobStatus.RENDERING.value,
+    }:
+        # Already going (auto-run or an earlier /run) — wait for it.
+        if not wait:
+            return _job_out(job, db, detail=True)
+        get_job_queue().wait_for(job_id)
+        db.refresh(job)
+        return _job_out(job, db, detail=True)
     if job.status not in RUNNABLE_STATUSES:
         raise HTTPException(
             409,
             f"job is '{job.status}' — only {sorted(RUNNABLE_STATUSES)} jobs can run",
         )
+    # A failed / blocked job must be reset to pending first: the queue
+    # only accepts pending / queued jobs, and the stale error / block
+    # must not survive into the new run (this was a latent 409 — /run
+    # on a failed job could never work — exposed by v0.9.0 auto-run,
+    # which fails fast jobs in the background before /run is called).
+    if job.status in {JobStatus.FAILED.value, JobStatus.BLOCKED.value}:
+        job.status = JobStatus.PENDING.value
+        job.error = None
+        meta = dict(job.meta_json or {})
+        meta.pop("blocked_by", None)
+        job.meta_json = meta
+        db.commit()
     queue = get_job_queue()
     try:
         queue.enqueue(db, job_id, priority=1)

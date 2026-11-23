@@ -712,7 +712,15 @@ async function apiPutJson(path: string, body: unknown = {}): Promise<ApiResult> 
     let data: unknown = null;
     try { data = await res.json(); } catch { /* non-JSON error body */ }
     const detail = (data as { detail?: unknown } | null)?.detail;
-    return { ok: res.ok, status: res.status, data, error: res.ok ? undefined : (typeof detail === "string" ? detail : `Request failed (${res.status})`) };
+    // FastAPI validation errors come back as `detail: [{msg, loc, …}]` —
+    // surface the first message in plain language instead of the
+    // generic "Request failed (422)" (v0.9.0 audit R6).
+    const detailText = typeof detail === "string"
+      ? detail
+      : Array.isArray(detail)
+        ? detail.map((d) => (d as { msg?: unknown } | null)?.msg).filter((m): m is string => typeof m === "string").join("; ") || undefined
+        : undefined;
+    return { ok: res.ok, status: res.status, data, error: res.ok ? undefined : (detailText ?? `Request failed (${res.status})`) };
   } catch {
     return { ok: false, status: 0, data: null, error: "API unreachable" };
   }
@@ -835,7 +843,15 @@ export async function apiPostJson(path: string, body: unknown = {}): Promise<Api
     let data: unknown = null;
     try { data = await res.json(); } catch { /* non-JSON error body */ }
     const detail = (data as { detail?: unknown } | null)?.detail;
-    return { ok: res.ok, status: res.status, data, error: res.ok ? undefined : (typeof detail === "string" ? detail : `Request failed (${res.status})`) };
+    // FastAPI validation errors come back as `detail: [{msg, loc, …}]` —
+    // surface the first message in plain language instead of the
+    // generic "Request failed (422)" (v0.9.0 audit R6).
+    const detailText = typeof detail === "string"
+      ? detail
+      : Array.isArray(detail)
+        ? detail.map((d) => (d as { msg?: unknown } | null)?.msg).filter((m): m is string => typeof m === "string").join("; ") || undefined
+        : undefined;
+    return { ok: res.ok, status: res.status, data, error: res.ok ? undefined : (detailText ?? `Request failed (${res.status})`) };
   } catch {
     return { ok: false, status: 0, data: null, error: "API unreachable" };
   }
@@ -1302,7 +1318,15 @@ export async function saveSettings(body: Record<string, unknown>): Promise<ApiRe
     let data: unknown = null;
     try { data = await res.json(); } catch { /* non-JSON error body */ }
     const detail = (data as { detail?: unknown } | null)?.detail;
-    return { ok: res.ok, status: res.status, data, error: res.ok ? undefined : (typeof detail === "string" ? detail : `Request failed (${res.status})`) };
+    // FastAPI validation errors come back as `detail: [{msg, loc, …}]` —
+    // surface the first message in plain language instead of the
+    // generic "Request failed (422)" (v0.9.0 audit R6).
+    const detailText = typeof detail === "string"
+      ? detail
+      : Array.isArray(detail)
+        ? detail.map((d) => (d as { msg?: unknown } | null)?.msg).filter((m): m is string => typeof m === "string").join("; ") || undefined
+        : undefined;
+    return { ok: res.ok, status: res.status, data, error: res.ok ? undefined : (detailText ?? `Request failed (${res.status})`) };
   } catch {
     return { ok: false, status: 0, data: null, error: "API unreachable" };
   }
@@ -1961,7 +1985,15 @@ export async function apiGetResult(path: string): Promise<ApiResult> {
     let data: unknown = null;
     try { data = await res.json(); } catch { /* non-JSON error body */ }
     const detail = (data as { detail?: unknown } | null)?.detail;
-    return { ok: res.ok, status: res.status, data, error: res.ok ? undefined : (typeof detail === "string" ? detail : `Request failed (${res.status})`) };
+    // FastAPI validation errors come back as `detail: [{msg, loc, …}]` —
+    // surface the first message in plain language instead of the
+    // generic "Request failed (422)" (v0.9.0 audit R6).
+    const detailText = typeof detail === "string"
+      ? detail
+      : Array.isArray(detail)
+        ? detail.map((d) => (d as { msg?: unknown } | null)?.msg).filter((m): m is string => typeof m === "string").join("; ") || undefined
+        : undefined;
+    return { ok: res.ok, status: res.status, data, error: res.ok ? undefined : (detailText ?? `Request failed (${res.status})`) };
   } catch {
     return { ok: false, status: 0, data: null, error: "API unreachable" };
   }
@@ -2298,9 +2330,19 @@ export function normalizeBatchStatus(raw: unknown): BatchStatus | null {
   };
 }
 
-/** POST /batch — start a batch over up to 20 sources. Returns the batch id or an error. */
-export async function startBatch(sources: { url?: string; path?: string }[]): Promise<{ batch_id: string | null; error: string | null }> {
-  const res = await apiPostJson("/batch", { sources });
+/** POST /batch — start a batch over up to 20 sources. Returns the batch id or an error.
+ * The server takes `sources` as plain strings (a URL or a local path),
+ * so objects are flattened here — sending objects used to 422 every
+ * start (v0.9.0 audit R5). `own_content_declaration` is required for
+ * YouTube sources (rights guardrail). */
+export async function startBatch(
+  sources: ({ url?: string; path?: string } | string)[],
+  ownContentDeclaration = false,
+): Promise<{ batch_id: string | null; error: string | null }> {
+  const flat = sources
+    .map((s) => (typeof s === "string" ? s : (s.url ?? s.path ?? "")).trim())
+    .filter((s) => s.length > 0);
+  const res = await apiPostJson("/batch", { sources: flat, own_content_declaration: ownContentDeclaration });
   if (!res.ok) return { batch_id: null, error: res.error ?? "Could not start the batch." };
   const id = (res.data as { batch_id?: unknown } | null)?.batch_id;
   return { batch_id: typeof id === "string" ? id : null, error: typeof id === "string" ? null : "The server did not return a batch id." };

@@ -47,9 +47,30 @@ def _cleanup(job_id: str) -> None:
     client.post(f"/jobs/{job_id}/cancel")
 
 
+def _seed_queued_job() -> str:
+    """A queued job seeded directly in the DB — POST /jobs auto-runs
+    (v0.9.0), so a queued job created via the API would already be
+    running by the time the test pauses it."""
+    from clipforge.db import Job, JobStatus, get_session
+
+    session = get_session()
+    try:
+        job = Job(
+            source_type="local",
+            source_path="/tmp/clipforge-does-not-exist-control.mp4",
+            title="Control test",
+            status=JobStatus.QUEUED.value,
+        )
+        session.add(job)
+        session.commit()
+        return job.id
+    finally:
+        session.close()
+
+
 # ------------------------------------------------------------------ job control
 def test_pause_and_resume_queued_job():
-    job_id = _create_job()
+    job_id = _seed_queued_job()
     try:
         paused = client.post(f"/jobs/{job_id}/pause")
         assert paused.status_code == 200, paused.text
@@ -57,7 +78,9 @@ def test_pause_and_resume_queued_job():
         # Resume on a non-paused job is refused; pause on a finished job too.
         resumed = client.post(f"/jobs/{job_id}/resume")
         assert resumed.status_code == 200, resumed.text
-        assert resumed.json()["status"] == "queued"
+        # Queued again — or already claimed by the dispatcher (it wakes
+        # on resume); either way the job is going, not stuck paused.
+        assert resumed.json()["status"] in {"queued", "running"}
         assert client.post(f"/jobs/{job_id}/resume").status_code == 409
     finally:
         _cleanup(job_id)
@@ -90,7 +113,10 @@ def test_run_wait_false_queues_without_blocking():
 
 
 def test_cancel_queued_job_is_immediate():
-    job_id = _create_job()
+    # Seeded directly: POST /jobs auto-runs (v0.9.0), so a queued job
+    # created via the API would already be running when cancel lands
+    # and the cancel would be async (cancelling: true) instead.
+    job_id = _seed_queued_job()
     resp = client.post(f"/jobs/{job_id}/cancel")
     assert resp.status_code == 200, resp.text
     assert resp.json()["status"] == "cancelled"

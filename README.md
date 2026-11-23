@@ -8,10 +8,15 @@ captions, writes a different title / description / hashtag set for each
 platform, and publishes **only after a human approves** — through the
 platforms' official APIs, and nothing else.
 
-> **Status: v0.8.2 — production-level single-window app.** The clipping
+> **Status: v0.9.0 — production SaaS rebuild.** The clipping
 > pipeline, review UI, and publishing adapters are under active
 > development. Nothing in this repo posts to any platform automatically,
-> and `DRY_RUN=true` is the default. v0.8.2 fixes the app never opening
+> and `DRY_RUN=true` is the default. v0.9.0 is the dashboard-first
+> production rebuild: channels stay connected (proactive token refresh
+> + health monitor), a real job queue (one job at a time, pause /
+> resume / cancel, auto-run on creation), a notifications centre with
+> plain-language errors, a full audit that fixed every dead button,
+> and a modern SaaS UI. v0.8.2 fixes the app never opening
 > (splash said the server did not answer `/health` within 30 s while
 > `/yt-dlp/status` answered fine): `/health` no longer touches the
 > keyring, and startup waits up to 120 s for a slow server instead of
@@ -244,6 +249,49 @@ Things to know:
 
 Building the exe yourself: `python scripts/build_exe.py --with-web`
 (see `clipforge-server.spec`).
+
+## What's new in v0.9.0 — production SaaS rebuild
+
+- **Dashboard-first workflow.** The daily flow happens on the
+  Dashboard without tab-hopping: New clip run (licence check, then
+  clip or run the agent), live jobs with Pause / Resume / Cancel /
+  Retry, the approval queue inline, Needs attention, connected
+  channels with honest status, recent activity and Up next.
+- **Channels stay connected.** Root causes fixed: no proactive
+  refresh (YouTube tokens live 1 h), Meta never exchanged its
+  short-lived token, X refresh used the wrong auth, reconnect could
+  destroy the refresh token, and disconnects were silent. Tokens now
+  refresh 15 min before expiry (3 attempts, backoff), Meta gets a
+  60-day long-lived token, X refresh uses HTTP Basic auth, and a
+  disconnect produces a notification + a reason and next step instead
+  of silently dropping the channel.
+- **Real job queue + auto-run.** One active job at a time — a second
+  job queues honestly as "Queued — position N" and never collides.
+  Jobs created from the dashboard start automatically (they used to
+  sit `pending` forever with nothing to run them); Pause / Resume /
+  Cancel work per job (cancel kills the ffmpeg / yt-dlp process);
+  `POST /jobs/{id}/run` is idempotent, and `/run` on a failed job no
+  longer 409s (it resets and re-runs). Restart-safe: interrupted jobs
+  re-queue, nothing runs twice.
+- **Proper errors + notifications.** Every failure is plain language
+  (what failed, why, what to do next) — no tracebacks, no raw JSON.
+  A notifications centre (header bell, unread count, persistent
+  list) is wired into every failure path.
+- **Full audit, no dummy controls.** ~108 controls audited: Batch
+  Mode fixed (it 422'd on every start), Approval Queue no longer
+  lies about approving, Export Hub's scan/publish ID mix-up fixed,
+  Trending 404 links fixed, Connect wizard's false "Connected"
+  badge fixed. Anything that cannot work is honestly disabled with
+  the reason. See `docs/AUDIT-v0.9.0.md`.
+- **Modern SaaS UI.** New design system (dark-first, 150 ms
+  transitions, Low-performance mode disables animations), consistent
+  loading / empty / error states on every page. Light theme is
+  deliberately not included — a half-done light theme looks worse
+  than dark-only.
+- **Web fixes from the audit:** `startBatch` now sends plain string
+  sources (+ rights declaration) instead of objects, and all four
+  request helpers surface FastAPI validation messages instead of a
+  generic "Request failed (422)".
 
 ## What's new in v0.8.2 — app opens again: startup health fix
 

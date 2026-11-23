@@ -120,11 +120,7 @@ def _queue_drained(q: JobQueue) -> bool:
     try:
         return (
             session.query(Job)
-            .filter(
-                Job.status.in_(
-                    [JobStatus.QUEUED.value, JobStatus.PENDING.value]
-                )
-            )
+            .filter(Job.status.in_([JobStatus.QUEUED.value, JobStatus.PENDING.value]))
             .count()
             == 0
         )
@@ -139,6 +135,35 @@ def queue(tmp_path):
     # would claim this test's jobs and run the real pipeline on them
     # (the fake runner would never see them).
     reset_job_queue()
+    # Clean slate: integration tests earlier in the same process leave
+    # jobs behind — v0.9.0 auto-run enqueues every created job, so a
+    # leftover queued / pending job would shift queue positions and
+    # could be claimed by this test's dispatcher. Cancel them all up
+    # front (test DB only); terminal jobs are left alone.
+    _session = get_session()
+    try:
+        _session.query(Job).filter(
+            Job.status.in_(
+                [
+                    JobStatus.PENDING.value,
+                    JobStatus.QUEUED.value,
+                    JobStatus.RUNNING.value,
+                    JobStatus.PAUSED.value,
+                    JobStatus.TRANSCRIBING.value,
+                    JobStatus.SCORING.value,
+                    JobStatus.RENDERING.value,
+                ]
+            )
+        ).update(
+            {
+                "status": JobStatus.CANCELLED.value,
+                "error": "Cancelled by test setup.",
+            },
+            synchronize_session=False,
+        )
+        _session.commit()
+    finally:
+        _session.close()
     runner = FakeRunner()
     q = JobQueue(data_dir=tmp_path / "data", runner=runner)
     yield q, runner
@@ -161,11 +186,7 @@ def queue(tmp_path):
     try:
         stuck = (
             session.query(Job)
-            .filter(
-                Job.status.in_(
-                    [JobStatus.PAUSED.value, *sorted(ACTIVE_JOB_STATUSES)]
-                )
-            )
+            .filter(Job.status.in_([JobStatus.PAUSED.value, *sorted(ACTIVE_JOB_STATUSES)]))
             .all()
         )
         for job in stuck:
@@ -264,8 +285,13 @@ def test_enqueue_is_idempotent(queue):
     try:
         job_id = _make_job(session)
         first = q.enqueue(session, job_id, priority=0)
-        second = q.enqueue(session, job_id, priority=1)
-        assert first["queue_position"] == second["queue_position"] == 1
+        try:
+            second = q.enqueue(session, job_id, priority=1)
+            assert first["queue_position"] == second["queue_position"] == 1
+        except ValueError:
+            # The dispatcher wakes on enqueue and may claim the job
+            # between the two calls — still one run, never two.
+            assert _get_job(job_id).status == JobStatus.RUNNING.value
         # Idempotent: still one job, queued or already claimed by the
         # dispatcher (which is fast) — never two runs.
         assert _get_job(job_id).status in {

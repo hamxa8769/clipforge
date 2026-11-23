@@ -81,7 +81,9 @@ def test_job_create_youtube_requires_ownership_declaration():
         },
     )
     assert declared.status_code == 201
-    assert declared.json()["status"] == "pending"
+    # v0.9.0 auto-run: a created job is enqueued at once, so its status
+    # is "queued" (or already further along) — never "pending".
+    assert declared.json()["status"] in {"queued", "running", "blocked", "failed"}
     assert declared.json()["own_content"] is True
 
 

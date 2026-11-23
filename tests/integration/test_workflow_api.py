@@ -28,7 +28,7 @@ except ImportError:
         allow_module_level=True,
     )
 
-from clipforge.db import ClipCandidate, Job, get_session  # noqa: E402
+from clipforge.db import ClipCandidate, Job, JobStatus, get_session  # noqa: E402
 from clipforge.highlights import load_highlight_prompt  # noqa: E402
 
 client = TestClient(app)
@@ -142,6 +142,19 @@ def _seed_candidate(
         session.close()
 
 
+def _wait_for_status(job_id: str, status: str, timeout: float = 30.0) -> dict:
+    """Poll GET /jobs/{id} until it reaches `status` (auto-run races)."""
+    import time as _time
+
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        body = client.get(f"/jobs/{job_id}").json()
+        if body.get("status") == status:
+            return body
+        _time.sleep(0.2)
+    raise AssertionError(f"job {job_id} never reached {status!r}: {body!r}")
+
+
 def _seed_job(status: str = "review") -> str:
     session = get_session()
     try:
@@ -153,6 +166,42 @@ def _seed_job(status: str = "review") -> str:
         return job.id
     finally:
         session.close()
+
+
+def test_job_created_is_auto_enqueued_v090(test_video):
+    """v0.9.0 auto-run: POST /jobs enqueues the job at once — it must
+    never sit ``pending`` forever with nothing to run it (audit R3)."""
+    job_id = _create_job(test_video)
+    resp = client.get(f"/jobs/{job_id}")
+    assert resp.status_code == 200, resp.text
+    # The create response itself is the synchronous proof of enqueue;
+    # the job may already be further along (running / a stage /
+    # review) by the time we GET it — never still pending.
+    assert resp.json()["status"] in {
+        "queued",
+        "running",
+        "transcribing",
+        "scoring",
+        "rendering",
+        "review",
+        "ready",
+        "blocked",
+        "failed",
+        "done",
+    }, resp.json()
+    assert resp.json()["status"] != "pending"
+
+
+def test_upload_creates_and_enqueues_job_v090(test_video):
+    """v0.9.0 auto-run: POST /jobs/upload also enqueues at once."""
+    with open(test_video, "rb") as fh:
+        resp = client.post(
+            "/jobs/upload",
+            files={"file": ("test40.mp4", fh, "video/mp4")},
+            data={"title": "Upload auto-run", "own_content_declaration": "true"},
+        )
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["status"] != "pending"
 
 
 # ------------------------------------------------------------------ doctor
@@ -266,21 +315,44 @@ def test_missing_source_file_fails_not_blocked():
 def test_retry_and_cancel():
     # Retry: failed job runs again (and fails again on the missing file),
     # but the run history grows — the retry is a real second run.
+    # v0.9.0 auto-run: the job fails once on its own first — wait for
+    # that auto-run to land before driving /run and /retry, or the run
+    # counts race with the background dispatcher.
     job_id = _create_job("/tmp/clipforge-does-not-exist-2.mp4")
-    first = client.post(f"/jobs/{job_id}/run").json()
+    _wait_for_status(job_id, "failed")
+    first = client.get(f"/jobs/{job_id}").json()
     assert first["status"] == "failed"
     assert len(first["worker_runs"]) == 1
+    rerun = client.post(f"/jobs/{job_id}/run")
+    assert rerun.status_code == 200, rerun.text
+    assert rerun.json()["status"] == "failed"
+    assert len(rerun.json()["worker_runs"]) == 2
     retried = client.post(f"/jobs/{job_id}/retry")
     assert retried.status_code == 200, retried.text
     assert retried.json()["status"] == "failed"
-    assert len(retried.json()["worker_runs"]) == 2
-    # Retry on a job that is not failed/blocked is refused.
-    fresh_id = _create_job("/tmp/clipforge-does-not-exist-4.mp4")
-    assert client.post(f"/jobs/{fresh_id}/retry").status_code == 409
-    assert client.post(f"/jobs/{fresh_id}/cancel").status_code == 200
+    assert len(retried.json()["worker_runs"]) == 3
+    # Retry on a job that is not failed/blocked is refused — use a job
+    # in review (seeded directly, so auto-run cannot fail it first).
+    review_id = _seed_job(status="review")
+    assert client.post(f"/jobs/{review_id}/retry").status_code == 409
+    assert client.post(f"/jobs/{review_id}/cancel").status_code == 409
 
-    # Cancel: a pending job can be cancelled; a cancelled job cannot run.
-    pending_id = _create_job("/tmp/clipforge-does-not-exist-3.mp4")
+    # Cancel: a queued job can be cancelled; a cancelled job cannot run.
+    # (Seeded directly — POST /jobs auto-runs, so a queued job created
+    # via the API would already be running/failed by the time we cancel.)
+    session = get_session()
+    try:
+        pending_job = Job(
+            source_type="local",
+            source_path="/tmp/clipforge-does-not-exist-3.mp4",
+            title="Seed: test",
+            status=JobStatus.QUEUED.value,
+        )
+        session.add(pending_job)
+        session.commit()
+        pending_id = pending_job.id
+    finally:
+        session.close()
     cancelled = client.post(f"/jobs/{pending_id}/cancel")
     assert cancelled.status_code == 200
     assert cancelled.json()["status"] == "cancelled"
@@ -301,7 +373,8 @@ def test_upload_endpoint_creates_job(test_video):
         )
     assert resp.status_code == 201, resp.text
     body = resp.json()
-    assert body["status"] == "pending"
+    # v0.9.0 auto-run: the upload is enqueued at once, not left pending.
+    assert body["status"] in {"queued", "running", "blocked", "failed"}
     assert body["source"].endswith(".mp4")
     # Clean up so the run-next test below sees an empty queue.
     assert client.post(f"/jobs/{body['id']}/cancel").status_code == 200
@@ -320,7 +393,24 @@ def test_worker_queue_and_run_next(test_video):
     for job in client.get("/jobs").json():
         if job["status"] in {"pending", "queued"}:
             client.post(f"/jobs/{job['id']}/cancel")
-    job_id = _create_job(test_video)
+    # v0.9.0 auto-run: POST /jobs enqueues at once and the dispatcher
+    # claims it, so a manually-driven run-next test must seed the queued
+    # job directly in the DB (bypassing the API's auto-enqueue).
+    session = get_session()
+    try:
+        job = Job(
+            source_type="local",
+            source_path=test_video,
+            title="Morning routine: test",
+            own_content=True,
+            status=JobStatus.QUEUED.value,
+            meta_json={"top_n": 3, "caption_style": "bold-pop", "transcript_text": TRANSCRIPT_TEXT},
+        )
+        session.add(job)
+        session.commit()
+        job_id = job.id
+    finally:
+        session.close()
     queue = client.get("/worker/queue")
     assert queue.status_code == 200
     assert any(j["id"] == job_id for j in queue.json()["queued"])
