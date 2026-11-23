@@ -13,8 +13,8 @@
 //   POST /api/agent/start | /api/agent/stop, GET /api/llm/providers.
 // Until those endpoints land, the page says so plainly and the
 // controls that need the engine stay disabled — it never pretends an
-// agent is running. The Gemini setup card lives below (see
-// components/GeminiSetup.tsx); the niche/source choice is also saved
+// agent is running. The AI providers card lives below (see
+// components/LlmProviders.tsx); the niche/source choice is also saved
 // to the setup-wizard state so the wizard and this page agree.
 "use client";
 import { useCallback, useEffect, useState } from "react";
@@ -23,7 +23,7 @@ import {
   saveAgentConfig, saveSetupState, startAgent, stopAgent,
   NICHE_PRESETS, type AgentConfig, type AgentStatus, type LlmProvider,
 } from "@/lib/api";
-import GeminiSetup from "@/components/GeminiSetup";
+import LlmProviders from "@/components/LlmProviders";
 import { useServerStatus } from "@/components/ServerStatusProvider";
 import { YtDlpInstallSection } from "@/components/YtDlpInstaller";
 import {
@@ -395,8 +395,8 @@ export default function AgentPage() {
       </Card>
 
       <Card>
-        <CardHeader title="Gemini — the AI engine" hint="Optional, but smarter than the built-in engine" />
-        <GeminiSetup />
+        <CardHeader title="AI engine" hint="Pick a provider, or use the built-in rule engine with no key" />
+        <LlmProviders />
       </Card>
     </div>
   );

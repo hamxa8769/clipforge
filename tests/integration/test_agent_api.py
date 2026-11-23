@@ -268,13 +268,24 @@ def test_llm_providers_list_contract():
     providers = client.get("/api/llm/providers").json()
     assert isinstance(providers, list)
     by_id = {p["id"]: p for p in providers}
-    assert set(by_id) == {"gemini", "openai", "rules"}
+    assert set(by_id) == {
+        "gemini", "openai", "grok", "groq", "openrouter", "anthropic", "ollama", "rules",
+    }
     assert by_id["rules"]["configured"] is True
     assert by_id["rules"]["active"] is True  # no keys -> rules
     assert by_id["gemini"]["configured"] is False
     assert by_id["gemini"]["last4"] == ""
     assert by_id["gemini"]["model"] == "gemini-2.0-flash"
     assert "gemini-1.5-flash" in by_id["gemini"]["models"]
+    # v0.10.0: the new providers carry their key URL + model list, and
+    # Ollama needs no key.
+    assert by_id["grok"]["key_url"] == "https://console.x.ai"
+    assert by_id["grok"]["needs_key"] is True
+    assert "grok-4" in by_id["grok"]["models"]
+    assert by_id["ollama"]["needs_key"] is False
+    assert by_id["anthropic"]["models"] == [
+        "claude-3-5-haiku-20241022", "claude-3-5-sonnet-20241022",
+    ]
 
 
 def test_gemini_save_test_providers_round_trip(monkeypatch):
@@ -297,11 +308,11 @@ def test_gemini_save_test_providers_round_trip(monkeypatch):
     # Test the SAVED key (no key in the request body) — mocked HTTP.
     monkeypatch.setattr(
         app_module,
-        "test_gemini",
-        lambda key, model="gemini-2.0-flash": {
+        "test_provider",
+        lambda provider_id, api_key, model=None, **kwargs: {
             "ok": True,
-            "model": model,
-            "message": f"Gemini is working (model {model} answered).",
+            "model": model or "gemini-2.0-flash",
+            "message": f"Gemini is working (model {model or 'gemini-2.0-flash'} answered).",
         },
     )
     tested = client.post("/api/llm/gemini/test", json={})
@@ -324,12 +335,13 @@ def test_gemini_save_test_providers_round_trip(monkeypatch):
 def test_gemini_test_with_explicit_key_mocked(monkeypatch):
     seen: dict = {}
 
-    def _fake_test(key, model="gemini-2.0-flash"):
-        seen["key"] = key
+    def _fake_test(provider_id, api_key, model=None, **kwargs):
+        seen["provider"] = provider_id
+        seen["key"] = api_key
         seen["model"] = model
         return {"ok": False, "model": model, "message": "The Gemini API key was rejected."}
 
-    monkeypatch.setattr(app_module, "test_gemini", _fake_test)
+    monkeypatch.setattr(app_module, "test_provider", _fake_test)
     resp = client.post(
         "/api/llm/gemini/test",
         json={"api_key": "bad-key-0000", "model": "gemini-1.5-flash"},
@@ -338,6 +350,7 @@ def test_gemini_test_with_explicit_key_mocked(monkeypatch):
     assert resp.json()["ok"] is False
     assert "rejected" in resp.json()["message"]
     assert "bad-key-0000" not in resp.text
+    assert seen["provider"] == "gemini"
     assert seen["key"] == "bad-key-0000"
     assert seen["model"] == "gemini-1.5-flash"
 
@@ -359,10 +372,10 @@ def test_gemini_test_never_500s_when_test_raises(monkeypatch):
     # Regression: a broken proxy config made the Gemini test 500 with
     # a traceback. The endpoint must always answer 200 {ok: False}
     # in plain language, even if the underlying test blows up.
-    def _boom(key, model="gemini-2.0-flash"):
+    def _boom(provider_id, api_key, model=None, **kwargs):
         raise RuntimeError("InvalidURL: Invalid port: ':1]'")
 
-    monkeypatch.setattr(app_module, "test_gemini", _boom)
+    monkeypatch.setattr(app_module, "test_provider", _boom)
     resp = client.post("/api/llm/gemini/test", json={"api_key": FAKE_KEY})
     assert resp.status_code == 200, resp.text
     assert resp.json()["ok"] is False

@@ -184,6 +184,30 @@ Live auth check for `youtube` | `instagram` | `facebook` | `tiktok` |
 on success; `502` with the exact provider error otherwise (e.g. token
 expired, key rejected 401, network failure) — never a bare 500.
 
+### `POST /clips/{candidate_id}/capcut` (v0.10.0)
+
+Export a rendered clip as a CapCut draft project folder (see
+`docs/capcut-export.md`). `200` with `{ok, draft_path, draft_name,
+message, in_capcut_folder, tracks, files}` — the message names the
+folder path in plain language. Re-export replaces the previous draft
+of the same name. `404` for an unknown candidate; `422` when the clip
+has no rendered mp4 yet ("render it first").
+
+### `GET /api/llm/providers` · `POST /api/llm/{provider}/test` · `POST /api/llm/{provider}/save` · `POST /api/llm/active` (v0.10.0)
+
+AI providers (see `docs/ai-providers.md`): Gemini, OpenAI, Grok (xAI),
+Groq, OpenRouter, Claude (Anthropic), Ollama (local, no key), and the
+built-in rule engine. `GET /api/llm/providers` lists them with masked
+`configured` + `last4`, `active`, `models`, `key_url`, `blurb`.
+`POST /api/llm/{provider}/test {api_key?, model?}` tests the typed key
+(or the saved key / local Ollama server when omitted) against the real
+API and returns plain-language `{ok, model, message}` — never a 500,
+never the key. `POST /api/llm/{provider}/save` stores (or clears, with
+`""`) the key in the OS keyring and returns the masked view only.
+`POST /api/llm/active {provider}` pins the agent (`"auto"` / `"rules"`
+also allowed). The old `/api/llm/gemini/test` and `/api/llm/gemini/save`
+paths still work via the generic routes.
+
 ### `GET /ffmpeg/status` · `POST /ffmpeg/install` (v0.4.1)
 
 One-click FFmpeg install. `POST /ffmpeg/install` (202) starts the

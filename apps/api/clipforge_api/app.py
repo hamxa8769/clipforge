@@ -80,6 +80,7 @@ Run:  PYTHONPATH=src uvicorn clipforge_api.app:app --port 8000
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -190,6 +191,7 @@ from clipforge.db import (
     init_db,
     session_factory,
 )
+from clipforge.capcut import CapCutError, export_clip_to_capcut
 from clipforge.ffmpeg_install import FfmpegInstaller, ensure_bundled_on_path
 from clipforge.job_queue import get_job_queue
 from clipforge.licensing import (
@@ -202,8 +204,11 @@ from clipforge.licensing import (
 from clipforge.llm import (
     GEMINI_DEFAULT_MODEL,
     GEMINI_MODELS,
+    PROVIDERS,
+    provider_key,
+    provider_model,
     resolve_engine,
-    test_gemini,
+    test_provider,
 )
 from clipforge.monetization import progress as monetization_progress
 from clipforge.niches import PRESET_NAMES
@@ -408,6 +413,12 @@ class SettingsUpdate(BaseModel):
     llm_provider: str | None = None
     llm_base_url: str | None = None
     llm_model: str | None = None
+    # v0.10.0: pin the agent to one provider ("" / "auto" = automatic).
+    llm_active_provider: str | None = None
+    # v0.10.0: per-provider model overrides {provider_id: model}.
+    llm_models: dict[str, str] | None = None
+    # v0.10.0: Ollama base URL override ("" = default localhost:11434).
+    ollama_base_url: str | None = None
     llm_api_key: str | None = None  # None = keep, "" = clear, value = set
     gemini_api_key: str | None = None  # v0.5.0: same semantics, Gemini key
     # {platform: {"client_id": ..., "client_secret": ...}} — same semantics.
@@ -1476,6 +1487,79 @@ def get_candidate_seo(candidate_id: str, db: Session = Depends(get_db)):
     }
 
 
+# ------------------------------------------------------- CapCut export (v0.10.0)
+def _resolve_clip_mp4(cand: ClipCandidate) -> Path | None:
+    """Find the rendered mp4 for a candidate, wherever it lives."""
+    data_dir = _data_dir()
+    candidates = []
+    if cand.file_path:
+        candidates.append(Path(cand.file_path))
+        candidates.append(data_dir / cand.file_path)
+    candidates.append(data_dir / "clips" / cand.job_id / f"clip_{cand.n:02d}.mp4")
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def _clip_words(job_id: str) -> list[dict]:
+    """Transcript words for a job (from its transcript.json artifact).
+
+    Words are in source time; the caller shifts them by the clip's
+    start. Empty list when the job has no transcript — the draft
+    still exports, without captions.
+    """
+    artifact = _data_dir() / "jobs" / job_id / "transcript.json"
+    try:
+        data = json.loads(artifact.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    words = data.get("words") or []
+    return [w for w in words if isinstance(w, dict)]
+
+
+@app.post("/clips/{candidate_id}/capcut")
+def export_clip_to_capcut_endpoint(candidate_id: str, db: Session = Depends(get_db)):
+    """Export a rendered clip as a CapCut draft project folder.
+
+    The draft holds the rendered 9:16 mp4 on a video track, the hook
+    line as a title track, and the transcript words as a captions
+    track. The mp4 is linked by absolute path, not copied. Re-export
+    replaces the previous draft of the same name. Returns the folder
+    path in plain language so the user can open it in CapCut.
+    """
+    cand = _get_or_404(db, ClipCandidate, candidate_id, "clip candidate")
+    mp4 = _resolve_clip_mp4(cand)
+    if mp4 is None:
+        raise HTTPException(
+            422,
+            "This clip has no rendered mp4 yet — render it first, then export to CapCut.",
+        )
+    job = _get_or_404(db, Job, cand.job_id, "job")
+    words = _clip_words(cand.job_id)
+    clip_start = (
+        cand.trim_start_s if cand.trim_start_s is not None else cand.start_s
+    )
+    try:
+        result = export_clip_to_capcut(
+            mp4_path=mp4,
+            duration_s=cand.duration_s,
+            title=job.title or cand.hook_line or f"Clip {cand.n}",
+            hook=cand.hook_line or "",
+            words=words,
+            clip_start_s=clip_start,
+            draft_name=f"ClipForge_{cand.job_id[:8]}_clip_{cand.n:02d}",
+            data_dir=_data_dir(),
+        )
+    except CapCutError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {
+        "clip_candidate_id": cand.id,
+        "job_id": cand.job_id,
+        **result,
+    }
+
+
 # ------------------------------------------------------------------ thumbnails (v0.7.0)
 def _clip_thumbnail_out(cand: ClipCandidate) -> dict:
     thumbnails = _thumbnails_out(cand)
@@ -2459,6 +2543,30 @@ def update_settings(payload: SettingsUpdate):
         current.llm_base_url = payload.llm_base_url.rstrip("/")
     if payload.llm_model is not None:
         current.llm_model = payload.llm_model
+    if payload.llm_active_provider is not None:
+        choice = payload.llm_active_provider.strip().lower()
+        if choice not in ("", "auto", *PROVIDERS):
+            raise HTTPException(
+                422, f"unknown LLM provider {payload.llm_active_provider!r}."
+            )
+        current.llm_active_provider = choice
+    if payload.llm_models is not None:
+        merged = dict(current.llm_models or {})
+        for provider_id, model in payload.llm_models.items():
+            if provider_id not in PROVIDERS:
+                raise HTTPException(422, f"unknown LLM provider {provider_id!r}.")
+            if not model:
+                merged.pop(provider_id, None)
+            elif len(model) > 120:
+                raise HTTPException(422, f"model name too long for {provider_id}.")
+            else:
+                merged[provider_id] = model
+        current.llm_models = merged
+    if payload.ollama_base_url is not None:
+        url = payload.ollama_base_url.strip().rstrip("/")
+        if url and not url.startswith(("http://", "https://")):
+            raise HTTPException(422, "ollama_base_url must start with http:// or https://")
+        current.ollama_base_url = url
     store.save(current)
     if payload.dry_run is not None:
         # Keep the cached /health value in sync (see
@@ -3289,11 +3397,6 @@ class AgentConfigUpdate(BaseModel):
     platforms: list[str] | None = None
 
 
-class GeminiKeyIn(BaseModel):
-    api_key: str = ""
-    model: str | None = None
-
-
 def _agent() -> agent_mod.Agent:
     """The one shared agent for this data dir (start/stop share a thread)."""
     return agent_mod.get_agent(_data_dir(), _Session, _settings_store())
@@ -3386,122 +3489,233 @@ def list_llm_providers():
     """LLM providers with configured status (masked, last4 only).
 
     ``active`` marks the engine the agent would use right now:
-    Gemini when its key is saved, then OpenAI-compatible, else the
-    rule engine (always available, no key needed).
+    the explicitly selected provider when configured, else the
+    first configured provider in auto order, else the rule engine
+    (always available, no key needed).
     """
     store = _settings_store()
     engine, _provider = resolve_engine(store)
-    gemini_view = store.credential_view("gemini", "api_key")
-    openai_view = store.credential_view("llm", "api_key")
     settings_now = store.load()
-    return [
-        {
-            "id": "gemini",
-            "name": "Gemini",
-            "model": settings_now.gemini_model or GEMINI_DEFAULT_MODEL,
-            "models": list(GEMINI_MODELS),
-            "configured": gemini_view["configured"],
-            "last4": gemini_view["last4"],
-            "masked": gemini_view["masked"],
-            "source": gemini_view["source"],
-            "active": engine == "gemini",
-        },
-        {
-            "id": "openai",
-            "name": "OpenAI-compatible",
-            "model": settings_now.llm_model,
-            "base_url": settings_now.llm_base_url,
-            "configured": openai_view["configured"],
-            "last4": openai_view["last4"],
-            "masked": openai_view["masked"],
-            "source": openai_view["source"],
-            "active": engine == "openai",
-        },
+    out = []
+    for provider_id, info in PROVIDERS.items():
+        if provider_id == "ollama":
+            # No key: configured means "selected" (or its server
+            # answers — the Test button proves that live).
+            configured = (settings_now.llm_active_provider or "") == "ollama"
+            view = {"configured": configured, "last4": "", "masked": "", "source": "local"}
+        else:
+            service = "llm" if provider_id == "openai" else provider_id
+            view = store.credential_view(service, "api_key")
+        model = provider_model(store, provider_id)
+        # The legacy generic OpenAI settings still override the
+        # OpenAI row's model/base URL when set.
+        entry = {
+            "id": provider_id,
+            "name": info.label,
+            "label": info.label,
+            "model": model,
+            "models": list(info.models),
+            "base_url": (
+                settings_now.llm_base_url
+                if provider_id == "openai"
+                else (
+                    settings_now.ollama_base_url or info.base_url
+                    if provider_id == "ollama"
+                    else info.base_url
+                )
+            ),
+            "needs_key": info.needs_key,
+            "key_url": info.key_url,
+            "blurb": info.blurb,
+            "configured": view["configured"],
+            "last4": view["last4"],
+            "masked": view["masked"],
+            "source": view["source"],
+            "active": engine == provider_id,
+        }
+        out.append(entry)
+    out.append(
         {
             "id": "rules",
             "name": "Rule-based (no key needed)",
+            "label": "Rule-based (no key needed)",
             "model": "",
+            "models": [],
+            "base_url": "",
+            "needs_key": False,
+            "key_url": "",
+            "blurb": "The built-in rule engine — always works, no key, no internet.",
             "configured": True,
             "last4": "",
             "masked": "",
             "source": "builtin",
             "active": engine == "rules",
-        },
-    ]
+        }
+    )
+    return out
 
 
-@app.post("/api/llm/gemini/test")
-def test_gemini_key(payload: GeminiKeyIn):
-    """Test a Gemini key against the real API (plain-language result).
+class LlmKeyIn(BaseModel):
+    """Save / test one provider's key. ``api_key`` "" = clear (save)."""
 
-    ``api_key`` may be omitted to test the *saved* key. The key is
-    never echoed back, logged, or included in any message.
+    api_key: str = ""
+    model: str | None = None
+    base_url: str | None = None
+
+
+class LlmActiveIn(BaseModel):
+    """Pin the agent to one provider: id, "auto", or "rules"."""
+
+    provider: str = "auto"
+
+
+def _llm_service(provider_id: str) -> str:
+    """Keyring service name for a provider id ("openai" keeps "llm")."""
+    return "llm" if provider_id == "openai" else provider_id
+
+
+def _test_provider_key(provider_id: str, payload: LlmKeyIn) -> dict:
+    """Test a provider's key against the real API (plain-language result).
+
+    ``api_key`` may be omitted to test the *saved* key (or, for
+    Ollama, the local server). The key is never echoed back, logged,
+    or included in any message.
     """
-    model = payload.model or GEMINI_DEFAULT_MODEL
-    if model not in GEMINI_MODELS:
+    info = PROVIDERS.get(provider_id)
+    if info is None:
+        raise HTTPException(422, f"Unknown AI provider {provider_id!r}.")
+    model = payload.model or provider_model(_settings_store(), provider_id)
+    if provider_id == "gemini" and model not in GEMINI_MODELS:
         raise HTTPException(
             422, f"Unknown Gemini model {model!r} — pick one of {list(GEMINI_MODELS)}."
         )
     key = (payload.api_key or "").strip()
-    if not key:
-        key = _settings_store().get_credential("gemini", "api_key") or ""
-    if not key:
+    if not key and info.needs_key:
+        key = provider_key(_settings_store(), provider_id) or ""
+    if info.needs_key and not key:
         raise HTTPException(
             422,
-            "No Gemini API key given and none saved — paste your key "
-            "(Google AI Studio > Get API key) and test again.",
+            f"No {info.label} API key given and none saved — paste your key "
+            f"({info.key_url}) and test again.",
         )
+    base_url = None
+    if provider_id == "ollama":
+        base_url = (payload.base_url or "").strip() or None
     # A test must never 500: any unexpected failure (e.g. a broken
     # proxy config on the machine) comes back as a plain-language
     # {ok: False} so the Test button can show it.
     try:
-        result = test_gemini(key, model)
+        result = test_provider(provider_id, key, model, base_url=base_url)
     except Exception as exc:  # noqa: BLE001 — test endpoint never 500s
         return {
             "ok": False,
             "model": model,
             "message": (
-                "Gemini could not be tested right now — "
+                f"{info.label} could not be tested right now — "
                 f"check your internet connection and try again. ({exc})"
             ),
         }
     return {"ok": result["ok"], "model": result["model"], "message": result["message"]}
 
 
-@app.post("/api/llm/gemini/save")
-def save_gemini_key(payload: GeminiKeyIn):
-    """Save (or clear, with "") a Gemini key in the OS keyring.
+@app.post("/api/llm/{provider_id}/test")
+def test_llm_provider_key(provider_id: str, payload: LlmKeyIn):
+    """Test any provider's key (or Ollama's local server)."""
+    return _test_provider_key(provider_id, payload)
+
+
+@app.post("/api/llm/{provider_id}/save")
+def save_llm_provider_key(provider_id: str, payload: LlmKeyIn):
+    """Save (or clear, with "") a provider's key in the OS keyring.
 
     The response carries only the masked view — the key itself is
     never returned. An optional ``model`` is saved alongside it.
+    Ollama needs no key: saving just records its model / base URL.
     """
+    info = PROVIDERS.get(provider_id)
+    if info is None:
+        raise HTTPException(422, f"Unknown AI provider {provider_id!r}.")
     store = _settings_store()
     key = (payload.api_key or "").strip()
     if payload.model:
-        if payload.model not in GEMINI_MODELS:
+        if len(payload.model) > 120:
+            raise HTTPException(422, "Model name too long.")
+        if provider_id == "gemini" and payload.model not in GEMINI_MODELS:
             raise HTTPException(
                 422,
                 f"Unknown Gemini model {payload.model!r} — pick one of {list(GEMINI_MODELS)}.",
             )
         current = store.load()
-        current.gemini_model = payload.model
+        current.llm_models = {**(current.llm_models or {}), provider_id: payload.model}
+        # Gemini keeps its historic gemini_model field in sync so the
+        # Settings view and older UI keep showing the same model.
+        if provider_id == "gemini" and payload.model in GEMINI_MODELS:
+            current.gemini_model = payload.model
         store.save(current)
-    if key:
-        store.set_credential("gemini", "api_key", key)
-    else:
-        store.set_credential("gemini", "api_key", None)
-    view = store.credential_view("gemini", "api_key")
+    if provider_id == "ollama" and payload.base_url is not None:
+        url = payload.base_url.strip().rstrip("/")
+        if url and not url.startswith(("http://", "https://")):
+            raise HTTPException(422, "ollama_base_url must start with http:// or https://")
+        current = store.load()
+        current.ollama_base_url = url
+        store.save(current)
+    if info.needs_key:
+        if key:
+            store.set_credential(_llm_service(provider_id), "api_key", key)
+        else:
+            store.set_credential(_llm_service(provider_id), "api_key", None)
+        view = store.credential_view(_llm_service(provider_id), "api_key")
+        return {
+            "ok": True,
+            "provider": provider_id,
+            "configured": view["configured"],
+            "last4": view["last4"],
+            "masked": view["masked"],
+            "message": (
+                f"{info.label} API key saved."
+                if view["configured"]
+                else f"{info.label} API key cleared — the agent will use another engine or the rule engine."
+            ),
+        }
     return {
         "ok": True,
-        "configured": view["configured"],
-        "last4": view["last4"],
-        "masked": view["masked"],
-        "message": (
-            "Gemini API key saved."
-            if view["configured"]
-            else "Gemini API key cleared — the agent will use the rule engine."
-        ),
+        "provider": provider_id,
+        "configured": True,
+        "last4": "",
+        "masked": "",
+        "message": f"{info.label} needs no key — select it below to use it.",
     }
+
+
+@app.post("/api/llm/active")
+def set_active_llm_provider(payload: LlmActiveIn):
+    """Pin the agent to one provider ("auto" / "rules" also allowed).
+
+    The choice only takes effect when the provider is configured
+    (Ollama: just selected); otherwise the agent falls back to the
+    first configured provider, and the providers list shows what is
+    actually active.
+    """
+    choice = (payload.provider or "auto").strip().lower()
+    if choice not in ("auto", "rules", *PROVIDERS):
+        raise HTTPException(422, f"Unknown AI provider {choice!r}.")
+    store = _settings_store()
+    current = store.load()
+    current.llm_active_provider = "" if choice == "auto" else choice
+    store.save(current)
+    engine, _provider = resolve_engine(store)
+    if choice == "rules":
+        message = "Rule-based engine selected — the agent works with no key."
+    elif choice == "auto":
+        message = f"Automatic AI selection — the agent uses {engine} right now."
+    else:
+        info = PROVIDERS[choice]
+        message = (
+            f"{info.label} selected."
+            if engine == choice
+            else f"{info.label} selected, but it has no key saved yet — the agent uses {engine} until you save one."
+        )
+    return {"ok": True, "active": engine, "selected": choice, "message": message}
 
 
 # ============================================================ / v0.5.0 ===
