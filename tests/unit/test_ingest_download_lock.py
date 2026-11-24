@@ -70,6 +70,12 @@ with open(log_path, "a", encoding="utf-8") as fh:
 
 url = argv[-1]
 video_id = "CMzctRZQlo0"  # the test URL's id
+if "--simulate" in argv:
+    # Pre-flight probe (v0.10.3): metadata only, no files created.
+    info = {"id": video_id, "title": "Fake video", "duration": 120,
+            "is_live": False, "_type": "video"}
+    print(json.dumps(info))
+    sys.exit(0)
 outtmpl = argv[argv.index("-o") + 1]
 out_dir = os.path.dirname(outtmpl)
 os.makedirs(out_dir, exist_ok=True)
@@ -134,6 +140,9 @@ def fake_ytdlp(tmp_path: Path, fixture_video: Path, monkeypatch) -> Path:
     monkeypatch.setenv("FAKE_YTDLP_FIXTURE", str(fixture_video))
     monkeypatch.setenv("FAKE_YTDLP_STDERR", LOCK_STDERR)
     monkeypatch.setattr("clipforge.ingest.resolve_yt_dlp_path", lambda data_dir=None: str(script))
+    # v0.10.3: the pre-flight would otherwise do a real oEmbed call;
+    # the fake video exists, so the check passes.
+    monkeypatch.setattr("clipforge.ingest._oembed_status", lambda url: "available")
     return script
 
 
@@ -151,7 +160,9 @@ def test_download_uses_isolated_dir_per_run(tmp_path: Path, fake_ytdlp: Path) ->
     log = Path(os.environ["FAKE_YTDLP_LOG"])
     info1 = _run(tmp_path, job_id="job-aaa")
     info2 = _run(tmp_path, job_id="job-aaa")  # same job retried: still a fresh dir
-    runs = _argv_runs(log)
+    # v0.10.3: each ingest also runs a metadata-only pre-flight probe
+    # (no -o flag); only the download runs name a download dir.
+    runs = [run for run in _argv_runs(log) if "-o" in run]
     assert len(runs) == 2
     templates = [run[run.index("-o") + 1] for run in runs]
     assert templates[0] != templates[1]
@@ -171,13 +182,18 @@ def test_download_uses_isolated_dir_per_run(tmp_path: Path, fake_ytdlp: Path) ->
 def test_retry_flags_are_passed(tmp_path: Path, fake_ytdlp: Path) -> None:
     """yt-dlp gets real file-access retries with a sleep, and keeps .part."""
     _run(tmp_path)
-    argv = _argv_runs(Path(os.environ["FAKE_YTDLP_LOG"]))[0]
+    # v0.10.3: the first logged run is the pre-flight probe — the
+    # download run is the one with -o.
+    argv = [run for run in _argv_runs(Path(os.environ["FAKE_YTDLP_LOG"])) if "-o" in run][0]
     assert "--file-access-retries" in argv
     assert argv[argv.index("--file-access-retries") + 1] == "10"
     assert "--retry-sleep" in argv
     assert argv[argv.index("--retry-sleep") + 1] == "file_access:1"
     assert argv[argv.index("--fragment-retries") + 1] == "10"
     assert argv[argv.index("--retries") + 1] == "10"
+    # v0.10.3: every network wait is bounded (the 3601 s hang).
+    assert argv[argv.index("--socket-timeout") + 1] == "20"
+    assert argv[argv.index("--extractor-retries") + 1] == "2"
     # Resume is NOT thrown away: --no-part would lose in-run resume.
     assert "--no-part" not in argv
 
@@ -209,7 +225,11 @@ def test_concurrent_same_video_downloads_do_not_share_a_dir(
     for t in threads:
         t.join(timeout=60)
     assert len(results) == 2
-    templates = [run[run.index("-o") + 1] for run in _argv_runs(Path(os.environ["FAKE_YTDLP_LOG"]))]
+    templates = [
+        run[run.index("-o") + 1]
+        for run in _argv_runs(Path(os.environ["FAKE_YTDLP_LOG"]))
+        if "-o" in run
+    ]
     assert len(set(templates)) == 2
 
 

@@ -89,6 +89,78 @@ def plain_error(exc: BaseException, stage: str | None = None) -> dict:
     if isinstance(exc, IngestError):
         from clipforge.ingest import looks_like_download_lock  # noqa: PLC0415
 
+        # v0.10.3: the ingest stage classifies its own failures
+        # (IngestError.code), so the user gets the specific reason and
+        # the right next step instead of the generic ingest message.
+        # The message itself is already plain language; only the title
+        # and action are specialised here.
+        code = getattr(exc, "code", None)
+        if code == "youtube_unavailable":
+            return {
+                "title": "This video isn't available on YouTube",
+                "message": sanitize_error_message(str(exc)),
+                "action": (
+                    "Try a different link — a removed or private video "
+                    "can't be downloaded by any app."
+                ),
+                "code": "youtube_unavailable",
+            }
+        if code == "youtube_bot_check":
+            return {
+                "title": "YouTube asked to sign in",
+                "message": sanitize_error_message(str(exc)),
+                "action": (
+                    "Wait a little while and retry the job. If it keeps "
+                    "happening, the link may need YouTube cookies — try a "
+                    "different video first."
+                ),
+                "code": "youtube_bot_check",
+            }
+        if code == "youtube_live":
+            return {
+                "title": "This is a live stream",
+                "message": sanitize_error_message(str(exc)),
+                "action": "Use Live capture for live streams, not a normal job.",
+                "code": "youtube_live",
+            }
+        if code == "youtube_unreachable":
+            return {
+                "title": "Couldn't reach YouTube",
+                "message": sanitize_error_message(str(exc)),
+                "action": "Check your internet connection and retry the job.",
+                "code": "youtube_unreachable",
+            }
+        if code in {"download_stalled", "download_timeout"}:
+            return {
+                "title": "The download stalled",
+                "message": sanitize_error_message(str(exc)),
+                "action": (
+                    "Check your internet connection and retry the job. "
+                    "If it keeps stalling, try a shorter video."
+                ),
+                "code": code,
+            }
+        if code == "youtube_age_gated":
+            return {
+                "title": "This video is age-restricted",
+                "message": sanitize_error_message(str(exc)),
+                "action": "Try a different link — age-restricted videos need a signed-in download.",
+                "code": "youtube_age_gated",
+            }
+        if code == "youtube_geo_blocked":
+            return {
+                "title": "This video isn't available in your country",
+                "message": sanitize_error_message(str(exc)),
+                "action": "Try a different link.",
+                "code": "youtube_geo_blocked",
+            }
+        if code == "youtube_playlist":
+            return {
+                "title": "That's a playlist, not a video",
+                "message": sanitize_error_message(str(exc)),
+                "action": "Open the video itself and paste its link instead.",
+                "code": "youtube_playlist",
+            }
         if looks_like_download_lock(str(exc)):
             # v0.9.2: a download that died on a Windows file lock
             # (usually antivirus real-time scanning holding a fragment).

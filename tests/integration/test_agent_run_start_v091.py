@@ -135,6 +135,12 @@ def fake_ytdlp(tmp_path, monkeypatch):
         "url = args[-1]\n"
         "m = re.search(r'[?&]v=([\\w-]{11})', url) or re.search(r'/([\\w-]{11})$', url)\n"
         "vid = m.group(1) if m else 'testvideo01'\n"
+        "if '--simulate' in args:\n"
+        "    import json as _json\n"
+        "    info = {'id': vid, 'title': 'Fake video', 'duration': 40,\n"
+        "            'is_live': False, '_type': 'video'}\n"
+        "    print(_json.dumps(info))\n"
+        "    raise SystemExit(0)\n"
         "out = args[args.index('-o') + 1].replace('%(id)s', vid).replace('%(ext)s', 'mp4')\n"
         "subprocess.run(['ffmpeg', '-y', '-v', 'error', '-f', 'lavfi', '-i',\n"
         "    'testsrc=duration=40:size=320x240:rate=10', '-f', 'lavfi', '-i',\n"
@@ -144,6 +150,10 @@ def fake_ytdlp(tmp_path, monkeypatch):
     )
     shim.chmod(0o755)
     monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ.get("PATH", ""))
+    # v0.10.3: ingest pre-flights the link with oEmbed first — this
+    # module is hermetic ("no network"), so the check is stubbed to
+    # "available" and the fake answers the metadata probe above.
+    monkeypatch.setattr("clipforge.ingest._oembed_status", lambda url: "available")
     return str(shim)
 
 

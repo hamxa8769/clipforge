@@ -510,7 +510,7 @@ dependencies = [
 
 [[package]]
 name = "clipforge-desktop"
-version = "0.10.2"
+version = "0.10.3"
 dependencies = [
  "ctrlc",
  "image",
