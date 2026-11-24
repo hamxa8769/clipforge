@@ -46,7 +46,14 @@ dependencies = [
 # Local transcription (Whisper). Heavy download (~500 MB+ models); only
 # install on a worker that actually transcribes. Cloud Whisper API needs no
 # extra package — it uses httpx via the OPENAI_API_KEY.
-transcribe = ["faster-whisper>=1.0"]
+# NOTE (v0.10.2): faster-whisper 1.2.1 passes metadata_errors= to
+# av.open(), which PyAV 19 removed — a fresh install without the
+# `av<19` bound gets av 19 and EVERY transcription crashes with
+# `TypeError: open() got an unexpected keyword argument
+# 'metadata_errors'`. The pin below keeps the documented install
+# working; the requirements probe reports an unpinned system-Python
+# install (av 19+) as `broken` with the same fix.
+transcribe = ["faster-whisper>=1.0", "av>=11,<19"]
 # Face/person tracking for 9:16 reframe. Headless build: no GUI deps.
 vision = ["opencv-python-headless>=4.10"]
 # YouTube Data API v3 client (used by the YouTube publishing adapter).

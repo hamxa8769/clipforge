@@ -83,6 +83,33 @@ def no_faster_whisper(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(importlib.util, "find_spec", _fake_find_spec)
 
 
+@pytest.fixture
+def fake_faster_whisper_installed(monkeypatch: pytest.MonkeyPatch):
+    """Simulate faster-whisper importable in-process (it is not, on this VM).
+
+    v0.10.2 detection actually *imports* the package (a spec that
+    exists but an import that fails is "broken", not "installed"),
+    so faking ``find_spec`` alone no longer simulates an install —
+    the fake module must be importable too.
+    """
+    import sys
+    import types
+
+    mod = types.ModuleType("faster_whisper")
+    mod.__version__ = "1.2.3"
+    mod.__file__ = "/fake/site-packages/faster_whisper/__init__.py"
+    monkeypatch.setitem(sys.modules, "faster_whisper", mod)
+    real_find_spec = importlib.util.find_spec
+
+    def _fake_find_spec(name: str, *args, **kwargs):
+        if name == "faster_whisper":
+            return object()
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", _fake_find_spec)
+    return mod
+
+
 # ------------------------------------------------------- yt-dlp (v0.9.1, re-pinned)
 def test_probe_yt_dlp_path_install_found(isolated_env) -> None:
     _working_ytdlp(isolated_env["bin"] / "yt-dlp")
@@ -234,16 +261,8 @@ def test_probe_whisper_api_key_counts(
 
 
 def test_probe_whisper_local_model_not_cached_is_degraded(
-    isolated_env, monkeypatch: pytest.MonkeyPatch
+    isolated_env, fake_faster_whisper_installed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    real_find_spec = importlib.util.find_spec
-
-    def _fake_find_spec(name: str, *args, **kwargs):
-        if name == "faster_whisper":
-            return object()  # installed, but no model in the cache
-        return real_find_spec(name, *args, **kwargs)
-
-    monkeypatch.setattr(importlib.util, "find_spec", _fake_find_spec)
     monkeypatch.setenv("HF_HUB_CACHE", str(isolated_env["home"] / "hub"))
     probe = probe_whisper("small")
     assert probe["status"] == "degraded"
@@ -251,19 +270,13 @@ def test_probe_whisper_local_model_not_cached_is_degraded(
     assert probe["engine"] == "faster-whisper"
     assert probe["model_cached"] is False
     assert "500 MB" in probe["detail"]
+    assert probe["version"] == "1.2.3"
+    assert probe["source"] == "in-process (server Python)"
 
 
 def test_probe_whisper_local_model_cached_is_ok(
-    isolated_env, monkeypatch: pytest.MonkeyPatch
+    isolated_env, fake_faster_whisper_installed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    real_find_spec = importlib.util.find_spec
-
-    def _fake_find_spec(name: str, *args, **kwargs):
-        if name == "faster_whisper":
-            return object()
-        return real_find_spec(name, *args, **kwargs)
-
-    monkeypatch.setattr(importlib.util, "find_spec", _fake_find_spec)
     snap = (
         isolated_env["home"]
         / "hub"
@@ -277,6 +290,8 @@ def test_probe_whisper_local_model_cached_is_ok(
     probe = probe_whisper("small")
     assert probe["status"] == "ok"
     assert probe["model_cached"] is True
+    assert probe["version"] == "1.2.3"
+    assert probe["path"]  # the UI shows where it was found
 
 
 # ------------------------------------------------------- the whole check
@@ -326,24 +341,20 @@ def test_check_requirements_blocks_on_missing_and_broken(isolated_env, no_faster
 
 
 def test_check_requirements_degraded_whisper_does_not_block(
-    isolated_env, monkeypatch: pytest.MonkeyPatch
+    isolated_env, fake_faster_whisper_installed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _working_ytdlp(isolated_env["bin"] / "yt-dlp")
     _working_ffmpeg(isolated_env["bin"] / "ffmpeg")
     _working_ffprobe(isolated_env["bin"] / "ffprobe")
-    real_find_spec = importlib.util.find_spec
-
-    def _fake_find_spec(name: str, *args, **kwargs):
-        if name == "faster_whisper":
-            return object()
-        return real_find_spec(name, *args, **kwargs)
-
-    monkeypatch.setattr(importlib.util, "find_spec", _fake_find_spec)
     monkeypatch.setenv("HF_HUB_CACHE", str(isolated_env["home"] / "hub"))
     result = check_requirements(isolated_env["data"])
     assert result["all_ready"] is True
     assert result["blocking"] == []
     assert {r["id"]: r["status"] for r in result["requirements"]}["whisper"] == "degraded"
+    whisper = {r["id"]: r for r in result["requirements"]}["whisper"]
+    assert whisper["version"] == "1.2.3"
+    assert whisper["path"]
+    assert whisper["source"] == "in-process (server Python)"
 
 
 def test_probe_tool_dispatch(isolated_env) -> None:

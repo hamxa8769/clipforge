@@ -3,7 +3,13 @@
 Backend priority (first available wins):
 
 1. ``faster-whisper`` (local, if installed) — preferred: no audio leaves
-   the machine, word timestamps included.
+   the machine, word timestamps included. "Installed" means either
+   importable in this process (dev runs from source) or installed in
+   a system Python (the frozen ``clipforge-server.exe`` cannot see
+   the system Python's packages, so it runs transcription in that
+   Python as a subprocess — see :mod:`clipforge.whisper_system`).
+   The subprocess also keeps a native-code crash inside the model
+   load from killing the whole server (v0.9.3).
 2. OpenAI Whisper API (``whisper-1``) when ``OPENAI_API_KEY`` is set —
    audio is extracted with FFmpeg and posted via the standard library
    (no ``openai`` package required).
@@ -32,6 +38,7 @@ import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from clipforge.whisper_system import TRANSCRIBE_CODE, detect_faster_whisper, parse_transcript_json
 from clipforge.workflow import ffmpeg_missing_message
 
 _log = logging.getLogger(__name__)
@@ -366,13 +373,94 @@ def _extract_audio_wav(source: Path) -> Path:
     return Path(tmp.name)
 
 
-def _transcribe_faster_whisper(source: Path, model: str, language: str | None) -> Transcript:
+def _transcribe_faster_whisper_subprocess(
+    audio: Path, model: str, language: str | None, python_argv: list[str]
+) -> Transcript:
+    """Transcribe ``audio`` in a system Python that has faster-whisper.
+
+    The frozen server exe cannot import the user's pip-installed
+    faster-whisper, so the model is loaded in the detected Python
+    instead (see :mod:`clipforge.whisper_system`). The child prints
+    one JSON line (words with timestamps); anything on stderr is
+    only surfaced when the child fails. The Hugging Face model cache
+    is shared: the child inherits this process's environment, so
+    ``HF_HUB_CACHE`` / ``HF_HOME`` resolve to the same directory and
+    a pre-downloaded model is reused, not re-downloaded.
+    """
+    display = " ".join(python_argv)
+    _log.info("transcribing with faster-whisper via system Python (%s)", display)
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    try:
+        proc = subprocess.run(
+            [*python_argv, "-c", TRANSCRIBE_CODE, str(audio), model, language or ""],
+            capture_output=True,
+            text=True,
+            timeout=3600,
+            env=env,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"the system Python ({display}) that had faster-whisper is gone — "
+            "reinstall faster-whisper (python -m pip install faster-whisper) "
+            "or set OPENAI_API_KEY, then retry the job."
+        ) from None
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            "faster-whisper transcription timed out (over an hour) in the system "
+            f"Python ({display}) — try a smaller model or a shorter source."
+        ) from None
+    if proc.returncode != 0:
+        tail = (proc.stderr or "").strip().splitlines()[-3:]
+        raise RuntimeError(
+            "faster-whisper transcription failed in the system Python "
+            f"({display}): {'; '.join(tail) or 'no error output — see the server log'}"
+        )
+    try:
+        payload = parse_transcript_json(proc.stdout)
+    except ValueError:
+        raise RuntimeError(
+            "faster-whisper transcription in the system Python "
+            f"({display}) returned no usable transcript — see the server log."
+        ) from None
+    words = [
+        Word(text=str(w["text"]).strip(), start=float(w["start"]), end=float(w["end"]))
+        for w in payload["words"]
+    ]
+    return Transcript(
+        words=words,
+        segments=_group_words_into_segments(words),
+        language=str(payload.get("language") or language or "en"),
+        duration_s=words[-1].end if words else 0.0,
+        engine="faster-whisper",
+    )
+
+
+def _transcribe_faster_whisper(
+    source: Path,
+    model: str,
+    language: str | None,
+    python_argv: list[str] | None = None,
+) -> Transcript:
+    """Transcribe with faster-whisper, in-process or via system Python.
+
+    ``python_argv`` is the argv prefix of a system Python with
+    faster-whisper (``None`` = import it in this process). The memory
+    guard runs first in both cases, and audio extraction happens in
+    this process in both cases (the child only ever sees a WAV file).
+    """
     # v0.9.3: check BEFORE importing the package or extracting audio
     # — a refusal here fails the job with a plain message instead of
     # OOM-killing the whole server mid-load. The load itself is
     # logged with RSS + free memory so an abrupt death during it is
     # attributable from the server log.
     _check_memory_for_model(model)
+    if python_argv is not None:
+        audio = _extract_audio_wav(source)
+        try:
+            return _transcribe_faster_whisper_subprocess(audio, model, language, python_argv)
+        finally:
+            audio.unlink(missing_ok=True)
     _log.info(
         "loading faster-whisper model %s (process RSS %s, free memory %s)",
         model,
@@ -471,9 +559,12 @@ def transcribe(
 
     ``force_engine`` may be ``"faster-whisper"``, ``"whisper-api"`` or
     ``"fallback-text"`` (useful for tests / smoke runs). Otherwise the
-    backend is picked automatically: faster-whisper if installed, else
-    the Whisper API if ``OPENAI_API_KEY`` is set, else the fallback —
-    which *requires* ``transcript_text`` and raises otherwise.
+    backend is picked automatically: faster-whisper if installed —
+    in this process, or in a system Python (the frozen exe case,
+    transcribed via subprocess — see :mod:`clipforge.whisper_system`),
+    else the Whisper API if ``OPENAI_API_KEY`` is set, else the
+    fallback — which *requires* ``transcript_text`` and raises
+    otherwise.
     """
     path = Path(source)
     if use_cache and source_sha256:
@@ -484,16 +575,30 @@ def transcribe(
     api_key = os.environ.get("OPENAI_API_KEY", "")
     base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
     engine = force_engine
-    if engine is None:
-        try:
-            import faster_whisper  # noqa: F401
-
+    # argv prefix of a system Python with faster-whisper, or None to
+    # import it in-process; only set when the local engine is picked.
+    faster_whisper_argv: list[str] | None = None
+    if engine is None or engine == "faster-whisper":
+        detection = detect_faster_whisper()
+        if detection["available"]:
             engine = "faster-whisper"
-        except ImportError:
-            engine = "whisper-api" if api_key else "fallback-text"
+            if detection["via"] == "system-python":
+                faster_whisper_argv = list(detection["python_argv"] or [])
+        elif engine == "faster-whisper":
+            raise RuntimeError(
+                "faster-whisper was requested but no working install was found "
+                "(in the server or in a system Python). Install it with "
+                "'python -m pip install faster-whisper' and press Re-check in "
+                "the requirements panel — no restart needed — or set "
+                "OPENAI_API_KEY to use the Whisper API instead."
+            )
+        elif api_key:
+            engine = "whisper-api"
+        else:
+            engine = "fallback-text"
 
     if engine == "faster-whisper":
-        result = _transcribe_faster_whisper(path, model, language)
+        result = _transcribe_faster_whisper(path, model, language, faster_whisper_argv)
     elif engine == "whisper-api":
         if not api_key:
             raise RuntimeError("whisper-api engine selected but OPENAI_API_KEY is not set")

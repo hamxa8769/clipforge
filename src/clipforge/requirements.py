@@ -37,12 +37,12 @@ are about tools, never about rights.
 
 from __future__ import annotations
 
-import importlib.util
 import os
 from datetime import UTC, datetime
 from pathlib import Path
 
 from clipforge.ffmpeg_install import probe_ffmpeg, probe_ffprobe
+from clipforge.whisper_system import DEFAULT_PROBE_TIMEOUT_S, detect_faster_whisper
 from clipforge.ytdlp_install import probe_yt_dlp
 
 #: Statuses a requirement can be in. ``degraded`` means usable but
@@ -143,7 +143,9 @@ def _whisper_model_cached(model: str) -> bool:
     return False
 
 
-def probe_whisper(model: str = DEFAULT_WHISPER_MODEL) -> dict:
+def probe_whisper(
+    model: str = DEFAULT_WHISPER_MODEL, timeout: float = DEFAULT_PROBE_TIMEOUT_S
+) -> dict:
     """Whisper backend availability, without running a transcription.
 
     ``engine`` is ``"faster-whisper"`` (local), ``"whisper-api"`` (an
@@ -152,18 +154,42 @@ def probe_whisper(model: str = DEFAULT_WHISPER_MODEL) -> dict:
     * ``ok`` — a backend exists and is ready (local model already
       downloaded, or the API key path which needs no model);
     * ``degraded`` — faster-whisper is installed but the model is not
-      downloaded yet: transcription works, but the first run downloads
-      the model (~500 MB for the default 'small' model) with no
-      progress shown;
+      downloaded yet (transcription works, but the first run downloads
+      the model, ~500 MB for the default 'small' model, with no
+      progress shown), or the local install is broken but the API key
+      path still works (the broken install is named in the detail —
+      it is never hidden);
     * ``missing`` — no backend at all: no faster-whisper install and
-      no ``OPENAI_API_KEY``.
+      no ``OPENAI_API_KEY``;
+    * ``broken`` — a faster-whisper install exists but fails to
+      import (missing native DLL, broken dependency, …) and there is
+      no API key to fall back on. A package that exists but does not
+      run is reported ``broken`` with its path, never "installed".
+
+    Detection covers both ways a local install can exist (v0.10.2):
+    importable in this server process, or installed in a system
+    Python — the frozen ``clipforge-server.exe`` cannot see the
+    system Python's packages, so a ``pip install faster-whisper``
+    in PowerShell is found by probing system Pythons and used via a
+    subprocess (see :mod:`clipforge.whisper_system`). Either way the
+    reported ``version`` is the real package version and ``path`` /
+    ``source`` say where it was found. The model cache is shared
+    between both paths (same ``HF_HUB_CACHE`` / ``HF_HOME``), so a
+    model pre-downloaded with system Python counts as cached here.
 
     No key *value* is ever read or returned — presence only.
     """
-    local = importlib.util.find_spec("faster_whisper") is not None
+    # Always probe fresh: the user may have just run `pip install
+    # faster-whisper` and pressed Re-check — a cached "missing"
+    # would lie to them for a minute.
+    detection = detect_faster_whisper(timeout=max(timeout, 20.0), fresh=True)
     api_key = bool(os.environ.get("OPENAI_API_KEY"))
-    if local:
+    if detection["available"]:
         cached = _whisper_model_cached(model)
+        via = detection["via"]
+        where = (
+            f"faster-whisper {detection['version'] or 'unknown version'} via {detection['source']}"
+        )
         if cached:
             return {
                 "found": True,
@@ -171,9 +197,15 @@ def probe_whisper(model: str = DEFAULT_WHISPER_MODEL) -> dict:
                 "model": model,
                 "model_cached": True,
                 "status": "ok",
+                "version": detection["version"],
+                "path": detection["python"] or detection["package_path"],
+                "source": detection["source"],
+                "via": via,
+                "broken": False,
+                "broken_reason": "",
                 "detail": (
-                    f"faster-whisper is installed and the '{model}' model "
-                    "is already downloaded — transcription starts at once."
+                    f"{where} and the '{model}' model is already downloaded "
+                    "— transcription starts at once."
                 ),
                 "fix_action": "",
                 "fix_label": "",
@@ -184,15 +216,66 @@ def probe_whisper(model: str = DEFAULT_WHISPER_MODEL) -> dict:
             "model": model,
             "model_cached": False,
             "status": "degraded",
+            "version": detection["version"],
+            "path": detection["python"] or detection["package_path"],
+            "source": detection["source"],
+            "via": via,
+            "broken": False,
+            "broken_reason": "",
             "detail": (
-                f"faster-whisper is installed but the '{model}' model is "
-                "not downloaded yet — the first transcription downloads "
-                "it (about 500 MB) with no progress shown. Set "
+                f"{where} but the '{model}' model is not downloaded yet "
+                "— the first transcription downloads it (about 500 MB) "
+                "with no progress shown. If you already downloaded the "
+                "model with another Python, point this app at the same "
+                "cache with the HF_HUB_CACHE environment variable, or set "
                 "OPENAI_API_KEY instead to use the Whisper API and skip "
                 "that download."
             ),
             "fix_action": "settings",
             "fix_label": "Set an OpenAI key in Settings to skip the download",
+        }
+    if detection["broken"]:
+        broken_detail = (
+            f"{detection['broken_reason']} — transcription with the local "
+            "install will fail until it is fixed: reinstall it with "
+            "'python -m pip install --force-reinstall faster-whisper' "
+            "(in the same PowerShell/Python you installed it with), "
+            "then press Re-check."
+        )
+        if api_key:
+            return {
+                "found": True,
+                "engine": "whisper-api",
+                "model": model,
+                "model_cached": False,
+                "status": "degraded",
+                "version": "",
+                "path": detection["python"],
+                "source": detection["source"],
+                "via": "none",
+                "broken": True,
+                "broken_reason": detection["broken_reason"],
+                "detail": (
+                    f"{broken_detail} Transcription still works via the Whisper API key for now."
+                ),
+                "fix_action": "settings",
+                "fix_label": "Fix the faster-whisper install, or keep using the API key",
+            }
+        return {
+            "found": False,
+            "engine": "none",
+            "model": model,
+            "model_cached": False,
+            "status": "broken",
+            "version": detection["version"],
+            "path": detection["python"],
+            "source": detection["source"],
+            "via": "none",
+            "broken": True,
+            "broken_reason": detection["broken_reason"],
+            "detail": broken_detail,
+            "fix_action": "settings",
+            "fix_label": "Reinstall faster-whisper or set OPENAI_API_KEY in Settings",
         }
     if api_key:
         return {
@@ -201,6 +284,12 @@ def probe_whisper(model: str = DEFAULT_WHISPER_MODEL) -> dict:
             "model": model,
             "model_cached": False,
             "status": "ok",
+            "version": "",
+            "path": "",
+            "source": "OPENAI_API_KEY",
+            "via": "none",
+            "broken": False,
+            "broken_reason": "",
             "detail": (
                 "Whisper API key is configured — transcription uses the "
                 "API and needs no model download."
@@ -214,10 +303,19 @@ def probe_whisper(model: str = DEFAULT_WHISPER_MODEL) -> dict:
         "model": model,
         "model_cached": False,
         "status": "missing",
+        "version": "",
+        "path": "",
+        "source": "",
+        "via": "none",
+        "broken": False,
+        "broken_reason": "",
         "detail": (
             "No transcription backend: faster-whisper is not installed "
             "and OPENAI_API_KEY is not set, so there is nothing to "
-            "transcribe with."
+            "transcribe with. Install it in PowerShell with "
+            "'python -m pip install faster-whisper' — the app detects "
+            "a system-Python install on Re-check, no restart needed — "
+            "or set OPENAI_API_KEY in Settings instead."
         ),
         "fix_action": "settings",
         "fix_label": "Install faster-whisper or set OPENAI_API_KEY in Settings",
@@ -393,13 +491,15 @@ def check_requirements(
             )
         )
 
-    wh = probe_whisper(whisper_model)
+    wh = probe_whisper(whisper_model, timeout=timeout)
     requirements.append(
         _requirement(
             "whisper",
             "Whisper transcription",
             wh["status"],
-            version=wh["engine"] if wh["engine"] != "none" else "",
+            version=wh.get("version") or (wh["engine"] if wh["engine"] != "none" else ""),
+            path=wh.get("path", ""),
+            source=wh.get("source", ""),
             detail=wh["detail"],
             fix_action=wh["fix_action"],
             fix_label=wh["fix_label"],

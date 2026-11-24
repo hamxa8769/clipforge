@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 import shutil
 import socket
@@ -707,12 +708,29 @@ def check_monitor_requirements(data_dir: str | Path | None = None) -> dict:
     checked = check_requirements(data_dir)
     wanted = {"ffmpeg", "yt-dlp"}
     reqs = [r for r in checked.get("requirements", []) if r.get("id") in wanted]
-    try:
-        import faster_whisper  # noqa: F401
+    # Same detection as the requirements panel (v0.10.2): a
+    # system-Python faster-whisper counts — the monitor transcribes
+    # through clipforge.transcribe, which reaches it via subprocess.
+    from clipforge.whisper_system import detect_faster_whisper  # noqa: PLC0415
 
+    _fw = detect_faster_whisper()
+    api_key = bool(os.environ.get("OPENAI_API_KEY"))
+    if _fw["available"]:
         whisper_ok = True
-        whisper_detail = "faster-whisper is installed — rolling transcription works."
-    except ImportError:
+        whisper_detail = (
+            f"faster-whisper {_fw['version'] or 'unknown version'} via "
+            f"{_fw['source']} — rolling transcription works."
+        )
+    elif _fw["broken"] and api_key:
+        whisper_ok = True
+        whisper_detail = (
+            f"faster-whisper install is broken ({_fw['broken_reason']}); "
+            "rolling transcription uses the Whisper API key instead."
+        )
+    elif api_key:
+        whisper_ok = True
+        whisper_detail = "Whisper API key is configured — rolling transcription works."
+    else:
         whisper_ok = False
         whisper_detail = (
             "faster-whisper is not installed and no OpenAI key is set — "
@@ -724,9 +742,9 @@ def check_monitor_requirements(data_dir: str | Path | None = None) -> dict:
             "id": "whisper",
             "label": "Rolling transcription (faster-whisper)",
             "status": "ok" if whisper_ok else "degraded",
-            "version": "",
-            "path": "",
-            "source": "local",
+            "version": _fw["version"] if _fw["available"] else "",
+            "path": _fw["python"] if _fw["available"] or _fw["broken"] else "",
+            "source": _fw["source"] if _fw["available"] or _fw["broken"] else "",
             "detail": whisper_detail,
         }
     )

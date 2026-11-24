@@ -20,6 +20,17 @@ What gets bundled:
   SQLAlchemy / pydantic. Optional heavy backends (faster-whisper, cv2)
   are lazy imports in the source, so they are NOT bundled — the exe
   runs the deterministic / API fallbacks without them.
+* faster-whisper is DELIBERATELY not bundled (v0.10.2): ctranslate2
+  brings large native DLLs, an AVX2 CPU requirement and a big size
+  increase, and bundling would ignore the user's own install and
+  pre-downloaded model. Instead the server detects a system-Python
+  install at runtime (``clipforge.whisper_system``: it probes the
+  Pythons on PATH / the ``py`` launcher) and transcribes in that
+  Python as a subprocess — so ``python -m pip install faster-whisper``
+  in PowerShell is picked up on Re-check with no restart, and both
+  paths share the same Hugging Face model cache. A frozen exe can
+  never see the system Python's site-packages, so any future change
+  that goes back to an in-process-only import WILL re-break this.
 * FFmpeg is NOT bundled: it is a separate prerequisite for clipping
   (see README.txt in the release zip).
 

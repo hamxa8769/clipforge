@@ -207,7 +207,49 @@ def check_dependencies() -> list[Dependency]:
             detail=detail if found else f"Python package {name} not installed — {detail}",
         )
 
-    out.append(_package("faster_whisper", "local Whisper transcription"))
+    # faster-whisper is special: the frozen exe cannot see a
+    # system-Python install, so plain find_spec lies about it — use
+    # the same detection the requirements panel and transcribe()
+    # use (v0.10.2), which also finds a system-Python install.
+    from clipforge.whisper_system import detect_faster_whisper  # noqa: PLC0415
+
+    _fw = detect_faster_whisper()
+    if _fw["available"]:
+        _fw_detail = (
+            "local Whisper transcription "
+            f"(faster-whisper {_fw['version'] or 'unknown version'} via {_fw['source']})"
+        )
+        out.append(
+            Dependency(
+                name="faster_whisper",
+                kind="package",
+                available=True,
+                detail=_fw_detail,
+            )
+        )
+    elif _fw["broken"]:
+        out.append(
+            Dependency(
+                name="faster_whisper",
+                kind="package",
+                available=False,
+                detail=f"faster-whisper install is broken — {_fw['broken_reason']}",
+            )
+        )
+    else:
+        out.append(
+            Dependency(
+                name="faster_whisper",
+                kind="package",
+                available=False,
+                detail=(
+                    "Python package faster_whisper not installed — local Whisper "
+                    "transcription (install it with 'python -m pip install "
+                    "faster-whisper' into your system Python; ClipForge detects "
+                    "it on Re-check, no restart needed)"
+                ),
+            )
+        )
     out.append(_package("cv2", "OpenCV face/person tracking for the 9:16 reframe"))
 
     def _key(env_var: str, detail: str) -> Dependency:
@@ -278,10 +320,35 @@ def require_transcription_backend() -> None:
     faster-whisper (local) wins, else the Whisper API key, else the
     caller must supply ``transcript_text`` for the deterministic
     fallback — which is then flagged ``demo`` on the job, never passed
-    off as real transcription.
+    off as real transcription. "Local" covers a system-Python
+    install, which the frozen exe reaches via a subprocess (v0.10.2)
+    — a ``pip install faster-whisper`` is enough, no restart needed.
+    A faster-whisper install that exists but fails to import raises
+    with code ``transcription_backend_broken``, never "missing".
     """
-    if importlib.util.find_spec("faster_whisper") is not None:
+    from clipforge.whisper_system import detect_faster_whisper  # noqa: PLC0415
+
+    detection = detect_faster_whisper()
+    if detection["available"]:
         return
+    if detection["broken"]:
+        raise MissingDependencyError(
+            code="transcription_backend_broken",
+            dependency="faster-whisper",
+            kind="package",
+            detail=(
+                f"{detection['broken_reason']}. Transcription with the local "
+                "install will fail until it is fixed."
+            ),
+            required_action=(
+                "Reinstall faster-whisper with 'python -m pip install "
+                "--force-reinstall faster-whisper' (in the same "
+                "PowerShell/Python you installed it with), then press "
+                "Re-check — or set OPENAI_API_KEY to use the Whisper API, "
+                "or supply transcript_text to run the deterministic "
+                "fallback (flagged demo, not real transcription)."
+            ),
+        )
     if os.environ.get("OPENAI_API_KEY"):
         return
     raise MissingDependencyError(
@@ -294,9 +361,11 @@ def require_transcription_backend() -> None:
         "Whisper model (about 500 MB for the default 'small' model) from "
         "HuggingFace with no progress shown — set OPENAI_API_KEY instead "
         "to use the Whisper API and skip that download.",
-        required_action="Install faster-whisper (pip install faster-whisper) "
-        "or set OPENAI_API_KEY — or supply transcript_text to run the "
-        "deterministic fallback (flagged demo, not real transcription).",
+        required_action="Install faster-whisper (python -m pip install "
+        "faster-whisper) — ClipForge detects a system-Python install on "
+        "Re-check, no restart needed — or set OPENAI_API_KEY, or supply "
+        "transcript_text to run the deterministic fallback (flagged demo, "
+        "not real transcription).",
     )
 
 
