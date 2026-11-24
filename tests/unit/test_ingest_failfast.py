@@ -240,7 +240,12 @@ def test_unreachable_is_not_reported_as_removed(
         ("ERROR: Sign in to confirm your age", "youtube_age_gated"),
         ("ERROR: This video is not available in your country", "youtube_geo_blocked"),
         ("ERROR: Unable to download webpage: Remote end closed connection", "youtube_unreachable"),
-        ("ERROR: [youtube] X: Unable to download API page: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate in certificate chain", "youtube_unreachable"),
+        (
+            "ERROR: [youtube] X: Unable to download API page: "
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: "
+            "self-signed certificate in certificate chain",
+            "youtube_unreachable",
+        ),
         ("ERROR: [youtube] X: some new failure nobody has seen", None),
     ],
 )
