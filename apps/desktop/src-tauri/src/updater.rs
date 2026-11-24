@@ -6,8 +6,13 @@
 //!   `https://api.github.com/repos/hamxa8769/clipforge/releases/latest`.
 //! * Never auto-downloads. The check runs when the user presses the
 //!   button (`check_for_updates`) and once quietly on launch (it only
-//!   sets the state — never downloads). A failed check stays silent:
-//!   state `failed` with an error string, nothing is downloaded.
+//!   sets the state — never downloads).
+//! * A failed check is NOT silent (v0.10.2): the error is stored in
+//!   state and the web UI shows it in Settings → Updates and in the
+//!   top banner, with a retry button and a link to the releases page.
+//!   Before v0.10.2 the banner hid every non-available state, so a
+//!   failed check looked exactly like "no update" and the user saw
+//!   nothing at all.
 //! * Windows: the update asset is the NSIS setup exe
 //!   (`ClipForge_<tag>_x64-setup.exe`). It installs over the app folder;
 //!   the user's data dir lives in the OS app-data dir
@@ -18,9 +23,15 @@
 //!   reported; the user installs it manually. The updater never pretends
 //!   to install on Linux.
 //!
-//! The version parsing/comparison and the release-JSON parsing are pure
-//! and unit-tested below. The network/download work is blocking `ureq`
-//! calls on a worker thread, so the UI thread is never blocked.
+//! Threading (v0.10.2): the two updater commands are `async` and do
+//! their blocking network/file work on a worker thread
+//! (`spawn_blocking` in `main.rs`). Before v0.10.2 they were plain
+//! synchronous Tauri commands, which run on the main thread — so the
+//! 46 MB download froze the whole window and the progress poll
+//! (`get_update_status`) could never run while the download was in
+//! progress: the user saw "Downloading… 0%" frozen, i.e. nothing
+//! happening. The version parsing/comparison and the release-JSON
+//! parsing are pure and unit-tested below.
 
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -140,18 +151,29 @@ pub fn pick_update_asset(assets: &[ReleaseAsset], os: &str, tag: &str) -> Option
 
 /// Parse a GitHub `/releases/latest` response. `None` when the JSON is
 /// malformed or holds no update asset for this platform.
+///
+/// One malformed asset must not kill the whole check (v0.10.2): an
+/// asset missing its name/URL is skipped, and a missing `size` is
+/// treated as unknown (0) instead of failing the parse — before
+/// v0.10.2 a single odd asset made `parse_latest_release` return
+/// `None` and the check failed with "no installer for your platform"
+/// even though the setup exe was right there.
 pub fn parse_latest_release(json_text: &str, os: &str) -> Option<ReleaseInfo> {
     let value: serde_json::Value = serde_json::from_str(json_text).ok()?;
     let tag = value.get("tag_name")?.as_str()?.to_string();
     let assets = value.get("assets")?.as_array()?;
     let mut parsed: Vec<ReleaseAsset> = Vec::new();
     for a in assets {
-        let name = a.get("name")?.as_str()?.to_string();
-        let download_url = a.get("browser_download_url")?.as_str()?.to_string();
-        let size = a.get("size")?.as_u64()?;
+        let Some(name) = a.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(download_url) = a.get("browser_download_url").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let size = a.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
         parsed.push(ReleaseAsset {
-            name,
-            download_url,
+            name: name.to_string(),
+            download_url: download_url.to_string(),
             size,
         });
     }
@@ -284,6 +306,45 @@ pub struct UpdateCheckResult {
     pub error: Option<String>,
 }
 
+/// Result for a check that arrives while another check (or a
+/// download) is already running (v0.10.2).
+///
+/// Before v0.10.2 this was always an error ("An update check is
+/// already in progress."), even when the launch check had already
+/// found a newer release — and the web UI then showed that error and
+/// never looked at the state again, so the available update stayed
+/// hidden for the whole session. Now the last known release is
+/// returned instead, with the correct `available` flag, so the UI can
+/// offer the update it already knows about. Only when nothing is
+/// known yet is it still an error, and the UI retries that case
+/// automatically after a short wait.
+pub fn busy_check_result(current: String, release: Option<&ReleaseInfo>) -> UpdateCheckResult {
+    match release {
+        Some(r) => {
+            let available = is_newer_release(&r.tag, &current);
+            check_result(current, Some(r), available, None)
+        }
+        None => check_result(
+            current,
+            None,
+            false,
+            Some("An update check is already in progress — try again in a few seconds.".into()),
+        ),
+    }
+}
+
+/// Result when the worker thread running a check died before it could
+/// answer (the `async` command's `spawn_blocking` join failed). The
+/// UI treats it like any other check failure and offers a retry.
+pub fn interrupted_check_result() -> UpdateCheckResult {
+    check_result(
+        current_version(),
+        None,
+        false,
+        Some("The update check was interrupted before it could finish — try again.".into()),
+    )
+}
+
 fn check_result(
     current: String,
     release: Option<&ReleaseInfo>,
@@ -336,8 +397,9 @@ fn fetch_latest_release() -> Result<ReleaseInfo, String> {
 
 /// Run a check and record the outcome in `state`. Returns the same
 /// result the `check_for_updates` command hands to the web UI. A check
-/// already running (or a download in progress) is ignored — the caller
-/// gets the last known result with an `error` note. Never downloads.
+/// already running (or a download in progress) returns the last known
+/// release instead of an error (see `busy_check_result`) — the caller
+/// must not treat a busy check as a failure. Never downloads.
 pub fn run_check(state: &Mutex<UpdaterState>) -> UpdateCheckResult {
     let current = current_version();
     {
@@ -354,12 +416,7 @@ pub fn run_check(state: &Mutex<UpdaterState>) -> UpdateCheckResult {
         };
         match guard.status.state {
             UpdatePhase::Checking | UpdatePhase::Downloading => {
-                return check_result(
-                    current,
-                    guard.release.as_ref(),
-                    false,
-                    Some("An update check is already in progress.".into()),
-                );
+                return busy_check_result(current, guard.release.as_ref());
             }
             _ => {}
         }
@@ -402,15 +459,29 @@ pub fn run_check(state: &Mutex<UpdaterState>) -> UpdateCheckResult {
 /// Download `release.asset` into `dest_dir`, reporting progress 0..1.
 /// Verifies the downloaded size against the size GitHub reported for
 /// the asset; a mismatch is an error and the partial file is removed.
+///
+/// Timeouts (v0.10.2): the old code set one 60 s global timeout on
+/// the whole download, so the 46 MB setup exe needed ~6 Mbps
+/// sustained — any slower link failed every time with a bare timeout.
+/// Now the per-chunk read timeout is 120 s (a stalled connection
+/// still fails fast) and the global cap is 15 minutes, so a slow but
+/// working download finishes instead of being cut off. (In ureq 2
+/// the per-phase timeouts live on the `AgentBuilder`, not the
+/// `Request` — the global timeout is the only one set per request.)
 pub fn download_asset(
     release: &ReleaseInfo,
     dest_dir: &Path,
     on_progress: &dyn Fn(f64),
 ) -> Result<PathBuf, String> {
     let dest = dest_dir.join(&release.asset.name);
-    let resp = ureq::get(&release.asset.download_url)
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(15))
+        .timeout_read(Duration::from_secs(120))
+        .build();
+    let resp = agent
+        .get(&release.asset.download_url)
         .set("User-Agent", USER_AGENT)
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(15 * 60))
         .call()
         .map_err(|e| match e {
             ureq::Error::Status(code, _) => {
@@ -704,6 +775,75 @@ mod tests {
             "ClipForge_0.4.0_x64_en-US.msi"
         );
         assert_eq!(pick_update_asset(&assets, "macos", "v0.4.0"), None);
+    }
+
+    #[test]
+    fn parse_latest_release_skips_malformed_assets() {
+        // v0.10.2: one asset missing `size` (or its URL) used to kill
+        // the whole check (`?` in the asset loop) — the user got "no
+        // installer for your platform" even though the setup exe was
+        // right there. Malformed assets are skipped now.
+        let json = r#"{"tag_name": "v0.10.1", "assets": [
+            {"name": "weird.bin", "browser_download_url": "https://example.com/w"},
+            {"name": "ClipForge_0.10.1_x64-setup.exe", "browser_download_url": "https://example.com/setup.exe"},
+            {"browser_download_url": "https://example.com/noname.exe", "size": 5},
+            {"name": "ClipForge_0.10.1_x64_en-US.msi", "browser_download_url": "https://example.com/setup.msi", "size": 47448163}
+        ]}"#;
+        let info = parse_latest_release(json, "windows").unwrap();
+        assert_eq!(info.asset.name, "ClipForge_0.10.1_x64-setup.exe");
+        // A missing size is "unknown" (0), not a parse failure.
+        assert_eq!(info.asset.size, 0);
+    }
+
+    #[test]
+    fn parse_latest_release_real_v0101_asset_list() {
+        // The exact asset list GitHub served for v0.10.1 (2026-11-24):
+        // the updater must pick the NSIS setup exe for Windows and
+        // the .deb for Linux, and must NOT offer the same version.
+        let json = r#"{"tag_name": "v0.10.1", "assets": [
+            {"name": "ClipForge-v0.10.1-Linux.zip", "browser_download_url": "https://example.com/l.zip", "size": 91993246},
+            {"name": "ClipForge-v0.10.1-Windows.zip", "browser_download_url": "https://example.com/w.zip", "size": 58225827},
+            {"name": "ClipForge_0.10.1_amd64.AppImage", "browser_download_url": "https://example.com/a", "size": 158865912},
+            {"name": "ClipForge_0.10.1_amd64.deb", "browser_download_url": "https://example.com/d", "size": 75392598},
+            {"name": "ClipForge_0.10.1_x64-setup.exe", "browser_download_url": "https://example.com/s.exe", "size": 45985124},
+            {"name": "ClipForge_0.10.1_x64_en-US.msi", "browser_download_url": "https://example.com/s.msi", "size": 47448163}
+        ]}"#;
+        let win = parse_latest_release(json, "windows").unwrap();
+        assert_eq!(win.asset.name, "ClipForge_0.10.1_x64-setup.exe");
+        let lin = parse_latest_release(json, "linux").unwrap();
+        assert_eq!(lin.asset.name, "ClipForge_0.10.1_amd64.deb");
+        assert!(!is_newer_release("v0.10.1", "0.10.1"));
+        assert!(is_newer_release("v0.10.1", "0.9.3"));
+        assert!(is_newer_release("v0.10.1", "0.10.0"));
+        // Numeric, not lexicographic: 0.10.10 > 0.10.9.
+        assert!(is_newer_release("v0.10.10", "0.10.9"));
+    }
+
+    #[test]
+    fn busy_check_returns_last_known_release() {
+        // v0.10.2: a check that arrives while the launch check is
+        // still running must hand the UI the release that is already
+        // known — not an error that hides the update for the session.
+        let release = ReleaseInfo {
+            tag: "v0.10.1".into(),
+            asset: ReleaseAsset {
+                name: "ClipForge_0.10.1_x64-setup.exe".into(),
+                download_url: "https://example.com/setup.exe".into(),
+                size: 45985124,
+            },
+        };
+        let r = busy_check_result("0.9.3".into(), Some(&release));
+        assert!(r.available);
+        assert_eq!(r.version.as_deref(), Some("0.10.1"));
+        assert_eq!(r.error, None);
+        // Same version is known but not newer: no phantom update.
+        let r = busy_check_result("0.10.1".into(), Some(&release));
+        assert!(!r.available);
+        assert_eq!(r.error, None);
+        // Nothing known yet: still an error, and the UI retries it.
+        let r = busy_check_result("0.9.3".into(), None);
+        assert!(!r.available);
+        assert!(r.error.as_deref().unwrap().contains("already in progress"));
     }
 
     #[test]
