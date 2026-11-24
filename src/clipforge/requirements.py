@@ -235,12 +235,23 @@ def probe_whisper(
             "fix_label": "Set an OpenAI key in Settings to skip the download",
         }
     if detection["broken"]:
+        # The broken reason already names its own fix when one is known
+        # (e.g. PyAV 19: `pip install "av<19"`). A plain
+        # `--force-reinstall faster-whisper` would re-pull the same broken
+        # dependency (av 19) in that case, so only suggest it when the
+        # reason does not already carry a specific fix.
+        if "av<19" in detection["broken_reason"]:
+            broken_fix = "apply the fix above, then press Re-check."
+        else:
+            broken_fix = (
+                "reinstall it with 'python -m pip install "
+                "--force-reinstall faster-whisper' (in the same "
+                "PowerShell/Python you installed it with), then press "
+                "Re-check."
+            )
         broken_detail = (
             f"{detection['broken_reason']} — transcription with the local "
-            "install will fail until it is fixed: reinstall it with "
-            "'python -m pip install --force-reinstall faster-whisper' "
-            "(in the same PowerShell/Python you installed it with), "
-            "then press Re-check."
+            f"install will fail until it is fixed: {broken_fix}"
         )
         if api_key:
             return {

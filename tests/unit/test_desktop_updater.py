@@ -60,16 +60,41 @@ TAURI_TS = ROOT / "apps" / "web" / "lib" / "tauri.ts"
 # (fetched 2026-11-24). Vendored so the mirror tests below run
 # offline and still prove the real selection behaviour.
 V0101_ASSETS = [
-    {"name": "ClipForge-v0.10.1-Linux.zip", "browser_download_url": "https://example.com/l.zip", "size": 91993246},
-    {"name": "ClipForge-v0.10.1-Windows.zip", "browser_download_url": "https://example.com/w.zip", "size": 58225827},
-    {"name": "ClipForge_0.10.1_amd64.AppImage", "browser_download_url": "https://example.com/a", "size": 158865912},
-    {"name": "ClipForge_0.10.1_amd64.deb", "browser_download_url": "https://example.com/d", "size": 75392598},
-    {"name": "ClipForge_0.10.1_x64-setup.exe", "browser_download_url": "https://example.com/s.exe", "size": 45985124},
-    {"name": "ClipForge_0.10.1_x64_en-US.msi", "browser_download_url": "https://example.com/s.msi", "size": 47448163},
+    {
+        "name": "ClipForge-v0.10.1-Linux.zip",
+        "browser_download_url": "https://example.com/l.zip",
+        "size": 91993246,
+    },
+    {
+        "name": "ClipForge-v0.10.1-Windows.zip",
+        "browser_download_url": "https://example.com/w.zip",
+        "size": 58225827,
+    },
+    {
+        "name": "ClipForge_0.10.1_amd64.AppImage",
+        "browser_download_url": "https://example.com/a",
+        "size": 158865912,
+    },
+    {
+        "name": "ClipForge_0.10.1_amd64.deb",
+        "browser_download_url": "https://example.com/d",
+        "size": 75392598,
+    },
+    {
+        "name": "ClipForge_0.10.1_x64-setup.exe",
+        "browser_download_url": "https://example.com/s.exe",
+        "size": 45985124,
+    },
+    {
+        "name": "ClipForge_0.10.1_x64_en-US.msi",
+        "browser_download_url": "https://example.com/s.msi",
+        "size": 47448163,
+    },
 ]
 
 
 # ---- Python mirror of updater.rs pure logic (parse / compare / pick) ----
+
 
 def _parse_version(text: str):
     text = text[1:] if text.startswith("v") else text
@@ -91,11 +116,17 @@ def _setup_asset_name(tag: str) -> str:
 def _pick_update_asset(assets, os_name: str, tag: str):
     names = [a["name"] for a in assets]
     if os_name == "windows":
-        for cand in [_setup_asset_name(tag)] + [n for n in names if n.endswith("-setup.exe")] + [n for n in names if n.endswith(".msi")]:
+        for cand in (
+            [_setup_asset_name(tag)]
+            + [n for n in names if n.endswith("-setup.exe")]
+            + [n for n in names if n.endswith(".msi")]
+        ):
             if cand in names:
                 return cand
     if os_name == "linux":
-        for cand in [n for n in names if n.endswith(".deb")] + [n for n in names if n.endswith(".AppImage")]:
+        for cand in [n for n in names if n.endswith(".deb")] + [
+            n for n in names if n.endswith(".AppImage")
+        ]:
             if cand in names:
                 return cand
     return None
@@ -109,12 +140,15 @@ def _parse_latest_release(payload: dict, os_name: str):
     for a in payload.get("assets", []):
         if not a.get("name") or not a.get("browser_download_url"):
             continue
-        parsed.append({"name": a["name"], "url": a["browser_download_url"], "size": a.get("size") or 0})
+        parsed.append(
+            {"name": a["name"], "url": a["browser_download_url"], "size": a.get("size") or 0}
+        )
     asset = _pick_update_asset(parsed, os_name, tag)
     return (tag, asset) if asset else None
 
 
 # ---- 1. Version comparison + asset selection against the real release ----
+
 
 def test_live_v0101_release_offers_setup_exe_to_older_versions():
     tag, asset = _parse_latest_release({"tag_name": "v0.10.1", "assets": V0101_ASSETS}, "windows")
@@ -159,26 +193,34 @@ def test_setup_exe_size_sets_the_timeout_budget():
 
 # ---- 2. Rust: commands off the main thread ----
 
+
 def test_updater_commands_run_off_the_main_thread():
     main = MAIN_RS.read_text(encoding="utf-8")
     assert re.search(r"#\[tauri::command\]\s*\nasync fn check_for_updates", main), (
-        "check_for_updates must be async: as a sync Tauri command it ran on the main thread and froze the window for up to the 15 s GitHub timeout"
+        "check_for_updates must be async: as a sync Tauri command it ran "
+        "on the main thread and froze the window for up to the 15 s "
+        "GitHub timeout"
     )
     assert re.search(r"#\[tauri::command\]\s*\nasync fn download_and_install_update", main), (
-        "download_and_install_update must be async: as a sync command the 46 MB download froze the window and the progress poll could never run"
+        "download_and_install_update must be async: as a sync command the "
+        "46 MB download froze the window and the progress poll could "
+        "never run"
     )
     assert "spawn_blocking" in main, (
-        "the updater commands must do their blocking work (ureq, file writes, stopping the server) via spawn_blocking"
+        "the updater commands must do their blocking work (ureq, file "
+        "writes, stopping the server) via spawn_blocking"
     )
 
 
 # ---- 3. Rust: busy check returns the last known release, not an error ----
 
+
 def test_busy_check_returns_last_known_release():
     updater = UPDATER_RS.read_text(encoding="utf-8")
     assert "busy_check_result" in updater
     assert "run_check" in updater and "busy_check_result(current" in updater, (
-        "run_check must answer a busy check with busy_check_result (last known release), not a bare error"
+        "run_check must answer a busy check with busy_check_result (last "
+        "known release), not a bare error"
     )
     # The old behaviour — an unconditional "already in progress" error
     # with available=false — must be gone from run_check.
@@ -186,6 +228,7 @@ def test_busy_check_returns_last_known_release():
 
 
 # ---- 4. Rust: malformed assets are skipped, download timeouts fit slow links ----
+
 
 def test_parse_latest_release_skips_malformed_assets():
     updater = UPDATER_RS.read_text(encoding="utf-8")
@@ -198,7 +241,8 @@ def test_parse_latest_release_skips_malformed_assets():
 def test_download_timeout_allows_slow_links():
     updater = UPDATER_RS.read_text(encoding="utf-8")
     assert ".timeout(Duration::from_secs(60))" not in updater, (
-        "a 60 s global download timeout needs ~6 Mbps sustained for the 46 MB setup exe — it failed every slower link"
+        "a 60 s global download timeout needs ~6 Mbps sustained for the "
+        "46 MB setup exe — it failed every slower link"
     )
     assert "timeout_read" in updater, "a stalled download must still fail fast per read"
     assert "timeout_connect" in updater
@@ -206,13 +250,15 @@ def test_download_timeout_allows_slow_links():
 
 # ---- 5. Web UI: progress polling, busy retry, visible failures ----
 
+
 def test_install_polls_for_progress_before_awaiting_the_download():
     text = UPDATER_TSX.read_text(encoding="utf-8")
     poll_at = text.find("setInterval")
     await_at = text.find("await downloadAndInstallUpdate()")
     assert poll_at != -1 and await_at != -1 and poll_at < await_at, (
-        "Updater.tsx must start the get_update_status poll BEFORE awaiting downloadAndInstallUpdate — "
-        "polling only after the promise resolves never shows progress during the download"
+        "Updater.tsx must start the get_update_status poll BEFORE awaiting "
+        "downloadAndInstallUpdate — polling only after the promise "
+        "resolves never shows progress during the download"
     )
 
 
@@ -224,7 +270,8 @@ def test_check_retries_a_busy_check_and_adopts_the_launch_check_result():
     adopt_at = text.find("getUpdateStatus()")
     fresh_at = text.find("checkForUpdates()")
     assert adopt_at != -1 and fresh_at != -1 and adopt_at < fresh_at, (
-        "check() must first adopt the launch check's settled result from get_update_status before starting a fresh check"
+        "check() must first adopt the launch check's settled result from "
+        "get_update_status before starting a fresh check"
     )
     assert "updateInfoFromStatus" in text
 
@@ -232,7 +279,8 @@ def test_check_retries_a_busy_check_and_adopts_the_launch_check_result():
 def test_banner_shows_a_failed_check_instead_of_silence():
     text = UPDATER_TSX.read_text(encoding="utf-8")
     assert 'state.kind !== "error"' in text, (
-        "the top banner must render the error state too — hiding every non-available state made a failed check look like 'no update'"
+        "the top banner must render the error state too — hiding every "
+        "non-available state made a failed check look like 'no update'"
     )
     assert "Try again" in text and "RELEASES_URL" in text
 
@@ -240,20 +288,29 @@ def test_banner_shows_a_failed_check_instead_of_silence():
 def test_install_failure_reads_the_real_error_from_status():
     text = UPDATER_TSX.read_text(encoding="utf-8")
     assert text.count("getUpdateStatus()") >= 3, (
-        "after a failed install the UI must read get_update_status for the real reason, not a generic message"
+        "after a failed install the UI must read get_update_status for "
+        "the real reason, not a generic message"
     )
 
 
 # ---- 6. Capability: the updater commands must stay granted ----
 
+
 def test_capability_grants_the_updater_commands():
     conf = json.loads(CAPABILITIES.read_text(encoding="utf-8"))
     perms = conf.get("permissions", [])
-    for cmd in ("allow-check-for-updates", "allow-download-and-install-update", "allow-get-update-status"):
+    for cmd in (
+        "allow-check-for-updates",
+        "allow-download-and-install-update",
+        "allow-get-update-status",
+    ):
         assert cmd in perms, (
-            f"capabilities/default.json must grant {cmd}: v0.4.0/v0.4.1 shipped with no capability file at all, "
-            "so every updater invoke was ACL-denied and the UI silently said the updater was not in the build"
+            f"capabilities/default.json must grant {cmd}: v0.4.0/v0.4.1 "
+            "shipped with no capability file at all, so every updater "
+            "invoke was ACL-denied and the UI silently said the updater "
+            "was not in the build"
         )
     assert "http://127.0.0.1:*" in conf.get("remote", {}).get("urls", []), (
-        "the loopback-served UI origin must be listed under remote.urls or no invoke reaches the shell"
+        "the loopback-served UI origin must be listed under remote.urls "
+        "or no invoke reaches the shell"
     )

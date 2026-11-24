@@ -332,6 +332,25 @@ def require_transcription_backend() -> None:
     if detection["available"]:
         return
     if detection["broken"]:
+        # Only suggest a plain --force-reinstall when the broken reason
+        # does not already name its own fix (e.g. PyAV 19 needs
+        # `pip install "av<19"` — a force-reinstall would re-pull av 19).
+        if "av<19" in detection["broken_reason"]:
+            reinstall = (
+                "Apply the fix named above, then press Re-check — or set "
+                "OPENAI_API_KEY to use the Whisper API, or supply "
+                "transcript_text to run the deterministic fallback "
+                "(flagged demo, not real transcription)."
+            )
+        else:
+            reinstall = (
+                "Reinstall faster-whisper with 'python -m pip install "
+                "--force-reinstall faster-whisper' (in the same "
+                "PowerShell/Python you installed it with), then press "
+                "Re-check — or set OPENAI_API_KEY to use the Whisper API, "
+                "or supply transcript_text to run the deterministic "
+                "fallback (flagged demo, not real transcription)."
+            )
         raise MissingDependencyError(
             code="transcription_backend_broken",
             dependency="faster-whisper",
@@ -340,14 +359,7 @@ def require_transcription_backend() -> None:
                 f"{detection['broken_reason']}. Transcription with the local "
                 "install will fail until it is fixed."
             ),
-            required_action=(
-                "Reinstall faster-whisper with 'python -m pip install "
-                "--force-reinstall faster-whisper' (in the same "
-                "PowerShell/Python you installed it with), then press "
-                "Re-check — or set OPENAI_API_KEY to use the Whisper API, "
-                "or supply transcript_text to run the deterministic "
-                "fallback (flagged demo, not real transcription)."
-            ),
+            required_action=reinstall,
         )
     if os.environ.get("OPENAI_API_KEY"):
         return
