@@ -187,6 +187,25 @@ guard against it now:
    backstop. Regression tests:
    `tests/unit/test_desktop_installer_hooks.py`.
 
+   **Updater threading + surfacing (v0.10.2).** The two updater
+   commands are `async` and do their blocking work on a worker
+   thread (`spawn_blocking`): as synchronous commands they ran on
+   the main thread, so the 46 MB download froze the window and the
+   progress poll could never run — the user saw "Downloading… 0%"
+   frozen and concluded nothing was happening. The web UI now polls
+   `get_update_status` *before* awaiting the download, adopts the
+   quiet launch check's result instead of racing it (a busy check
+   returns the last known release; the UI also retries a busy check),
+   and shows a failed check in the top banner with a retry button —
+   before, the banner hid every non-available state, so a failed
+   check looked exactly like "no update". The download timeout is
+   per-read (120 s) with a 15-minute global cap, not one 60 s
+   global timeout that needed ~6 Mbps sustained. One malformed asset
+   in the release JSON no longer kills the whole check. Regression
+   tests: `tests/unit/test_desktop_updater.py` (+ unit tests in
+   `src/updater.rs`, `lib/tauri.test.ts`). Honest limit: the Windows
+   install/restart step can only be proven on real Windows.
+
 **Headless smoke test (installed .deb, Xvfb — verified 2026-11-20)**
 
 ```sh

@@ -1168,10 +1168,25 @@ fn quit_app(app: AppHandle) {
 // Commands for the in-app updater (see `updater.rs`). The web UI calls
 // these from the Settings page; the state machine is polled with
 // `get_update_status`.
+//
+// Threading (v0.10.2): `check_for_updates` and
+// `download_and_install_update` are `async` and run their blocking
+// work (GitHub GET, 46 MB download, stopping the server) on a worker
+// thread. As plain synchronous commands they ran on Tauri's main
+// thread, so the download froze the whole window and the progress
+// poll could never run while the download was in progress — the user
+// saw "Downloading… 0%" frozen and concluded nothing was happening.
+// `get_update_status` only clones the state, so it stays synchronous.
 
 #[tauri::command]
-fn check_for_updates(state: State<'_, AppState>) -> updater::UpdateCheckResult {
-    updater::run_check(&state.update)
+async fn check_for_updates(app: AppHandle) -> updater::UpdateCheckResult {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = handle.state::<AppState>();
+        updater::run_check(&state.update)
+    })
+    .await
+    .unwrap_or_else(|_| updater::interrupted_check_result())
 }
 
 #[tauri::command]
@@ -1180,13 +1195,30 @@ fn get_update_status(state: State<'_, AppState>) -> updater::UpdateStatus {
 }
 
 #[tauri::command]
-fn download_and_install_update(
+async fn download_and_install_update(
     app: AppHandle,
-    state: State<'_, AppState>,
 ) -> Result<updater::UpdateInstallResult, String> {
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || download_and_install_update_blocking(handle))
+        .await
+        .map_err(|e| format!("Update task failed: {e}"))?
+}
+
+/// Blocking body of `download_and_install_update` (runs on a worker
+/// thread — never on the main thread; see the note above). Separated
+/// out so the `async` command stays a thin wrapper.
+fn download_and_install_update_blocking(
+    app: AppHandle,
+) -> Result<updater::UpdateInstallResult, String> {
+    let state = app.state::<AppState>();
     // Only valid from Available; anything else is a no-op error.
     let release = {
         let guard = state.update.lock().map_err(|e| e.to_string())?;
+        if guard.status.state == updater::UpdatePhase::Downloading {
+            return Err(
+                "An update download is already in progress — wait for it to finish.".into(),
+            );
+        }
         if guard.status.state != updater::UpdatePhase::Available {
             return Err(format!(
                 "No update is available to install (updater state: {:?}).",

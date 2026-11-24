@@ -131,7 +131,17 @@ export async function checkForUpdates(): Promise<UpdateInfo | null> {
   return tauriInvoke<UpdateInfo>("check_for_updates");
 }
 
-/** Download + install the pending update (the app restarts afterwards). */
+/**
+ * Download + install the pending update. The Rust command runs the
+ * download on a worker thread (v0.10.2), so this promise stays
+ * pending while the download runs — the UI must poll
+ * `getUpdateStatus()` for progress *while* awaiting it, not after.
+ * It resolves `true` when the install finished (Linux manual-install
+ * path) or `false` when the command failed; on Windows success the
+ * app exits to run the installer, so the promise never resolves at
+ * all. Callers must read `getUpdateStatus()` for the real error
+ * instead of guessing from `false`.
+ */
 export async function downloadAndInstallUpdate(): Promise<boolean> {
   const res = await tauriInvoke<unknown>("download_and_install_update");
   return res !== null;
@@ -140,6 +150,39 @@ export async function downloadAndInstallUpdate(): Promise<boolean> {
 /** Current updater state (progress while downloading, error if any). */
 export async function getUpdateStatus(): Promise<UpdateStatus | null> {
   return tauriInvoke<UpdateStatus>("get_update_status");
+}
+
+/**
+ * True when an update-check error only means another check is still
+ * running — the launch check and the UI check racing each other
+ * (v0.10.2). The UI retries this case automatically instead of
+ * showing it as a failure; the Rust side now also answers a busy
+ * check with the last known release when it has one.
+ */
+export function isUpdateCheckBusy(error?: string | null): boolean {
+  return !!error && error.includes("already in progress");
+}
+
+/**
+ * Build the `UpdateInfo` the UI shows from a Rust `UpdateStatus`
+ * snapshot (v0.10.2): this is how the UI adopts the quiet launch
+ * check's result without a second GitHub fetch. Returns null unless
+ * the snapshot names an update that is available, downloading, or
+ * ready — idle / checking / failed snapshots carry no offer.
+ */
+export function updateInfoFromStatus(status: UpdateStatus, currentVersion: string): UpdateInfo | null {
+  if (
+    (status.state === "available" || status.state === "downloading" || status.state === "ready") &&
+    status.version
+  ) {
+    return {
+      available: true,
+      version: status.version,
+      current_version: currentVersion,
+      size_bytes: status.size_bytes,
+    };
+  }
+  return null;
 }
 
 /** Human-readable byte size, e.g. 28.4 MB. */
