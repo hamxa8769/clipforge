@@ -98,6 +98,15 @@ if "--simulate" in argv:
 
 # Download run.
 run_no = _bump_count()
+if mode == "progress-dash-two-files":
+    # DASH video + audio: one progress series per file, each with its
+    # own total (49.00MiB video, then 17.50MiB audio), like the live
+    # Sinek download (49,010,442 + 17,500,733 bytes -> 66,875,518 file).
+    for pct in range(0, 101, 25):
+        _progress(float(pct), total="49.00MiB")
+    for pct in range(0, 101, 25):
+        _progress(float(pct), total="17.50MiB")
+    _finish()
 if mode == "progress-slow":
     for pct in range(0, 101, 10):
         _progress(pct)
@@ -285,6 +294,37 @@ def test_stdout_progress_does_not_trip_watchdog(
     assert seen[-1].percent == 100.0
     assert seen[-1].downloaded_bytes > 0
     assert seen[-1].speed_bps > 0
+
+
+def test_dash_two_file_download_accumulates_progress(
+    tmp_path: Path, fake_ytdlp: Path, monkeypatch
+) -> None:
+    """DASH video + audio must accumulate, not overwrite: the live
+    Sinek download reported downloaded 49,010,442 B against a total
+    of 17,500,733 B (the audio file's total overwrote the video's),
+    so downloaded exceeded total. The watchdog stayed safe (dir
+    growth counts as activity), but the reported numbers, the UI
+    progress/ETA and the attempt record were wrong."""
+    monkeypatch.setenv("FAKE_YTDLP_MODE", "progress-dash-two-files")
+    seen: list[DownloadProgress] = []
+    info = ingest_youtube(
+        LIVE_URL,
+        own_content=True,
+        out_dir=tmp_path / "uploads",
+        on_progress=seen.append,
+    )
+    assert info.source_kind == "youtube"
+    assert seen, "on_progress was never called"
+    for snap in seen:
+        assert snap.downloaded_bytes <= snap.total_bytes, (
+            f"downloaded {snap.downloaded_bytes} exceeded total {snap.total_bytes} mid-download"
+        )
+    final = seen[-1]
+    video = int(49.00 * 1024 * 1024)
+    audio = int(17.50 * 1024 * 1024)
+    assert final.downloaded_bytes == video + audio
+    assert final.total_bytes == video + audio
+    assert final.percent == pytest.approx(100.0)
 
 
 def test_stdout_chatty_process_does_not_trip_watchdog() -> None:

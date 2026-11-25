@@ -1038,6 +1038,16 @@ def _run_ytdlp_bounded(
     started = time.monotonic()
     lock = threading.Lock()
     progress = DownloadProgress()
+    # Multi-file downloads (DASH video + audio, then a merge): yt-dlp
+    # prints one progress series per file, each with its own total.
+    # Track the finished files' bytes separately so the reported
+    # downloaded/total never go backwards or cross (a 49 MiB video
+    # followed by a 17.5 MiB audio must report 66.5 MiB total, not a
+    # 17.5 MiB total with 49 MiB downloaded). A file is "finished"
+    # when the next file starts: the total changes AND the new file's
+    # downloaded is below the previous file's (it restarts at 0%), or
+    # the previous file already reached 100%.
+    multi = {"completed_bytes": 0, "current_total": 0, "current_downloaded": 0}
     last_output = {"t": started}
     last_byte_growth = {"t": started}
     last_size = {"n": _dir_size_bytes(watch_dir)}
@@ -1076,15 +1086,38 @@ def _run_ytdlp_bounded(
                     if parsed is None:
                         continue
                     with lock:
-                        if parsed.downloaded_bytes > progress.downloaded_bytes:
-                            progress.downloaded_bytes = parsed.downloaded_bytes
-                            last_byte_growth["t"] = time.monotonic()
                         if parsed.total_bytes:
-                            progress.total_bytes = parsed.total_bytes
+                            if (
+                                multi["current_total"]
+                                and parsed.total_bytes != multi["current_total"]
+                                and (
+                                    parsed.downloaded_bytes < multi["current_downloaded"]
+                                    or multi["current_downloaded"] >= multi["current_total"]
+                                )
+                            ):
+                                # yt-dlp moved on to the next file: the
+                                # previous file is done, so its bytes
+                                # join the completed total.
+                                multi["completed_bytes"] += multi["current_total"]
+                                multi["current_total"] = parsed.total_bytes
+                            elif not multi["current_total"]:
+                                multi["current_total"] = parsed.total_bytes
+                            multi["current_downloaded"] = parsed.downloaded_bytes
+                        downloaded = multi["completed_bytes"] + parsed.downloaded_bytes
+                        total = multi["completed_bytes"] + (
+                            multi["current_total"] or parsed.total_bytes
+                        )
+                        if downloaded > progress.downloaded_bytes:
+                            progress.downloaded_bytes = downloaded
+                            last_byte_growth["t"] = time.monotonic()
+                        if total:
+                            progress.total_bytes = total
                         if parsed.speed_bps:
                             progress.speed_bps = parsed.speed_bps
                         progress.eta_s = parsed.eta_s
-                        if parsed.percent is not None:
+                        if total:
+                            progress.percent = min(100.0, downloaded / total * 100.0)
+                        elif parsed.percent is not None:
                             progress.percent = parsed.percent
                         snapshot = DownloadProgress(
                             downloaded_bytes=progress.downloaded_bytes,
