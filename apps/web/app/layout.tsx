@@ -20,7 +20,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en">
       <body>
         <div className="flex h-screen overflow-hidden bg-neutral-950">
-          <Sidebar version="0.10.3" />
+          <Sidebar version="0.11.1" />
           <div className="flex min-w-0 flex-1 flex-col">
             {/* One shared server status for the whole app (v0.9.3):
                 ServerStatusProvider owns the only /health poll, and the

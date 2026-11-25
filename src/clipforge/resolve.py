@@ -392,7 +392,7 @@ def _api_get(api_key: str, path: str, params: dict) -> dict:
     query = urllib.parse.urlencode({"key": api_key, **params})
     req = urllib.request.Request(
         f"{_YOUTUBE_API_BASE}/{path}?{query}",
-        headers={"User-Agent": "ClipForge/0.11.0"},
+        headers={"User-Agent": "ClipForge/0.11.1"},
     )
     try:
         with urllib.request.urlopen(req, timeout=YOUTUBE_API_TIMEOUT_S) as resp:
