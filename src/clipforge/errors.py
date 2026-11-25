@@ -83,7 +83,7 @@ def plain_error(exc: BaseException, stage: str | None = None) -> dict:
         return {
             "title": "Live capture stopped",
             "message": sanitize_error_message(str(exc)),
-            "action": "Check the stream link and licence, then try again.",
+            "action": "Check the stream link, then try again.",
             "code": "live_capture_failed",
         }
     if isinstance(exc, IngestError):
@@ -135,8 +135,10 @@ def plain_error(exc: BaseException, stage: str | None = None) -> dict:
                 "title": "The download stalled",
                 "message": sanitize_error_message(str(exc)),
                 "action": (
-                    "Check your internet connection and retry the job. "
-                    "If it keeps stalling, try a shorter video."
+                    "ClipForge already retried the download once "
+                    "automatically and it stalled again. Check your "
+                    "internet connection and retry the job. If it keeps "
+                    "stalling, try a shorter video."
                 ),
                 "code": code,
             }

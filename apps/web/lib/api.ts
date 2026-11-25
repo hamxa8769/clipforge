@@ -722,7 +722,7 @@ async function apiPutJson(path: string, body: unknown = {}): Promise<ApiResult> 
         : undefined;
     return { ok: res.ok, status: res.status, data, error: res.ok ? undefined : (detailText ?? `Request failed (${res.status})`) };
   } catch {
-    return { ok: false, status: 0, data: null, error: "The server is not answering" };
+    return { ok: false, status: 0, data: null, error: REQUEST_NO_ANSWER };
   }
 }
 
@@ -886,6 +886,23 @@ function apiGetSlow<T>(path: string): Promise<T | null> {
 
 export interface ApiResult { ok: boolean; status: number; data: unknown; error?: string; }
 
+/**
+ * What a failed request reports when the fetch itself throws (v0.11.0).
+ *
+ * The old text — "The server is not answering" — stated a fact about
+ * the server that one timed-out request cannot prove: a 5 s client
+ * timeout fires while the server is still working (slow probe, busy
+ * worker), and the error card then contradicted the header, the
+ * status bar and the footer, which all read liveness from the shared
+ * ServerStatusProvider. This says only what the request knows — it
+ * got no answer — and points at the status bar, the one place that
+ * knows whether the server is actually down. It deliberately avoids
+ * the words "not answering" so explainConnectionError() below does
+ * not translate it back into "could not reach its own server".
+ */
+export const REQUEST_NO_ANSWER =
+  "This request got no answer — the server may be busy or the connection dropped. Check the status bar at the top of the page: if it says Live, just try again.";
+
 export async function apiPostJson(path: string, body: unknown = {}, timeoutMs = 5000): Promise<ApiResult> {
   try {
     const res = await fetch(`${API_URL}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
@@ -902,7 +919,7 @@ export async function apiPostJson(path: string, body: unknown = {}, timeoutMs = 
         : undefined;
     return { ok: res.ok, status: res.status, data, error: res.ok ? undefined : (detailText ?? `Request failed (${res.status})`) };
   } catch {
-    return { ok: false, status: 0, data: null, error: "The server is not answering" };
+    return { ok: false, status: 0, data: null, error: REQUEST_NO_ANSWER };
   }
 }
 
@@ -1486,7 +1503,7 @@ export async function saveSettings(body: Record<string, unknown>): Promise<ApiRe
         : undefined;
     return { ok: res.ok, status: res.status, data, error: res.ok ? undefined : (detailText ?? `Request failed (${res.status})`) };
   } catch {
-    return { ok: false, status: 0, data: null, error: "The server is not answering" };
+    return { ok: false, status: 0, data: null, error: REQUEST_NO_ANSWER };
   }
 }
 
@@ -1721,7 +1738,9 @@ export async function getAgentConfig(): Promise<AgentConfig | null> {
   return raw === null ? null : normalizeAgentConfig(raw);
 }
 
-/** PUT /api/agent/config — the agent cannot be enabled without rights_confirmed. */
+/** PUT /api/agent/config — saves the agent setup. v0.11.0: no rights
+ * gate any more; `rights_confirmed` is still sent (true) for
+ * wire compatibility with the server config shape. */
 export async function saveAgentConfig(config: Partial<AgentConfig>): Promise<ApiResult> {
   return apiPutJson("/api/agent/config", config);
 }
@@ -1925,22 +1944,19 @@ export async function saveSetupState(patch: SetupStatePatch): Promise<ApiResult>
 }
 
 // ---------------------------------------------------------------------------
-// Video licences (v0.7.0, advisory since v0.9.1).
+// Video licences (v0.7.0; notices removed in v0.11.0).
 //
-// The API reports a licence per video (`license` on trending/live results,
-// `source_license` on clip records) and a plain `can_clip` verdict with a
-// `reason`. Values seen on the wire: YouTube's "creativeCommons" / "youtube"
-// (see the YouTube Data API `status.license`), plus the API's own "own"
-// for the user's own videos. Everything normalises to VideoLicense below
-// so the UI never has to compare raw strings.
+// The API still reports a licence per video (`license` on trending/live
+// results, `source_license` on clip records) as plain metadata, and a
+// plain `can_clip` verdict with a `reason`. Values seen on the wire:
+// YouTube's "creativeCommons" / "youtube" (see the YouTube Data API
+// `status.license`), plus the API's own "own" for the user's own videos.
+// Everything normalises to VideoLicense below so the UI never has to
+// compare raw strings.
 //
-// Advisory (v0.9.1): the licence is REPORTED, never enforced. The v0.7.0
-// hard block — standard-licence / unknown-licence videos refused — was
-// removed at the user's explicit instruction after they checked YouTube's
-// terms and confirmed clipping is officially allowed. `can_clip` is
-// always true now; the UI shows the rights notice where the link is
-// entered and before publishing instead of refusing. CC videos still
-// get their attribution block automatically.
+// v0.11.0: the licence is metadata only — never enforced, never shown
+// as a warning, badge or attribution nag in the UI (removed at the
+// user's explicit instruction). `can_clip` is always true.
 // ---------------------------------------------------------------------------
 
 /** Normalised licence of a video. "own" = the user's own video.
@@ -1962,48 +1978,15 @@ export function normalizeVideoLicense(raw: unknown): VideoLicense {
   return "unknown";
 }
 
-/** Short badge label for a licence, for the Trending / Live / review UI. */
-export function licenseBadgeLabel(license: VideoLicense): string {
-  if (license === "cc") return "Creative Commons";
-  if (license === "own") return "Your video";
-  if (license === "public-domain") return "Public domain";
-  if (license === "standard") return "Standard licence";
-  return "Licence unknown";
-}
-
-/** The rights notice shown where a video link is entered and before
- * publishing (v0.9.1, advisory — the licence never blocks). ClipForge
- * does not guarantee rights clearance; the user is responsible for
- * the rights to what they post. */
-export const RIGHTS_ADVISORY =
-  "Make sure you have the right to use this video — your own video, a licensed video, or a use YouTube permits. You are responsible for the rights to what you post.";
-
-/** Can this video be clipped? Advisory since v0.9.1: always true — the
- * licence is reported, never enforced. The reason describes the licence
- * (CC / own / public-domain keep their positive reasons; standard and
- * unknown licences get the rights notice). */
+/** Can this video be clipped? v0.11.0: always true — the licence is
+ * metadata only, never enforced and never shown as a warning. The
+ * reason is a plain factual label for the record, not UI text. */
 export function deriveCanClip(license: VideoLicense, canClip: boolean | null): { canClip: boolean; reason: string } {
   if (license === "own") return { canClip: true, reason: "Your own video." };
-  if (license === "cc") return { canClip: true, reason: "Creative Commons licence — free to reuse with attribution." };
-  if (license === "public-domain") return { canClip: true, reason: "Public domain — free to reuse." };
-  if (license === "standard") return { canClip: true, reason: `Standard YouTube licence. ${RIGHTS_ADVISORY}` };
-  return { canClip: true, reason: `No licence information reported. ${RIGHTS_ADVISORY}` };
-}
-
-/** Attribution credit for a CC / public-domain source, read-only and
- * always shown in the description preview for such clips. Falls back to
- * a generated credit from the source fields when the API did not send
- * ready-made text (the server builds the same block verbatim). */
-export function attributionForClip(c: Pick<Candidate, "source_license" | "source_title" | "source_channel" | "source_url" | "attribution_text">): string | null {
-  if (c.source_license !== "cc" && c.source_license !== "public-domain") return null;
-  if (c.attribution_text) return c.attribution_text;
-  const title = c.source_title || "Untitled video";
-  const channel = c.source_channel || "Unknown creator";
-  const url = c.source_url ? ` — ${c.source_url}` : "";
-  if (c.source_license === "public-domain") {
-    return `Source: "${title}" by ${channel}${url} — public domain. Please keep this credit in the description.`;
-  }
-  return `Source: "${title}" by ${channel}${url} — licensed under Creative Commons (CC BY). Please keep this credit in the description.`;
+  if (license === "cc") return { canClip: true, reason: "Creative Commons licence." };
+  if (license === "public-domain") return { canClip: true, reason: "Public domain." };
+  if (license === "standard") return { canClip: true, reason: "Standard YouTube licence." };
+  return { canClip: true, reason: "No licence information reported." };
 }
 
 /** The `source_license` value to send when creating a clip job from a
@@ -2022,12 +2005,11 @@ export function jobSourceLicense(video: Pick<TrendingVideo, "license" | "license
   return "standard";
 }
 
-/** POST /jobs — create a clip job from a YouTube video (v0.7.0 CC
- * pipeline). Advisory since v0.9.1: the server no longer refuses any
- * licence — a standard-licence source starts like any other, the
- * licence is recorded, and any CC source still gets its attribution
- * block. Returns the ApiResult so the caller can read the new job id
- * (`data.id`) or show the server's plain-language error. */
+/** POST /jobs — create a clip job from a YouTube video. v0.11.0: no
+ * licence check, no rights checkbox — any pasted link starts a job;
+ * the licence is recorded as metadata only. Returns the ApiResult so
+ * the caller can read the new job id (`data.id`) or show the server's
+ * plain-language error. */
 export async function createYoutubeClipJob(input: {
   source_url: string; title: string; source_license: string;
   source_title?: string; source_channel?: string; own_content_declaration?: boolean;
@@ -2041,6 +2023,96 @@ export async function createYoutubeClipJob(input: {
     source_channel: input.source_channel ?? "",
     own_content_declaration: input.own_content_declaration ?? false,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard one-box (v0.11.0): POST /resolve + clear-finished.
+// ---------------------------------------------------------------------------
+
+export interface ResolvedVideo {
+  video_id: string; title: string; channel_title: string; channel_id: string;
+  duration_s: number | null; thumbnail_url: string | null; published_at: string;
+  view_count: number; url: string;
+}
+
+export interface ResolveResult {
+  kind: "video" | "channel" | "playlist";
+  video?: ResolvedVideo;
+  channel?: { id: string; title: string; url: string };
+  videos?: ResolvedVideo[];
+  /** "api" when the saved YouTube Data API key listed the channel, "ytdlp" otherwise. */
+  source?: "api" | "ytdlp";
+}
+
+function normalizeResolvedVideo(raw: unknown): ResolvedVideo | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (typeof r.video_id !== "string" || !r.video_id) return null;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  return {
+    video_id: r.video_id,
+    title: typeof r.title === "string" ? r.title : "",
+    channel_title: typeof r.channel_title === "string" ? r.channel_title : "",
+    channel_id: typeof r.channel_id === "string" ? r.channel_id : "",
+    duration_s: num(r.duration_s),
+    thumbnail_url: typeof r.thumbnail_url === "string" ? r.thumbnail_url : null,
+    published_at: typeof r.published_at === "string" ? r.published_at : "",
+    view_count: typeof r.view_count === "number" && Number.isFinite(r.view_count) ? r.view_count : 0,
+    url: typeof r.url === "string" ? r.url : `https://www.youtube.com/watch?v=${r.video_id}`,
+  };
+}
+
+function normalizeResolveResult(raw: unknown): ResolveResult | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (r.kind !== "video" && r.kind !== "channel" && r.kind !== "playlist") return null;
+  const out: ResolveResult = { kind: r.kind };
+  if (r.kind === "video") {
+    const video = normalizeResolvedVideo(r.video);
+    if (!video) return null;
+    out.video = video;
+    return out;
+  }
+  const channel = (r.channel ?? {}) as Record<string, unknown>;
+  out.channel = {
+    id: typeof channel.id === "string" ? channel.id : "",
+    title: typeof channel.title === "string" ? channel.title : "",
+    url: typeof channel.url === "string" ? channel.url : "",
+  };
+  out.videos = (Array.isArray(r.videos) ? r.videos : [])
+    .map(normalizeResolvedVideo)
+    .filter((v): v is ResolvedVideo => v !== null);
+  if (r.source === "api" || r.source === "ytdlp") out.source = r.source;
+  return out;
+}
+
+/**
+ * POST /resolve — turn a pasted video / channel URL into the one-box
+ * answer (video, or the channel's video list for the picker). No job
+ * is created here. The channel listing can take a while (yt-dlp
+ * flat-playlist extraction, up to ~2 min server-side), so the client
+ * timeout is 120 s — a short timeout here would report a working
+ * server as down, the exact v0.9.2 / v0.11.0 confusion this release
+ * fixes. Returns `{ result, error }`: `error` is the server's
+ * plain-language 422 reason (dead link, private channel, ...).
+ */
+export async function resolveUrl(url: string, maxResults = 25): Promise<{ result: ResolveResult | null; error: string | null }> {
+  const res = await apiPostJson("/resolve", { url, max_results: maxResults }, 120000);
+  if (!res.ok) return { result: null, error: res.error ?? "Could not resolve that link." };
+  return { result: normalizeResolveResult(res.data), error: null };
+}
+
+/**
+ * POST /jobs/clear-finished — delete the dead jobs (failed /
+ * cancelled / blocked) so the Jobs list stays clean. Returns the
+ * count + ids, or null when the request itself failed.
+ */
+export async function clearFinishedJobs(): Promise<{ deleted: number; ids: string[] } | null> {
+  const res = await apiPostJson("/jobs/clear-finished", {});
+  if (!res.ok) return null;
+  const data = (res.data ?? {}) as Record<string, unknown>;
+  return {
+    deleted: typeof data.deleted === "number" ? data.deleted : 0,
+    ids: Array.isArray(data.ids) ? (data.ids as unknown[]).filter((i): i is string => typeof i === "string") : [],
+  };
 }
 
 // ------------------------------------------------------------------ SEO pack
@@ -2300,12 +2372,8 @@ export async function selectThumbnailVariant(candidateId: string, variant: numbe
 // POST /api/trending/api-key | /match | /run, GET /api/trending/status
 // and /api/trending/jobs/{id} (apps/api/clipforge_api/trending.py).
 //
-// Rights notice (advisory since v0.9.1): trending shows what topics
-// are working — clips are made from the videos the user pastes. A
-// trending video URL is still not a clip source (the backend refuses
-// it with a plain 422, and the page states it) — that is the
-// topic-vs-source rule, not a licence verdict: any pasted video's
-// licence is reported, never enforced.
+// Trending shows what topics are working — clips are made from the
+// videos the user pastes.
 // ---------------------------------------------------------------------------
 
 export interface TrendingVideo {
@@ -2330,11 +2398,10 @@ export interface TrendingVideo {
   license_checked: boolean;
   /** Licence details page, when the API sends one. */
   license_url: string | null;
-  /** Whether this video may be clipped — always true since v0.9.1
-   * (advisory: the licence is reported, never enforced). */
+  /** Whether this video may be clipped — always true (the licence is
+   * metadata only, never enforced). */
   can_clip: boolean;
-  /** Plain-language reason for the licence report (rights notice for
-   * standard / unknown licences). */
+  /** Plain-language reason for the licence report. */
   reason: string;
   /** Live videos only (v0.7.0): current concurrent viewers. */
   concurrent_viewers: number | null;
@@ -2449,7 +2516,7 @@ export async function apiGetResult(path: string): Promise<ApiResult> {
         : undefined;
     return { ok: res.ok, status: res.status, data, error: res.ok ? undefined : (detailText ?? `Request failed (${res.status})`) };
   } catch {
-    return { ok: false, status: 0, data: null, error: "The server is not answering" };
+    return { ok: false, status: 0, data: null, error: REQUEST_NO_ANSWER };
   }
 }
 
@@ -2457,8 +2524,8 @@ export async function apiGetResult(path: string): Promise<ApiResult> {
  * 422 (no connection / no key) as `error` so the page can show it.
  * v0.7.0: `licensedOnly` adds `licensed_only=true` (CC / licensed videos
  * only, licences verified per video). Without it the server does NOT
- * verify licences (wire `license` is "" = not checked) — the page then
- * offers a per-video licence check instead of guessing a verdict. */
+ * verify licences (wire `license` is "" = not checked). v0.11.0: the
+ * UI no longer passes `licensedOnly` — search always shows all videos. */
 export async function searchTrending(niche: string, maxResults = 10, opts: { licensedOnly?: boolean } = {}): Promise<{ result: TrendingSearchResult | null; error: string | null }> {
   const q = new URLSearchParams({ niche, max_results: String(maxResults) });
   if (opts.licensedOnly) q.set("licensed_only", "true");
@@ -2498,14 +2565,15 @@ export async function searchLive(niche: string, maxResults = 10, opts: { license
   };
 }
 
-/** Licence check for one pasted YouTube URL (v0.7.0, advisory since v0.9.1).
+/** Licence check for one pasted YouTube URL (v0.7.0; kept as a typed
+ * client for the live endpoint — v0.11.0 removed it from the UI, no
+ * page calls it any more).
  * Contract (apps/api/clipforge_api/trending.py, videos_router):
  * GET /api/videos/license?url=... -> {video_id, title, channel,
  * channel_id, license, license_url, can_clip, reason}. `license` is the
  * raw YouTube value ("creativeCommon" / "youtube" / ""); `can_clip` is
- * always true — the check reports the licence with the rights notice
- * and never refuses a video. Null when the endpoint has not landed yet
- * (the page says so instead of inventing a verdict). */
+ * always true — the check reports the licence and never refuses a
+ * video. Null when the endpoint has not landed yet. */
 export interface LicenseCheck {
   video_id: string; title: string; channel: string;
   license: VideoLicense; license_key: string; license_url: string | null;

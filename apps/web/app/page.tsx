@@ -38,15 +38,15 @@
 //   with the reason shown.
 // - Notifications: the bell in the top bar (GET /api/notifications).
 //
-// Rights guardrail (FIXED, never changes): clips only from own /
-// Creative Commons / public-domain videos; CC-BY attribution is added
-// automatically. The guardrail notice stays visible at the top of this
-// page and on the New clip run card.
+// (v0.11.0: no rights / licence notice is shown anywhere in the app
+// any more — removed at the user's explicit instruction. The user is
+// responsible for the rights to what they clip; that is stated in the
+// release notes, not in the UI.)
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
-  activeStageIndex, approvePost, cancelJob, getAgentStatus, getAnalytics, getChannels,
+  activeStageIndex, approvePost, cancelJob, clearFinishedJobs, getAgentStatus, getAnalytics, getChannels,
   getFfmpegInstallStatus, getJobs, getMonetizationFor, getPosts, getWorkerQueue,
   latestSnapshotPerPlatform, pipelineProgress, PIPELINE_STAGES, PROCESSING_STATUSES,
   pauseJob, refreshChannel, resumeJob, retryJob,
@@ -55,7 +55,7 @@ import {
 } from "@/lib/api";
 import { demoAnalytics, demoChannels, demoJobs, demoMonetization, demoPosts } from "@/lib/mock";
 import { useFfmpegInstaller } from "@/components/FfmpegInstaller";
-import NewClipRun from "@/components/NewClipRun";
+import OneBox from "@/components/OneBox";
 import { RequirementsPanel } from "@/components/RequirementsPanel";
 import { ReconnectingNotice, useServerStatus } from "@/components/ServerStatusProvider";
 import {
@@ -198,6 +198,9 @@ export default function Dashboard() {
   const pendingApproval = posts.filter((p) => p.status === "pending_approval").length;
   const processing = jobs.filter((j) => PROCESSING_STATUSES.includes(j.status));
   const failedJobs = jobs.filter((j) => j.status === "failed" || j.status === "blocked");
+  // Dead jobs the user can dismiss in one click (v0.11.0): failed,
+  // cancelled and blocked jobs have no clips to protect.
+  const clearableJobs = jobs.filter((j) => ["failed", "cancelled", "blocked"].includes(j.status));
   const published = posts.filter((p) => p.status === "published").length;
   const latest = latestSnapshotPerPlatform(analytics);
   const totalViews = [...latest.values()].reduce((n, s) => n + s.views, 0);
@@ -316,6 +319,24 @@ export default function Dashboard() {
     await load();
   }
 
+  // Dismiss the dead jobs (v0.11.0): one click removes every failed /
+  // cancelled / blocked job from the list. Only the count is shown —
+  // the server answers with the exact ids it removed.
+  const [clearingFinished, setClearingFinished] = useState(false);
+  async function onClearFinished() {
+    setClearingFinished(true);
+    const cleared = await clearFinishedJobs();
+    setClearingFinished(false);
+    if (cleared === null) { setToast({ message: "Could not clear finished jobs — try again.", tone: "danger" }); return; }
+    setToast({
+      message: cleared.deleted > 0
+        ? `Cleared ${cleared.deleted} finished job${cleared.deleted === 1 ? "" : "s"} — the list is clean again.`
+        : "No finished jobs to clear.",
+      tone: "success",
+    });
+    await load();
+  }
+
   async function onApprovePost(post: Post) {
     setBusyPost(post.id);
     const res = await approvePost(post.id);
@@ -345,8 +366,7 @@ export default function Dashboard() {
       : "Idle";
 
   // Server down, nothing live ever loaded, no demo preview asked for:
-  // a reconnecting state, not a fake live page. The rights notice
-  // stays visible (it is not data), then the notice + demo opt-in.
+  // a reconnecting state, not a fake live page.
   if (!live && data === null && !showDemo && server.reconnecting) {
     return (
       <div className="space-y-6">
@@ -359,12 +379,6 @@ export default function Dashboard() {
             </span>
           }
         />
-        <p className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm leading-snug text-amber-200" role="note">
-          <span className="font-semibold">Rights notice.</span>{" "}
-          Make sure you have the right to use the videos you clip — your own video, a licensed video, or a use YouTube permits. You are responsible for the rights to what you post.
-          CC-BY attribution is added to the description automatically.{" "}
-          <Link href="/trending" className="font-medium underline hover:text-amber-100">Find licensed videos →</Link>
-        </p>
         <ReconnectingNotice />
         <p className="text-sm text-neutral-400">
           Your clips, jobs and settings are safe on the server — this page will reload itself when it is back.
@@ -410,14 +424,6 @@ export default function Dashboard() {
       />
 
       {!live && data !== null && !showDemo && <ReconnectingNotice variant="inline" />}
-
-      {/* Rights notice (advisory since v0.9.1) — always visible, never changes. */}
-      <p className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm leading-snug text-amber-200" role="note">
-        <span className="font-semibold">Rights notice.</span>{" "}
-        Make sure you have the right to use the videos you clip — your own video, a licensed video, or a use YouTube permits. You are responsible for the rights to what you post.
-        CC-BY attribution is added to the description automatically.{" "}
-        <Link href="/trending" className="font-medium underline hover:text-amber-100">Find licensed videos →</Link>
-      </p>
 
       {/* Health strip — is the app itself OK? */}
       <Card className="!p-0">
@@ -490,19 +496,18 @@ export default function Dashboard() {
         </div>
       </Card>
 
+      {/* One-box (v0.11.0) — the daily flow starts here, first thing:
+          paste a video or channel link, clipping starts in one click.
+          It needs no dashboard data, so it renders even while the
+          rest of the page is still loading. */}
+      <OneBox live={live} onJobStarted={() => { load().catch(() => {}); }} />
+
       {/* Requirements — verified before any job starts, so a run never
           starts a download it cannot finish. */}
       <Card>
         <CardHeader title="Requirements" hint="yt-dlp · FFmpeg · ffprobe · Whisper — each verified by running it" />
         <RequirementsPanel />
       </Card>
-
-      {/* New clip run — the daily flow starts here. */}
-      {data === null ? (
-        <Skeleton className="h-64" />
-      ) : (
-        <NewClipRun live={live} onJobStarted={() => { load().catch(() => {}); }} />
-      )}
 
       {/* Needs attention — only when something actually needs you. */}
       {data !== null && attention.length > 0 && (
@@ -545,11 +550,29 @@ export default function Dashboard() {
       <div className="grid gap-4 lg:grid-cols-2">
         {/* Live jobs — progress plus real controls. */}
         <Card>
-          <CardHeader title="Live jobs" hint={live ? "polls every 15s" : "demo jobs — controls need the server"} action={<Link href="/automation" className="text-sm font-medium text-amber-300 hover:text-amber-200">Automation →</Link>} />
+          <CardHeader
+            title="Live jobs"
+            hint={live ? "polls every 15s" : "demo jobs — controls need the server"}
+            action={(
+              <span className="flex items-center gap-3">
+                {clearableJobs.length > 0 && (
+                  <button
+                    onClick={() => void onClearFinished()}
+                    disabled={!live || clearingFinished}
+                    title="Remove every failed, cancelled and blocked job from this list"
+                    className="text-sm font-medium text-neutral-300 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {clearingFinished ? "Clearing…" : `Clear finished (${clearableJobs.length})`}
+                  </button>
+                )}
+                <Link href="/automation" className="text-sm font-medium text-amber-300 hover:text-amber-200">Automation →</Link>
+              </span>
+            )}
+          />
           {data === null ? (
             <div className="space-y-3"><Skeleton className="h-14" /><Skeleton className="h-14" /><Skeleton className="h-14" /></div>
           ) : processing.length === 0 && failedJobs.length === 0 && (queue?.queued.length ?? 0) === 0 ? (
-            <EmptyState title="Nothing running right now" body="Start a clip run above — from your own video or a Creative Commons video. It will appear here with live stage progress and controls." />
+            <EmptyState title="Nothing running right now" body="Start a clip run above — it will appear here with live stage progress and controls." />
           ) : (
             <div className="space-y-4">
               {processing.map((j) => {

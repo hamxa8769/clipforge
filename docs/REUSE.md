@@ -152,3 +152,41 @@ ClipForge's own codebase, in ClipForge's own architecture.
 | SEO pack per clip | One ready-to-post pack per clip: hook title, description, hashtags, plain search tags (`seo_tags`), with a deterministic fallback when the LLM is offline | `src/clipforge/seo/pack.py` (`build_seo_pack`: 2–3 title options + description + plain search tags + hashtags + one plain-language tip per platform, YouTube Shorts / TikTok / Instagram Reels / Facebook Reels / X) + `apps/api/clipforge_api/seo_pack.py` (`GET /clips/{id}/seo-pack`, `POST /seo-pack/preview`) + `apps/web/components/SeoPack.tsx` (per-field Copy + Copy-all, shown in Review and Export Hub). ClipNova writes the pack with an LLM; ClipForge uses deterministic templates only (no LLM call, no key, works offline) — the pack is identical every run. |
 | Transcript keywords for tags | `hashtags.keywords`: words said most in the clip, scored for repeats / names / title words | `extract_search_tags` in `src/clipforge/seo/pack.py`: keyword phrase + channel name + numbered names (“GTA 6”) + most-said words, as plain search tags (no `#`). |
 | Channel SEO view | ClipNova has no channel-SEO view — this is ClipForge's own addition on the same idea (learn from what already works): top videos by views, common title words/shapes, suggested titles/tags | `src/clipforge/channel_seo.py` (yt-dlp flat playlist, no download; optional YouTube Data API enrichment with exact views + real tags when a key is saved; 24 h cache) + `GET /channel-seo`, `POST /channel-seo/analyze`, `GET /channel-seo/connected` + `apps/web/app/channel-seo/page.tsx`. |
+
+### Dashboard one-box (v0.11.0, same ClipNova source)
+
+ClipNova's simple flow — paste one link on the dashboard and the app
+takes it from there (its README: "Turn long videos and live streams
+into viral, captioned vertical 9:16 clips automatically", one URL in,
+clips out, no wizard) — was re-studied 2026-11-25 for the user's
+"make it like ClipNova, very simple" request. **No ClipNova code was
+copied or vendored** — the flow is a fresh implementation in
+ClipForge's own architecture:
+
+| ClipNova idea adapted | Where it landed in ClipForge |
+|---|---|
+| One URL box on the dashboard, video or channel, straight to clipping | `apps/web/components/OneBox.tsx` (Dashboard, first card): paste a video or channel link → `POST /resolve` → video starts in one click, channel shows a picker (newest first, title / duration / thumbnail) and each pick starts a normal `POST /jobs` job through the existing pipeline (ingest → transcribe → score → review, with Facecam / captions / CapCut export in Review). |
+| Metadata-only probe before any download (`studio/media.py`: `info()` / `preview()`) | Already in ClipForge since v0.10.3 (`check_youtube_available`); the one-box reuses it for video links, so a dead link fails in the resolve step, never as a job. |
+| Flat channel listing without an API key | `src/clipforge/resolve.py` (`list_channel_videos_ytdlp`: `yt-dlp --flat-playlist --dump-single-json`, capped at 25) + `POST /resolve` in `apps/api/clipforge_api/app.py`. The saved YouTube Data API key (Trending's SecretStore key / `YOUTUBE_API_KEY`, no new key store) is used when present for richer channel data, with fallback to the yt-dlp listing on any API failure. |
+
+### Settings page (v0.11.0, same ClipNova source)
+
+ClipNova's Settings (`web/index.html`: one screen, left nav with plain
+sections — AI, AI SEO & Viral Hooks, Profile, Security, Connected apps,
+Speech models, Storage — each with a one-line plain hint like "Your AI
+service, model and key" / "Where your clips get posted" / "Where videos
+and clips are kept") was re-studied 2026-11-25 for the user's "organize
+all settings properly, make it like ClipNova's settings, very simple"
+request. **No ClipNova code was copied or vendored** — the page is a
+fresh implementation in ClipForge's own Next.js + Tailwind components:
+
+| ClipNova idea adapted | Where it landed in ClipForge |
+|---|---|
+| One screen, plain named sections with one-line hints | `apps/web/app/settings/page.tsx`: Accounts & channels → AI titles → Posting → Performance → Downloads & tools → Updates & app → Monetization (read-only info, labelled as such) → Advanced (collapsed raw JSON). A jump-nav of section links sits at the top. |
+| AI section first-class: provider, model, key, test | The existing LLM key + Test + provider/model + AI engine picker, grouped under "AI titles" with plain labels; key storage unchanged (OS keyring / encrypted file, masked to last 4). |
+| Connected apps = where clips get posted | The existing per-platform Channels card, first section, with the guided Connect wizard link. |
+| Storage = where things are kept | "Downloads & tools" (FFmpeg / yt-dlp + requirements, data folder, secret storage) and "Updates & app" (in-app updater + replay onboarding / setup wizard). |
+
+Dead-control audit (v0.11.0): every control on the page works; the
+only display-only block is Monetization thresholds, now labelled
+"Info only" in the UI so it is never mistaken for a setting.

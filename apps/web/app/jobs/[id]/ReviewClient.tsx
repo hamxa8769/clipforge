@@ -1,9 +1,9 @@
 "use client";
 import { useEffect, useState } from "react";
 import type { Candidate, Job, SeoPack as SeoPackData } from "@/lib/api";
-import { approveCandidate, attributionForClip, exportClipToCapcut, getSeoPack, licenseBadgeLabel, regenerateThumbnail, rejectCandidate, selectThumbnailVariant } from "@/lib/api";
+import { approveCandidate, exportClipToCapcut, getSeoPack, regenerateThumbnail, rejectCandidate, selectThumbnailVariant } from "@/lib/api";
 import { summarizeApproveQueue } from "@/lib/review";
-import { Card, ExternalLink, StatusPill } from "@/components/ui";
+import { Card, StatusPill } from "@/components/ui";
 import ClipPlayer from "@/components/ClipPlayer";
 import SeoPack from "@/components/SeoPack";
 
@@ -61,16 +61,6 @@ function CandidateCard({ c, job, demo }: { c: Candidate; job: Job; demo: boolean
     const message = typeof data.message === "string" ? data.message : "CapCut draft ready.";
     setCapcutNote(message);
   }
-  // Attribution: the candidate's licence record wins; the job's record
-  // fills the gaps (the API merges them the same way server-side).
-  const attribution = attributionForClip(c)
-    ?? attributionForClip({
-      source_license: job.source_license, source_title: job.source_title,
-      source_channel: job.source_channel, source_url: job.source,
-      attribution_text: job.attribution_text,
-    });
-  const sourceLicense = c.source_license !== "unknown" ? c.source_license : job.source_license;
-
   async function onSelectVariant(i: number) {
     const variantNo = c.thumbnails[i]?.variant || i + 1;
     setThumbIdx(i);
@@ -178,11 +168,6 @@ function CandidateCard({ c, job, demo }: { c: Candidate; job: Job; demo: boolean
       <div className="mt-5 rounded-lg border border-neutral-800 p-4">
         <div className="flex flex-wrap items-center gap-3">
           <h3 className="text-sm font-semibold text-neutral-100">Thumbnail</h3>
-          {sourceLicense !== "unknown" && (
-            <span className={`rounded-full border px-2 py-0.5 text-xs font-medium ${sourceLicense === "cc" ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300" : sourceLicense === "own" ? "border-sky-500/40 bg-sky-500/15 text-sky-300" : "border-neutral-600 bg-neutral-700/50 text-neutral-300"}`}>
-              Source: {licenseBadgeLabel(sourceLicense)}
-            </span>
-          )}
           <button
             type="button"
             onClick={() => { void onRegenerateThumb(); }}
@@ -233,7 +218,7 @@ function CandidateCard({ c, job, demo }: { c: Candidate; job: Job; demo: boolean
       <div className="mt-4 flex flex-wrap items-center gap-4">
         <span className="text-sm text-neutral-400">Clip span: {c.start_s}s – {c.end_s}s</span>
       </div>
-      <p className="mt-2 text-xs text-neutral-500">Own-content declaration: this clip is from content you own or have rights to. AI-assisted edits: when captions, reframing or voiceover were AI-generated, label the clip as AI-generated on the platform when you publish — ClipForge does not send that label for you yet.</p>
+      <p className="mt-2 text-xs text-neutral-500">AI-assisted edits: when captions, reframing or voiceover were AI-generated, label the clip as AI-generated on the platform when you publish — ClipForge does not send that label for you yet.</p>
 
       <div className="mt-5">
         {pack ? (
@@ -251,15 +236,6 @@ function CandidateCard({ c, job, demo }: { c: Candidate; job: Job; demo: boolean
               <div className="space-y-2 rounded-b-lg bg-neutral-950 p-4 text-sm">
                 <p><strong>Title:</strong> {seo.title} <span className="text-neutral-500">({seo.title.length} chars)</span></p>
                 <p><strong>Description:</strong> {seo.description}</p>
-              {attribution && (
-                <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-3">
-                  <p className="text-xs font-semibold text-emerald-300">Attribution — always included for Creative Commons / public-domain sources (read-only)</p>
-                  <p className="mt-1 text-sm text-neutral-200">{attribution}</p>
-                  <p className="mt-1 text-xs text-neutral-500">
-                    Source: {c.source_title || job.source_title || "Creative Commons video"}{(c.source_channel || job.source_channel) ? ` by ${c.source_channel || job.source_channel}` : ""}{(c.source_url || job.source) ? <> · <ExternalLink className="text-sky-300 underline" href={c.source_url || job.source}>source video</ExternalLink></> : ""}. This credit stays in the published description.
-                  </p>
-                </div>
-              )}
                 <p><strong>Hashtags:</strong> {seo.hashtags.join(" ")}</p>
                 <p className="text-xs text-neutral-500">
                   {platform === "youtube" && "YouTube: keyword front-loaded, 2–3 hashtags, links in Shorts descriptions are not clickable."}

@@ -5,8 +5,12 @@ approved Post record, explicit credentials, and ``dry_run=false``):
 
   GET  /health
   GET  /dependencies                 (doctor: tools / keys / flags present?)
+  POST /resolve                      (v0.11.0 one-box: video/channel URL ->
+                                      video + channel video list, no job yet)
   POST /jobs                         (own_content declaration required)
   POST /jobs/upload                  (multipart file upload → job)
+  POST /jobs/clear-finished          (v0.11.0: delete failed / cancelled /
+                                      blocked jobs so the list stays clean)
   GET  /jobs | GET /jobs/{id} | GET /jobs/{id}/candidates
   GET  /jobs/{id}/logs
   POST /jobs/{id}/run | retry | cancel
@@ -264,10 +268,9 @@ class JobCreate(BaseModel):
     own_content: bool | None = None
     own_content_declaration: bool | None = None
     # v0.7.0 licence record (see clipforge.licensing): the source
-    # video's licence + original-video facts. Advisory since v0.9.1:
-    # the licence is recorded (and any CC attribution auto-added), but
-    # no licence value refuses a job — the rights notice is shown in
-    # the UI and the user is responsible for the rights to what they post.
+    # video's licence + original-video facts. The licence is recorded
+    # as metadata only — no licence value refuses a job, and no rights
+    # / licence notice is shown in the UI any more (v0.11.0).
     source_license: str | None = None
     source_title: str | None = None
     source_channel: str | None = None
@@ -1081,6 +1084,48 @@ def media_upload(filename: str):
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
+class ResolveRequest(BaseModel):
+    url: str = ""
+    max_results: int = Field(default=25, ge=1, le=50)
+
+
+@app.post("/resolve")
+def resolve_link(payload: ResolveRequest):
+    """Resolve a pasted video / channel URL — the Dashboard one-box (v0.11.0).
+
+    No job is created here: the UI resolves first, shows the video
+    (or the channel's video picker), and only the user's pick starts
+    a clip job via ``POST /jobs``. A video link answers
+    ``{"kind": "video", "video": {...}}``; a channel / playlist link
+    answers ``{"kind": "channel" | "playlist", "channel": {...},
+    "videos": [...], "source": "api" | "ytdlp"}`` (newest first,
+    capped at ``max_results``). Unresolvable links are 422 with the
+    plain-language reason — a dead link, a private channel, or a
+    non-YouTube link never becomes a job that can only fail later.
+    """
+    from clipforge.resolve import ResolveError, resolve_url  # noqa: PLC0415 (local import, like the rest of this module)
+    from clipforge.ytdlp_install import resolve_yt_dlp_path  # noqa: PLC0415
+
+    api_key = None
+    try:
+        from clipforge.trending import load_youtube_api_key  # noqa: PLC0415
+
+        api_key = load_youtube_api_key(_secrets())
+    except Exception:
+        # The saved-key lookup must never block resolving: without a
+        # key the yt-dlp listing is used instead.
+        api_key = None
+    try:
+        return resolve_url(
+            payload.url,
+            resolve_yt_dlp_path(),
+            api_key=api_key,
+            max_results=payload.max_results,
+        )
+    except ResolveError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
 @app.post("/jobs", status_code=201)
 def create_job(payload: JobCreate, db: Session = Depends(get_db)):
     """Create a clip job — and start it (v0.9.0 auto-run).
@@ -1093,14 +1138,13 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)):
     audit's top defect). ``POST /jobs/{id}/run`` stays available for
     pending / failed / blocked jobs (e.g. after a retry).
     """
-    # v0.9.1 (advisory): the licence is recorded, never enforced. The
-    # v0.7.0 job-creation gate — refusing Standard-licence sources and
+    # The licence is recorded, never enforced. The v0.7.0
+    # job-creation gate — refusing Standard-licence sources and
     # YouTube jobs without a declaration or a lawful licence — was
-    # removed at the user's explicit instruction after they checked
-    # YouTube's terms and confirmed clipping is officially allowed.
-    # Any pasted video link proceeds; the UI shows the non-blocking
-    # rights notice and the user is responsible for the rights to what
-    # they post. CC sources still get their attribution block.
+    # removed at the user's explicit instruction (v0.9.1) after they
+    # checked YouTube's terms and confirmed clipping is officially
+    # allowed. Any pasted video link proceeds; v0.11.0 removed the
+    # rights notice from the UI as well.
     licence = normalize_license(payload.source_license)
     if payload.source_type == "youtube" and not payload.source_url:
         # Structural, not a licence rule: a YouTube job with no URL
@@ -1231,6 +1275,51 @@ async def upload_job(
 @app.get("/jobs")
 def list_jobs(db: Session = Depends(get_db)):
     return [_job_out(j, db) for j in db.query(Job).order_by(Job.created_at.desc()).all()]
+
+
+#: Statuses ``POST /jobs/clear-finished`` removes. Only terminal,
+#: clipless jobs: a failed / cancelled / blocked job has no approved
+#: clips and no scheduled posts to protect, so deleting it loses
+#: nothing the user can still act on. Review / ready / running jobs
+#: are never touched — their clips live in the approval queue.
+CLEARABLE_JOB_STATUSES = ("failed", "cancelled", "blocked")
+
+
+@app.post("/jobs/clear-finished")
+def clear_finished_jobs(db: Session = Depends(get_db)):
+    """Delete finished dead jobs so the Jobs list stays clean (v0.11.0).
+
+    The Pipeline page had accumulated 9 dead jobs (mostly cancelled)
+    with no way to dismiss them. This removes every job in
+    :data:`CLEARABLE_JOB_STATUSES` — failed, cancelled, blocked —
+    together with its candidates (cascade), any posts that referenced
+    those candidates, its stage events and worker runs, and its
+    rendered-clips folder (best-effort). Active / review / ready jobs
+    are untouched. Returns ``{deleted, ids, statuses}``.
+    """
+    import shutil  # noqa: PLC0415 (local import, like the rest of this module)
+
+    jobs = (
+        db.query(Job)
+        .filter(Job.status.in_(CLEARABLE_JOB_STATUSES))
+        .order_by(Job.created_at.desc())
+        .all()
+    )
+    deleted_ids: list[str] = []
+    clips_root = _data_dir() / "clips"
+    for job in jobs:
+        candidate_ids = [c.id for c in job.candidates]
+        if candidate_ids:
+            db.query(Post).filter(Post.clip_candidate_id.in_(candidate_ids)).delete(
+                synchronize_session=False
+            )
+        db.query(JobStageEvent).filter_by(job_id=job.id).delete(synchronize_session=False)
+        db.query(WorkerRun).filter_by(job_id=job.id).delete(synchronize_session=False)
+        db.delete(job)
+        deleted_ids.append(job.id)
+        shutil.rmtree(clips_root / job.id, ignore_errors=True)
+    db.commit()
+    return {"deleted": len(deleted_ids), "ids": deleted_ids, "statuses": list(CLEARABLE_JOB_STATUSES)}
 
 
 @app.get("/jobs/{job_id}")
@@ -1869,12 +1958,10 @@ def _publish_post(post: Post, dry_run: bool, db: Session) -> dict:
         raise HTTPException(409, f"post is '{post.status}' — approve it before publishing")
     if post.status in {PostStatus.DRAFT.value, PostStatus.PENDING_APPROVAL.value}:
         raise HTTPException(409, "Approval-first: approve this post before publishing it")
-    # Advisory since v0.9.1: the licence record still travels with the
-    # post (and any CC attribution with it), but no licence value
-    # refuses publishing any more — the v0.7.0 defence-in-depth 409
-    # was removed at the user's explicit instruction after they checked
-    # YouTube's terms. The rights notice is shown in the UI before
-    # publishing; the user is responsible for the rights to what they post.
+    # The licence record still travels with the post (and any CC
+    # attribution with it), but no licence value refuses publishing
+    # any more — the v0.7.0 defence-in-depth 409 was removed at the
+    # user's explicit instruction after they checked YouTube's terms.
     if not dry_run and _effective_dry_run():
         raise HTTPException(
             409,
@@ -3409,9 +3496,9 @@ def get_analytics(account_id: str, db: Session = Depends(get_db)):
 # Gemini LLM endpoints. All errors are plain language — never a
 # traceback, never a secret value in any response.
 #
-# Rights guardrail (applies to every string in this block): the agent
-# is for the user's OWN videos or videos they have rights / a licence
-# to use. It is not a tool to re-upload other creators' videos.
+# v0.11.0: no rights / licence gate in this block any more — the agent
+# runs on any source the user gives it (removed at the user's explicit
+# instruction; the user is responsible for the rights to what they clip).
 # ============================================================ v0.5.0 ===
 
 
@@ -3446,7 +3533,6 @@ def _agent_config_out(config: agent_mod.AgentConfig) -> dict:
         "transcript_text": config.transcript_text,
         "top_n": config.top_n,
         "platforms": list(config.platforms),
-        "rights_notice": agent_mod.RIGHTS_NOTICE,
         "niches": list(PRESET_NAMES),
     }
 
@@ -3462,15 +3548,15 @@ def agent_status(db: Session = Depends(get_db)):
 
 @app.get("/api/agent/config")
 def get_agent_config():
-    """Current agent config + the rights notice + the niche presets."""
+    """Current agent config + the niche presets."""
     return _agent_config_out(_agent().store.load_config())
 
 
 @app.put("/api/agent/config")
 def update_agent_config(payload: AgentConfigUpdate):
     """Save agent config (partial). Structural problems are 422 in
-    plain language. The rights flag is NOT required to *save* — it is
-    required to *run* (POST /api/agent/start enforces it)."""
+    plain language. v0.11.0: no rights gate any more — the config still
+    carries ``rights_confirmed`` (always true) for wire compatibility."""
     agent = _agent()
     config = agent.store.load_config()
     patch = {k: v for k, v in payload.model_dump().items() if v is not None}
