@@ -34,17 +34,16 @@ Live clipping (v0.7.0, Worker C) — same router, ``/api/trending/live``:
                                         queue; 202, poll GET /jobs/{id})
   POST /api/trending/live/{job_id}/cancel (stop a running live capture)
 
-Rights notice (advisory since v0.9.1): the licence is reported, never
-enforced. The v0.7.0 hard block — refusing standard-licence or
-unknown-licence sources — was removed at the user's explicit
-instruction after they checked YouTube's terms and confirmed
-clipping is officially allowed. A trending video URL is still refused
-as a clip source (422, plain language) by
-:func:`clipforge.trending.refuse_trending_source` and by the agent's
-own validation — that is the topic-vs-source rule, not a licence
-verdict. Live clipping reports each stream's licence the same way;
-the licence is re-verified against the YouTube API at capture time
-so the job record is accurate, never trusted from the client.
+v0.11.0: the licence is metadata only — reported, never enforced,
+and no rights / licence notice is shown anywhere in the app any more
+(removed at the user's explicit instruction; the user is responsible
+for the rights to what they clip). The v0.7.0 hard block — refusing
+standard-licence or unknown-licence sources — was removed at the
+user's explicit instruction (2026-11-23) after they checked
+YouTube's terms and confirmed clipping is officially allowed.
+Live clipping re-verifies each stream's licence against the YouTube
+API at capture time so the job record is accurate, never trusted
+from the client.
 
 Creative Commons discovery (v0.7.0, Worker A):
 
@@ -53,16 +52,10 @@ Creative Commons discovery (v0.7.0, Worker A):
        ``clipforge.trending.search_trending``). Default false.
   GET  /api/videos/license?url=<youtube-url> — licence check for one
        video: {video_id, title, channel, channel_id, license,
-       license_url, can_clip, reason}. Advisory since v0.9.1:
-       ``can_clip`` is always true — the licence is reported with the
-       rights notice, never enforced.
-  POST /api/trending/run — advisory since v0.9.1: the source video's
-       licence is no longer verified as a gate (the v0.7.0 guardrail
-       that refused standard-licence / unverifiable sources with 422
-       was removed at the user's explicit instruction after they
-       checked YouTube's terms). The run proceeds on the user's rights
-       confirmation; the licence check endpoint still reports the
-       licence for the UI. Demo-transcript runs download nothing.
+       license_url, can_clip, reason}. ``can_clip`` is always true —
+       the licence is reported, never enforced.
+  POST /api/trending/run — the source video's licence is not verified
+       as a gate. Demo-transcript runs download nothing.
 """
 
 from __future__ import annotations
@@ -84,7 +77,6 @@ from clipforge.live import (
     LIVE_DEFAULT_DURATION_S,
     LIVE_MAX_DURATION_S,
     LIVE_MIN_DURATION_S,
-    LIVE_NOTICE,
     LiveError,
     canonical_source_license,
     clear_live_cancel,
@@ -96,12 +88,10 @@ from clipforge.live import (
 )
 from clipforge.niches import PRESET_NAMES, niche_label
 from clipforge.trending import (
-    TRENDING_NOTICE,
     TrendingError,
     check_video_license,
     credentials_status,
     extract_youtube_video_id,
-    is_trending_source,
     match_own_video,
     own_channel_id,
     resolve_credentials,
@@ -173,10 +163,11 @@ class TrendingRunIn(BaseModel):
     """Start a trending agent run.
 
     ``trending_video_id`` / ``trending_title`` are the inspiration
-    (topic only). ``own_source_url`` is the user's OWN video on that
-    topic — it must NOT be the trending video itself (422). When
-    ``own_source_type`` is "channel", the agent matches the channel's
-    recent videos to the trending topic first (see /match).
+    (topic only). ``own_source_url`` is the source video on that
+    topic. v0.11.0: any source runs — the trending video itself is
+    accepted too. When ``own_source_type`` is "channel", the agent
+    matches the channel's recent videos to the trending topic first
+    (see /match).
     """
 
     niche: str = "general"
@@ -200,8 +191,8 @@ class LiveCaptureIn(BaseModel):
 
     ``video_url`` (or ``video_id``) is the live stream to record. The
     licence is NOT trusted from the client: the endpoint re-verifies
-    it against the YouTube API, and only the user's own live stream
-    or a Creative Commons licensed live stream is captured.
+    it against the YouTube API, so the job record carries the true
+    licence — but the licence never blocks the capture (v0.11.0).
     ``duration_s`` is the bounded recording length (60–300s).
     """
 
@@ -222,7 +213,6 @@ def list_niches():
     return {
         "niches": list(PRESET_NAMES),
         "labels": {name: niche_label(name) for name in PRESET_NAMES},
-        "notice": TRENDING_NOTICE,
     }
 
 
@@ -290,7 +280,6 @@ def trending_search(niche: str = "general", max_results: int = 10, licensed_only
         "count": len(videos),
         "source": credentials.kind,
         "account": credentials.account_name,
-        "notice": TRENDING_NOTICE,
     }
 
 
@@ -299,11 +288,8 @@ def check_license(url: str):
     """Licence check for one YouTube video (v0.7.0, Worker A).
 
     Returns ``{video_id, title, channel, channel_id, license,
-    license_url, can_clip, reason}``. Advisory since v0.9.1:
-    ``can_clip`` is always true — the check reports the licence and
-    the rights notice; it never refuses a video. A standard-licence
-    video reports its licence with the notice; a CC video reports CC
-    (attribution is added automatically downstream).
+    license_url, can_clip, reason}``. ``can_clip`` is always true —
+    the check reports the licence; it never refuses a video.
 
     422 (plain language) when no YouTube connection / API key exists,
     the URL is not a YouTube video URL, YouTube has no such video, or
@@ -338,7 +324,7 @@ def match_topic(payload: MatchIn):
         matched = match_own_video(payload.channel_url, payload.trending_title)
     except TrendingError as exc:
         raise HTTPException(422, str(exc)) from exc
-    return {**matched, "trending_video_id": payload.trending_video_id, "notice": TRENDING_NOTICE}
+    return {**matched, "trending_video_id": payload.trending_video_id}
 
 
 @router.post("/run", status_code=202)
@@ -346,32 +332,14 @@ def start_trending_run(payload: TrendingRunIn):
     """Start the full loop: trending topic -> own video -> clips -> SEO
     (tuned to the trend) -> approval queue -> schedule / publish.
 
-    422 when rights are not confirmed, when the source IS the trending
-    video (topic-vs-source guardrail), or when the channel cannot be
-    matched. 409 when the agent is already running. Advisory since
-    v0.9.1: the source video's licence is NOT verified as a gate any
-    more — the v0.7.0 licence guardrail (422 for a standard-licence /
-    unverifiable source) was removed at the user's explicit instruction
-    after they checked YouTube's terms. The run itself is async: poll
+    v0.11.0: no rights / licence gate — any source runs. 422 when no
+    source URL is given or the channel cannot be matched. 409 when
+    the agent is already running. The run itself is async: poll
     GET /api/trending/status (or the pipeline) for progress.
     """
-    if not payload.rights_confirmed:
-        raise HTTPException(
-            422,
-            "Please confirm the source is yours or licensed first — "
-            "the agent only works with videos you own or have the "
-            "rights / licence to use.",
-        )
     source_url = (payload.own_source_url or "").strip()
     if not source_url:
         raise HTTPException(422, "Give the agent your own source video or channel URL.")
-    if is_trending_source(source_url, payload.trending_video_id):
-        raise HTTPException(
-            422,
-            "That is the trending video itself — the agent cannot clip "
-            "another creator's video. Pick YOUR OWN video on this topic "
-            "as the source instead. " + TRENDING_NOTICE,
-        )
     source_type = payload.own_source_type
     if source_type == "channel" and not payload.demo_transcript_text:
         # Match the channel's recent videos to the trending topic first;
@@ -382,14 +350,8 @@ def start_trending_run(payload: TrendingRunIn):
             raise HTTPException(422, str(exc)) from exc
         source_url = matched["own_video_url"]
         source_type = "video"
-    # Advisory since v0.9.1: the source video's licence is NOT verified
-    # as a gate any more. The v0.7.0 guardrail that refused
-    # standard-licence / unverifiable sources (422) was removed at the
-    # user's explicit instruction after they checked YouTube's terms
-    # and confirmed clipping is officially allowed. The run proceeds on
-    # the user's rights confirmation; the licence-check endpoint still
-    # reports the licence for the UI, and any CC source still gets its
-    # attribution block. Demo-transcript runs download nothing.
+    # The source video's licence is not verified as a gate.
+    # Demo-transcript runs download nothing.
     config = agent_mod.AgentConfig(
         enabled=True,
         source_type=source_type,
@@ -471,7 +433,6 @@ def trending_job(job_id: str, db: Session = Depends(get_db)):
         "trending_url": meta.get("trending_url") or "",
         "demo": bool(meta.get("demo", False)),
         "posts": posts,
-        "notice": TRENDING_NOTICE,
     }
 
 
@@ -493,9 +454,9 @@ def list_live(niche: str = "general", licensed_only: bool = False, max_results: 
     creativeCommon`` when ``licensed_only``), licence verified per
     video via ``videos.list``. Each result carries ``viewers``
     (concurrent), ``started_at``, ``licence`` and ``can_clip`` —
-    always True since v0.9.1 (advisory: the licence is reported, never
-    enforced). 422 (plain language) when no YouTube connection /
-    API key exists or YouTube rejects the call. Never invented streams.
+    always True (the licence is reported, never enforced). 422 (plain
+    language) when no YouTube connection / API key exists or YouTube
+    rejects the call. Never invented streams.
     """
     try:
         credentials = resolve_credentials(_secrets(), _settings_store())
@@ -521,7 +482,6 @@ def list_live(niche: str = "general", licensed_only: bool = False, max_results: 
         "count": len(videos),
         "source": credentials.kind,
         "account": credentials.account_name,
-        "notice": LIVE_NOTICE,
     }
 
 
@@ -549,7 +509,6 @@ def list_my_live():
         "results": [video.to_dict() for video in videos],
         "count": len(videos),
         "own_channel_id": own_id,
-        "notice": LIVE_NOTICE,
     }
 
 
@@ -559,23 +518,12 @@ def start_live_capture(payload: LiveCaptureIn, db: Session = Depends(get_db)):
 
     The stream's licence is re-verified against the YouTube API
     (never trusted from the request) so the job record carries the
-    true licence and any CC attribution is accurate. Advisory since
-    v0.9.1: the verdict never blocks capture — the v0.7.0 refusal of
-    standard-licence third-party streams (422) was removed at the
-    user's explicit instruction after they checked YouTube's terms.
-    The capture records ``duration_s`` seconds (60–300s) with yt-dlp,
-    then the job runs the NORMAL worker pipeline on the recording
-    (transcribe -> score -> clip -> SEO -> approval queue). 202 with
-    the job id; poll GET /jobs/{id} for progress, and POST
+    true licence. The capture records ``duration_s`` seconds (60–300s)
+    with yt-dlp, then the job runs the NORMAL worker pipeline on the
+    recording (transcribe -> score -> clip -> SEO -> approval queue).
+    202 with the job id; poll GET /jobs/{id} for progress, and POST
     /api/trending/live/{job_id}/cancel to stop it.
     """
-    if not payload.rights_confirmed:
-        raise HTTPException(
-            422,
-            "Please confirm the source is yours or licensed first — "
-            "live clipping only works on your own live streams and "
-            "Creative Commons licensed live streams.",
-        )
     video_id = extract_youtube_video_id(payload.video_url) or (payload.video_id or "").strip()
     if not video_id or len(video_id) != 11:
         raise HTTPException(
@@ -586,12 +534,9 @@ def start_live_capture(payload: LiveCaptureIn, db: Session = Depends(get_db)):
         credentials = resolve_credentials(_secrets(), _settings_store())
     except TrendingError as exc:
         raise HTTPException(422, str(exc)) from exc
-    # Advisory since v0.9.1: verify_live_video reports the licence
-    # (never trusted from the request) but never blocks capture — the
-    # v0.7.0 `if not verified.can_clip: raise 422` refusal was removed
-    # at the user's explicit instruction after they checked YouTube's
-    # terms. The verified licence still feeds the job's licence record
-    # and any CC attribution.
+    # verify_live_video reports the licence (never trusted from the
+    # request) but never blocks capture. The verified licence feeds
+    # the job's licence record.
     try:
         with httpx.Client(timeout=30.0) as client:
             own_id = resolve_own_channel_id(_secrets(), credentials=credentials, client=client)
@@ -606,8 +551,7 @@ def start_live_capture(payload: LiveCaptureIn, db: Session = Depends(get_db)):
         title=verified.title or f"Live capture — {payload.niche}",
         own_content=True,
         status=JobStatus.PENDING.value,
-        # Licence record (Worker A vocabulary): feeds the worker's
-        # thumbnail + attribution step and the publish guardrail.
+        # Licence record: feeds the worker's thumbnail + attribution step.
         source_license=canonical_source_license(verified.licence, verified.is_own),
         source_title=verified.title or None,
         source_channel=verified.channel_title or None,
@@ -648,7 +592,6 @@ def start_live_capture(payload: LiveCaptureIn, db: Session = Depends(get_db)):
             f"poll GET /jobs/{job.id} for progress. The recorded segment "
             "then goes through the normal clip -> SEO -> approval flow."
         ),
-        "notice": LIVE_NOTICE,
     }
 
 

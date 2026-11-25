@@ -17,19 +17,14 @@
 // publish needs the post id — one free-text "Clip ID" could never
 // satisfy both, so the old flow 404'd on one of the two steps.
 //
-// Rights guardrail: clips are made ONLY from your own videos or Creative
-// Commons / licensed / public-domain videos.
 "use client";
 import { useEffect, useState } from "react";
-import { apiPostJson, exportClipToCapcut, getPosts, publishToX, scanPublish, type Post, type PublishScanFlag } from "@/lib/api";
+import { apiPostJson, exportClipToCapcut, getPosts, getSeoPack, publishToX, scanPublish, type Post, type PublishScanFlag, type SeoPack as SeoPackData } from "@/lib/api";
+import SeoPack from "@/components/SeoPack";
 import {
   Badge, Card, CardHeader, EmptyState, ErrorBanner, PageHeader,
   PrimaryButton, SecondaryButton,
 } from "@/components/ui";
-
-const GUARDRAIL =
-  "Only publish clips from your own videos or Creative Commons / licensed / public-domain videos. "
-  + "Re-uploading another creator's video can get the clip removed or the channel struck — even as a Short.";
 
 interface PlatformRule {
   id: string; label: string; maxSeconds: number; aspect: string;
@@ -74,6 +69,22 @@ export default function ExportPage() {
   // CapCut export (v0.10.0): the clip as a CapCut draft project folder.
   const [capcutBusy, setCapcutBusy] = useState(false);
   const [capcutNote, setCapcutNote] = useState<string | null>(null);
+  // SEO pack (v0.11.0): title options, tags and hashtags for this clip,
+  // from GET /clips/{id}/seo-pack. Shown when it loads; a failure leaves
+  // the caption box above as the fallback, never an error wall.
+  const [pack, setPack] = useState<SeoPackData | null>(null);
+  const [packLoading, setPackLoading] = useState(false);
+
+  useEffect(() => {
+    if (!clipId) { setPack(null); return; }
+    let cancelled = false;
+    setPackLoading(true);
+    getSeoPack(clipId)
+      .then((p) => { if (!cancelled) setPack(p); })
+      .catch(() => { if (!cancelled) setPack(null); })
+      .finally(() => { if (!cancelled) setPackLoading(false); });
+    return () => { cancelled = true; };
+  }, [clipId]);
 
   async function onExportCapcut() {
     if (!clipId.trim()) { setCapcutNote("Pick a post from the approval queue first — the export runs on its clip."); return; }
@@ -141,7 +152,6 @@ export default function ExportPage() {
         intro="Check a clip against each platform's rules, run the copyright scan, then publish — one click per platform."
         actions={<Badge tone="info">Pro · v0.8.0</Badge>}
       />
-      <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-100" role="note">{GUARDRAIL}</div>
       {notice && <div className="rounded-xl border border-sky-500/40 bg-sky-500/10 p-4 text-sm text-sky-100">{notice}</div>}
       {scanError && <ErrorBanner message={scanError} onRetry={onScan} />}
 
@@ -239,6 +249,19 @@ export default function ExportPage() {
           </label>
         </div>
       </Card>
+
+      {clipId && (
+        <Card className="glass">
+          <CardHeader title="SEO pack" hint="Title options, description, search tags & hashtags for this clip — copy and paste when you publish" />
+          {pack ? (
+            <SeoPack pack={pack} />
+          ) : packLoading ? (
+            <p className="text-sm text-neutral-400">Loading the SEO pack…</p>
+          ) : (
+            <p className="text-sm text-neutral-400">Could not load the SEO pack for this clip — use the caption &amp; hashtags above.</p>
+          )}
+        </Card>
+      )}
 
       <Card className="glass">
         <CardHeader title="Platform rules" hint="Checked against this clip before publishing" />

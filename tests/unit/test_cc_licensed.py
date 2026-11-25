@@ -10,11 +10,11 @@ fake httpx client (MockTransport). Covers:
   ``license_url``.
 * ``search_trending(licensed_only=False)`` — v0.6.0 behaviour, no
   licence filtering, no ``videoLicense`` param.
-* :func:`check_video_license` — advisory since v0.9.1: CC, standard,
-  own and unverifiable licences are all reported with
-  ``can_clip=True`` (the hard block was removed at the user's explicit
-  instruction after they checked YouTube's terms); standard and
-  unverifiable licences carry the rights notice in ``reason``.
+* :func:`check_video_license` — CC, standard, own and unverifiable
+  licences are all reported with ``can_clip=True`` (the hard block
+  was removed at the user's explicit instruction after they checked
+  YouTube's terms); standard and unverifiable licences carry a plain
+  licence label in ``reason`` — no rights wording (v0.11.0).
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from clipforge.licensing import RIGHTS_ADVISORY
 from clipforge.trending import (
     CC_LICENSE_URL,
     STANDARD_LICENSE_REASON,
@@ -204,8 +203,9 @@ def test_check_license_cc_video_can_clip():
 
 
 def test_check_license_standard_video_is_advisory_not_refused():
-    """v0.9.1: a standard-licence video is reported (licence + rights
-    notice) and proceeds — can_clip is True, never a refusal."""
+    """v0.9.1: a standard-licence video is reported and proceeds —
+    can_clip is True, never a refusal. v0.11.0: the reason is a plain
+    licence label, no rights wording."""
     client = _fake_client(search_ids=[], video_items=[_video_item(STD_VIDEO, license_="youtube")])
     result = check_video_license(f"https://youtu.be/{STD_VIDEO}", credentials=CREDS, client=client)
     assert result["license"] == "youtube"
@@ -213,7 +213,7 @@ def test_check_license_standard_video_is_advisory_not_refused():
     assert result["can_clip"] is True
     assert result["reason"] == STANDARD_LICENSE_REASON
     assert "standard licence" in result["reason"]
-    assert RIGHTS_ADVISORY in result["reason"]
+    assert "rights" not in result["reason"].lower()
 
 
 def test_check_license_own_video_can_clip_even_when_standard():
@@ -244,7 +244,7 @@ def test_check_license_third_party_standard_reports_advisory():
     )
     assert result["can_clip"] is True
     assert result["channel_id"] == "UCOTHERCHAN1"
-    assert RIGHTS_ADVISORY in result["reason"]
+    assert "rights" not in result["reason"].lower()
 
 
 def test_check_license_unverifiable_video_not_found_is_honest_error():
@@ -257,14 +257,14 @@ def test_check_license_unverifiable_video_not_found_is_honest_error():
 
 def test_check_license_no_licence_field_is_advisory_not_refused():
     """YouTube returned the video but no licence: report honestly
-    (rights notice) and proceed — never fake a licence, never refuse."""
+    and proceed — never fake a licence, never refuse."""
     client = _fake_client(search_ids=[], video_items=[_video_item(NO_LICENSE_VIDEO, license_=None)])
     result = check_video_license(
         f"https://www.youtube.com/watch?v={NO_LICENSE_VIDEO}", credentials=CREDS, client=client
     )
     assert result["license"] == ""
     assert result["can_clip"] is True
-    assert RIGHTS_ADVISORY in result["reason"]
+    assert "rights" not in result["reason"].lower()
 
 
 def test_check_license_bad_url_is_honest_error():

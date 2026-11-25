@@ -2,8 +2,7 @@
 
 No test hits the real YouTube API: ``search_trending`` is exercised
 with a fake httpx client, and the trend-score formula is tested
-directly. The guardrail (a trending video URL is never a clip source)
-is asserted here and again at the API level.
+directly.
 """
 
 from __future__ import annotations
@@ -14,14 +13,12 @@ import httpx
 import pytest
 
 from clipforge.trending import (
-    TRENDING_NOTICE,
     TrendingCredentials,
     TrendingError,
     TrendingVideo,
     extract_youtube_video_id,
     is_trending_source,
     niche_search_query,
-    refuse_trending_source,
     search_trending,
     topic_match_score,
     trend_score,
@@ -79,13 +76,6 @@ def test_is_trending_source_different_video_is_not_trending_source():
     # that is the only accepted ingest input.
     assert not is_trending_source("https://www.youtube.com/watch?v=AAAAAAAAAAA", "dQw4w9WgXcQ")
     assert not is_trending_source("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "")
-
-
-def test_refuse_trending_source_raises_plain_message():
-    with pytest.raises(TrendingError, match="cannot clip another creator"):
-        refuse_trending_source("https://www.youtube.com/watch?v=dQw4w9WgXcQ", "dQw4w9WgXcQ")
-    # A different (own) video passes silently.
-    refuse_trending_source("https://www.youtube.com/watch?v=AAAAAAAAAAA", "dQw4w9WgXcQ")
 
 
 # ------------------------------------------------------------------ niche query
@@ -250,4 +240,3 @@ def test_trending_video_to_dict_includes_url_and_score():
     data = video.to_dict()
     assert data["url"] == "https://www.youtube.com/watch?v=AAAAAAAAAAA"
     assert data["trend_score"] == 42.5
-    assert TRENDING_NOTICE.startswith("Trending shows what topics are working")

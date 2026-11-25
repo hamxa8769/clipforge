@@ -24,21 +24,19 @@ Two pieces, kept in one module so the router and the agent share them:
    pipeline (transcribe -> score -> clip -> SEO -> approval queue ->
    schedule / publish) runs with its SEO tuned to the trending topic.
 
-Rights notice (v0.9.1, advisory): the licence is reported, never
-enforced. The v0.7.0 hard block — refusing standard-licence or
-unknown-licence videos — was removed at the user's explicit
-instruction after they checked YouTube's terms and confirmed
-clipping is officially allowed. :func:`is_trending_source` still
-refuses a trending video URL as a clip source (topic vs. source, not
-a licence verdict), and the router + agent both enforce that.
+v0.11.0: the licence is metadata only — reported, never enforced,
+and no rights / licence notice is shown anywhere in the app any more
+(removed at the user's explicit instruction; the user is responsible
+for the rights to what they clip). The v0.7.0 hard block — refusing
+standard-licence or unknown-licence videos — was removed at the
+user's explicit instruction (2026-11-23) after they checked
+YouTube's terms and confirmed clipping is officially allowed.
 
 Creative Commons discovery (v0.7.0, Worker A): ``search_trending``
 takes ``licensed_only=True`` (``videoLicense=creativeCommon`` + a
 ``status.license`` verification pass), and :func:`check_video_license`
-reports one video's licence with an advisory ``can_clip`` verdict
-(always True since v0.9.1) and the rights notice as its reason for
-standard / unknown licences. ``licensed_only`` stays an opt-in
-search filter for users who want CC-only discovery.
+reports one video's licence with a ``can_clip`` verdict that is
+always True. ``licensed_only`` stays an opt-in search filter.
 """
 
 from __future__ import annotations
@@ -56,7 +54,6 @@ import httpx
 from clipforge.auth.secrets import SecretStore, mask_secret
 from clipforge.auth.settings_store import SettingsStore
 from clipforge.auth.token_store import TokenRecord, TokenStore
-from clipforge.licensing import RIGHTS_ADVISORY
 from clipforge.niches import niche_keywords, niche_label, normalize_niche
 from clipforge.ytdlp_install import resolve_yt_dlp_path, ytdlp_missing_message
 
@@ -74,18 +71,6 @@ TRENDING_WINDOW_DAYS = 7
 # enough candidates to rank.
 SEARCH_MAX_RESULTS = 25
 
-TRENDING_NOTICE = (
-    "Trending shows what topics are working — your clips are made from "
-    "YOUR videos. The agent never downloads or re-uploads another "
-    "creator's video."
-)
-
-RIGHTS_NOTICE = (
-    "Make sure you have the right to use this video — your own video, "
-    "a licensed video, or a use YouTube permits. You are responsible "
-    "for the rights to what you post."
-)
-
 # Creative Commons discovery (v0.7.0, Worker A). YouTube's
 # ``creativeCommon`` licence is CC BY 3.0 — the licence page below is
 # what the API reports for such videos. The only other licence value
@@ -94,12 +79,12 @@ CC_LICENSE = "creativeCommon"
 STANDARD_LICENSE = "youtube"
 CC_LICENSE_URL = "https://creativecommons.org/licenses/by/3.0/"
 
-# Advisory reasons (v0.9.1): the licence check reports the licence and
-# shows the rights notice — it never refuses a video. The constant
-# names are kept so existing imports keep working.
-STANDARD_LICENSE_REASON = "This video uses YouTube's standard licence. " + RIGHTS_ADVISORY
+# Plain reasons for the licence check: the licence is reported as
+# metadata — it never refuses a video. The constant names are kept so
+# existing imports keep working.
+STANDARD_LICENSE_REASON = "This video uses YouTube's standard licence."
 
-UNVERIFIABLE_LICENSE_REASON = "YouTube did not report a licence for this video. " + RIGHTS_ADVISORY
+UNVERIFIABLE_LICENSE_REASON = "YouTube did not report a licence for this video."
 
 
 def license_url_for(license_value: str | None) -> str:
@@ -216,23 +201,12 @@ def extract_youtube_video_id(url: str | None) -> str | None:
 def is_trending_source(source_url: str | None, trending_video_id: str | None) -> bool:
     """True when ``source_url`` IS the trending video.
 
-    The guardrail: a trending video URL may never be used as a clip
-    source. The user's own video on the same topic is a different URL
-    (different video id) — that is the only accepted ingest input.
+    Kept as a pure helper (the topic-vs-source distinction); it no
+    longer refuses anything — v0.11.0 removed the refusal.
     """
     if not source_url or not trending_video_id:
         return False
     return extract_youtube_video_id(source_url) == trending_video_id
-
-
-def refuse_trending_source(source_url: str | None, trending_video_id: str | None) -> None:
-    """Raise :class:`TrendingError` when the source is the trending video."""
-    if is_trending_source(source_url, trending_video_id):
-        raise TrendingError(
-            "That is the trending video itself — the agent cannot clip "
-            "another creator's video. Pick YOUR OWN video on this topic "
-            "as the source instead. " + TRENDING_NOTICE
-        )
 
 
 # ------------------------------------------------------------------ API key
@@ -650,15 +624,14 @@ def check_video_license(
         elif is_own:
             can_clip, reason = True, ("This is your own video — you can clip it.")
         elif license_value == STANDARD_LICENSE:
-            # Advisory only (v0.9.1): report the licence + rights
-            # notice; the video proceeds through the pipeline.
+            # Metadata only: report the licence; the video proceeds.
             can_clip, reason = True, STANDARD_LICENSE_REASON
         elif not license_value:
             can_clip, reason = True, UNVERIFIABLE_LICENSE_REASON
         else:
             can_clip, reason = (
                 True,
-                (f"This video's licence is {license_value}. " + RIGHTS_ADVISORY),
+                (f"This video's licence is {license_value}."),
             )
         return {
             "video_id": video_id,
@@ -766,7 +739,6 @@ __all__ = [
     "SEARCH_MAX_RESULTS",
     "STANDARD_LICENSE",
     "STANDARD_LICENSE_REASON",
-    "TRENDING_NOTICE",
     "TRENDING_WINDOW_DAYS",
     "TrendingCredentials",
     "TrendingError",
@@ -784,7 +756,6 @@ __all__ = [
     "match_own_video",
     "niche_search_query",
     "own_channel_id",
-    "refuse_trending_source",
     "resolve_credentials",
     "save_youtube_api_key",
     "search_trending",

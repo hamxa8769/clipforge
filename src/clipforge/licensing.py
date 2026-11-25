@@ -1,4 +1,4 @@
-"""Source-licence record (v0.7.0) — advisory since v0.9.1.
+"""Source-licence record (v0.7.0) — metadata only since v0.11.0.
 
 Shared field names (licence detection + thumbnail / attribution + web
 UI all use exactly these — do not rename without updating every
@@ -10,21 +10,23 @@ consumer):
   ``source_url``       URL of the original video (YouTube watch URL)
   ``source_title``     title of the original video
   ``source_channel``   creator / channel name of the original video
-  ``attribution_text`` the credit block appended to every generated
-                       description (built by :func:`build_attribution_text`)
+  ``attribution_text`` the credit block the SEO step may append to a
+                       generated description (built by
+                       :func:`build_attribution_text`)
 
-Licence model (v0.9.1, advisory): the licence is REPORTED, never
-enforced. The v0.7.0 hard block — refusing standard-licence or
-unknown-licence sources with a 409 / ``skipped_licence`` — was
-removed at the user's explicit instruction (2026-11-23) after they
-checked YouTube's terms and confirmed clipping is officially allowed.
-Any pasted video link proceeds through the pipeline; the UI shows the
-non-blocking rights notice (:data:`RIGHTS_ADVISORY`) where the link is
-entered and before publishing, and the user is responsible for the
-rights to what they post. ClipForge does not guarantee rights
-clearance. Where the licence is known to be Creative Commons,
-:func:`build_attribution_text` still auto-adds the CC-BY credit block
-(idempotent, as in v0.7.0).
+Licence model: the licence is RECORDED, never enforced and never
+shown as a warning in the UI. The v0.7.0 hard block — refusing
+standard-licence or unknown-licence sources with a 409 /
+``skipped_licence`` — was removed at the user's explicit instruction
+(2026-11-23) after they checked YouTube's terms and confirmed
+clipping is officially allowed. v0.11.0 (2026-11-25, same instruction)
+removed the remaining notices: the rights notice
+(:data:`RIGHTS_ADVISORY`, deleted here) is shown nowhere any more,
+and no licence check, badge or attribution nag appears in the UI.
+The user is responsible for the rights to what they clip — stated in
+the release notes, not in the app. Where the licence is known to be
+Creative Commons, :func:`build_attribution_text` can still build the
+CC-BY credit block (idempotent, as in v0.7.0) for the SEO step.
 
 :func:`publish_blocked_reason` is kept for backward compatibility and
 always returns ``None`` now; :func:`is_lawful_source` is kept as a
@@ -176,25 +178,15 @@ def is_lawful_source(license_key: str | None, own_content: bool = False) -> bool
     return is_creative_commons(license_key)
 
 
-#: Non-blocking rights notice (v0.9.1, advisory). Shown where a video
-#: link is entered and before publishing. ClipForge does not guarantee
-#: rights clearance — the user is responsible for the rights to what
-#: they post.
-RIGHTS_ADVISORY = (
-    "Make sure you have the right to use this video — your own video, "
-    "a licensed video, or a use YouTube permits. You are responsible "
-    "for the rights to what you post."
-)
-
-
+#: v0.11.0: the rights notice is gone — deleted at the user's
+#: explicit instruction. No rights / licence notice is shown anywhere
+#: in the app any more.
 def publish_blocked_reason(license_key: str | None, own_content: bool = False) -> str | None:
     """Kept for backward compatibility — always ``None`` since v0.9.1.
 
     The v0.7.0 hard block (refusing Standard-licence sources) was
     removed at the user's explicit instruction after they checked
-    YouTube's terms. No licence value blocks publishing any more; the
-    licence is reported and the advisory notice
-    (:data:`RIGHTS_ADVISORY`) is shown instead.
+    YouTube's terms. No licence value blocks publishing any more.
     """
     return None
 
@@ -337,7 +329,6 @@ __all__ = [
     "PUBLIC_DOMAIN_LICENSE",
     "CC_LICENSES",
     "KNOWN_LICENSES",
-    "RIGHTS_ADVISORY",
     "SOURCE_LICENSE_FIELDS",
     "normalize_license",
     "is_creative_commons",

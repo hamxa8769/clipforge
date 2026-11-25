@@ -13,7 +13,7 @@ machine is never overloaded. The default item processor only
 simulates the pipeline stages (transcribe -> score -> clip -> SEO)
 with staged progress; the real pipeline is wired in by passing a
 ``processor`` — the queue itself never downloads or re-uploads
-anything, so the own/licensed-videos-only guardrail is unaffected.
+anything.
 """
 
 from __future__ import annotations

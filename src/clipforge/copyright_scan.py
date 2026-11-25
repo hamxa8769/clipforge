@@ -22,13 +22,14 @@ from clipforge.publishing.limits import PLATFORM_LIMITS
 from clipforge.x_platform import X_MAX_VIDEO_S
 
 #: The disclaimer every scan response carries, verbatim.
+#: v0.11.0: the rights / licence sentence was removed at the user's
+#: explicit instruction — the scan states what it is (and is not),
+#: nothing more.
 NO_GUARANTEE_DISCLAIMER = (
     "This scan is a metadata check only — it does NOT guarantee that "
     "this clip is copyright-safe, and it is not a Content ID check. "
     "ClipForge cannot verify ownership against YouTube Content ID or "
-    "any rights database. Only publish clips made from videos you own "
-    "or hold a licence for, and check the licence terms (attribution, "
-    "commercial use) yourself before publishing."
+    "any rights database."
 )
 
 #: Licence strings (lowercase, substring-matched) that count as a

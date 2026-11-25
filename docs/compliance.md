@@ -6,13 +6,15 @@ merge.
 
 ## Own content only
 
-> v0.9.1 note: the licence hard block described below was removed —
-> see `docs/licensing.md`. The licence is now reported (advisory),
-> never enforced: any pasted video link proceeds, the rights notice is
-> shown where the link is entered and before publishing, and the user
-> is responsible for the rights to what they post. The rights
-> acknowledgement checkboxes (agent `rights_confirmed`, batch
-> `own_content_declaration`) remain as the user's own acknowledgement.
+> v0.11.0 note: the licence hard block described below was removed —
+> see `docs/licensing.md`. The licence is now recorded as metadata
+> only, never enforced, and no rights / licence notice is shown
+> anywhere in the app any more. The rights acknowledgement checkboxes
+> (agent `rights_confirmed`, batch `own_content_declaration`) are
+> gone from the UI — the declaration the server-side ingest requires
+> for YouTube URLs is now sent with every job/run instead. The user
+> is responsible for the rights to what they clip (stated in the
+> release notes, not in the UI).
 
 - Ingest requires a **source-ownership declaration** (`ownership_declared`)
   on every job. No declaration, no job.

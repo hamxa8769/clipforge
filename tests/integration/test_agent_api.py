@@ -108,8 +108,7 @@ def test_agent_status_contract():
     assert body["current_job"] is None
     assert isinstance(body["accounts"], list)
     assert body["auto_post"] is False  # default OFF
-    assert "own" in body["rights_notice"].lower()
-    assert "re-upload" in body["rights_notice"]
+    assert "rights_notice" not in body  # v0.11.0: notice removed
 
 
 def test_agent_config_get_put_round_trip():
@@ -127,7 +126,7 @@ def test_agent_config_get_put_round_trip():
         "cooking",
         "music",
     }
-    assert "own" in got["rights_notice"].lower()
+    assert "rights_notice" not in got  # v0.11.0: notice removed
 
     saved = _put_config()
     assert saved.status_code == 200, saved.text
@@ -169,11 +168,16 @@ def test_agent_config_can_save_before_rights_confirmed():
 
 
 # ---------------------------------------------------------------- start/stop
-def test_agent_start_requires_rights_and_enabled():
+def test_agent_start_requires_enabled_and_needs_no_rights():
+    # v0.11.0: the rights gate is gone — start with the (no longer
+    # asked-for) confirmation unset starts the run; only OFF blocks it.
     _put_config(rights_confirmed=False)
     resp = client.post("/api/agent/start")
-    assert resp.status_code == 422
-    assert "confirm the source" in resp.json()["detail"]
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["ok"] is True
+    done = _wait_for_state("done")
+    assert done["state"] == "done"
+    assert client.post("/api/agent/stop").status_code == 200
 
     _put_config(enabled=False, rights_confirmed=True)
     resp = client.post("/api/agent/start")

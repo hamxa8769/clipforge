@@ -13,7 +13,9 @@ export interface BatchPayload {
   own_content_declaration: boolean;
 }
 
-/** The exact body POST /batch expects: plain string sources + the rights flag. */
+/** The exact body POST /batch expects: plain string sources + the
+ * own-content declaration the server requires for YouTube URLs
+ * (sent with every batch since v0.11.0 — no checkbox in the UI). */
 export function buildBatchPayload(sources: string[], ownContent: boolean): BatchPayload {
   return {
     sources: sources.map((s) => s.trim()).filter(Boolean),

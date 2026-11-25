@@ -9,7 +9,7 @@ import {
   isBatchTerminal,
 } from "./batch.js";
 
-test("buildBatchPayload sends plain strings + the rights flag", () => {
+test("buildBatchPayload sends plain strings + the declaration flag", () => {
   assert.deepEqual(buildBatchPayload([" /tmp/a.mp4 ", "https://example.com/v"], true), {
     sources: ["/tmp/a.mp4", "https://example.com/v"],
     own_content_declaration: true,

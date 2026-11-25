@@ -14,12 +14,12 @@ auto-post on, posts are still created first and only then published,
 and live publishing additionally requires dry-run off + credentials
 (the same gate as POST /posts/{id}/publish).
 
-Rights guardrail: the agent is for the user's OWN videos or videos
-they have rights / a licence to use. It is not presented as a tool to
-re-upload other creators' videos. The config carries a required
-``rights_confirmed`` acknowledgement; the agent refuses to run on a
-source channel until the user confirms the source is theirs or
-licensed.
+v0.11.0: no rights / licence gate any more — the agent runs on any
+source the user gives it, with no rights checkbox and no notice in
+the UI (removed at the user's explicit instruction; the user is
+responsible for the rights to what they clip). The config still
+carries ``rights_confirmed`` (always sent true) for wire
+compatibility, but nothing enforces it.
 
 State (config + run state) is persisted in ``<data_dir>/agent.json``,
 so a restart keeps the config and the last run's outcome.
@@ -62,15 +62,7 @@ from clipforge.publishing import youtube as youtube_adapter
 from clipforge.rule_engine import extract_keywords
 from clipforge.seo import PLATFORMS
 from clipforge.transcribe import fallback_transcript_from_text
-from clipforge.trending import is_trending_source
 from clipforge.ytdlp_install import probe_yt_dlp, resolve_yt_dlp_path, ytdlp_missing_message
-
-RIGHTS_NOTICE = (
-    "The ClipForge Agent only works with videos you own or have the "
-    "rights / licence to use. It is not a tool to re-upload other "
-    "creators' videos. Confirm the source is yours or licensed before "
-    "the agent runs on it."
-)
 
 AGENT_FILE = "agent.json"
 SOURCE_TYPES = ("video", "channel")
@@ -149,24 +141,14 @@ class AgentConfig:
             raise AgentError(f"Unknown platforms in agent config: {bad}.")
 
     def validate(self) -> None:
-        """Full validation: structure + the rights acknowledgement.
+        """Full validation: structure only.
 
-        Raises AgentError (plain language) on the first problem.
+        v0.11.0: the rights acknowledgement and the trending-video
+        refusal are gone — nothing about rights or licences blocks a
+        run any more. Raises AgentError (plain language) on the first
+        structural problem.
         """
         self.validate_structure()
-        if not self.rights_confirmed:
-            raise AgentError(
-                "Please confirm the source is yours or licensed first: "
-                "tick the rights confirmation in the agent settings. " + RIGHTS_NOTICE
-            )
-        # Trending guardrail (v0.6.0): a trending video URL is never a
-        # clip source — only the user's own video on that topic is.
-        if self.trending_video_id and is_trending_source(self.source_url, self.trending_video_id):
-            raise AgentError(
-                "That source is the trending video itself — the agent "
-                "cannot clip another creator's video. Use YOUR OWN video "
-                "on this topic as the source instead."
-            )
 
 
 @dataclass
@@ -370,7 +352,6 @@ class Agent:
             "niche_label": niche_label(config.niche),
             "auto_post": config.auto_post,
             "rights_confirmed": config.rights_confirmed,
-            "rights_notice": RIGHTS_NOTICE,
             "trending_video_id": state.trending_video_id,
             "trending_title": state.trending_title,
         }
@@ -384,7 +365,7 @@ class Agent:
             cfg = config or self.store.load_config()
             if not cfg.enabled:
                 raise AgentError("The agent is off — turn it on in the agent settings first.")
-            cfg.validate()  # rights flag, source URL, niche, platforms
+            cfg.validate()  # source URL, niche, platforms
             _require_pipeline_tools(cfg, self.data_dir)  # fail fast, before any thread
             self.store.save_config(cfg)
             self._stop.clear()
@@ -412,14 +393,14 @@ class Agent:
         stored agent config — a trending run is a single loop, not a
         new standing setup. The trending video id / title are recorded
         in the run state so the UI can show what the run was inspired
-        by. Raises AgentError plainly (incl. the trending guardrail).
+        by. Raises AgentError plainly.
         """
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 raise AgentError("The agent is already running — stop it first.")
             if not config.enabled:
                 raise AgentError("The agent is off — turn it on in the agent settings first.")
-            config.validate()  # rights flag, source URL, trending guardrail
+            config.validate()  # source URL, niche, platforms
             _require_pipeline_tools(config, self.data_dir)  # fail fast, before any thread
             self._stop.clear()
             self._set_state(
@@ -894,7 +875,6 @@ __all__ = [
     "AgentState",
     "AgentStore",
     "PRESET_NAMES",
-    "RIGHTS_NOTICE",
     "accounts_summary",
     "get_agent",
 ]

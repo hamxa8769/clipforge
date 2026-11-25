@@ -16,10 +16,8 @@
 //     handles or type start/end. Trim snaps the range to the selected
 //     suggestion; Ripple-cut marks the range as cut out of the clip.
 //
-// Rights guardrail: clips are made ONLY from your own videos or Creative
-// Commons / licensed / public-domain videos — never another creator's
-// standard-licensed video. Until the analysis endpoint lands, the page
-// says so plainly and never shows invented suggestions.
+//   - Until the analysis endpoint lands, the page says so plainly
+//     and never shows invented suggestions.
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { analyzeDetection, API_URL, type DetectionCandidate } from "@/lib/api";
@@ -46,11 +44,6 @@ import {
   Badge, Card, CardHeader, EmptyState, ErrorBanner, PageHeader,
   ExternalLink, PrimaryButton, SecondaryButton, Skeleton,
 } from "@/components/ui";
-
-const GUARDRAIL =
-  "Make sure you have the right to use the videos you clip — your own video, "
-  + "a licensed video, or a use YouTube permits. You are responsible for the "
-  + "rights to what you post.";
 
 const SIGNALS: { key: keyof Pick<DetectionCandidate, "hook_score" | "peak_score" | "payoff_score" | "emotion_score" | "visual_score" | "completeness_score">; label: string }[] = [
   { key: "hook_score", label: "Hook" },
@@ -112,7 +105,6 @@ export default function StudioPage() {
   const [presetCreator, setPresetCreator] = useState("default");
   const [presetName, setPresetName] = useState("");
   const [presetNames, setPresetNames] = useState<string[]>([]);
-  const [ownContent, setOwnContent] = useState(false);
   const [rendering, setRendering] = useState(false);
   const [renderResult, setRenderResult] = useState<FacecamRenderResult | null>(null);
   const [renderError, setRenderError] = useState<string | null>(null);
@@ -180,7 +172,9 @@ export default function StudioPage() {
     const words = transcriptLinesToWords(parseSegments());
     const res = await renderFacecamClip({
       source_url: videoUrl.trim(),
-      own_content_declaration: ownContent,
+      // v0.11.0: no rights checkbox any more — the declaration the
+      // server requires for YouTube sources is sent with every render.
+      own_content_declaration: true,
       start_s: clipStart,
       end_s: clipEnd,
       layout: facecamLayout,
@@ -325,12 +319,11 @@ export default function StudioPage() {
         intro="AI clip suggestions for your own video, a preview, and a simple timeline to trim the clip — pro controls are below, out of the way."
         actions={<Badge tone="info">Pro · v0.8.0</Badge>}
       />
-      <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-100" role="note">{GUARDRAIL}</div>
       {notice && <div className="rounded-xl border border-sky-500/40 bg-sky-500/10 p-4 text-sm text-sky-100">{notice}</div>}
       {error && <ErrorBanner message={error} onRetry={onAnalyze} />}
 
       <Card className="glass">
-        <CardHeader title="Source video" hint="Your own video, or a licensed / public-domain one" />
+        <CardHeader title="Source video" hint="The video to analyse" />
         <div className="grid gap-3 md:grid-cols-[1fr_160px_200px]">
           <label className="block text-sm">
             <span className="text-neutral-400">Video file URL (for the preview)</span>
@@ -578,10 +571,6 @@ export default function StudioPage() {
                   )}
                 </fieldset>
 
-                <label className="flex items-start gap-3 text-sm">
-                  <input type="checkbox" className="mt-0.5 h-4 w-4 accent-amber-400" checked={ownContent} onChange={(e) => setOwnContent(e.target.checked)} />
-                  <span><span className="font-medium text-neutral-100">This is my own video (or I have the right to clip it)</span><span className="mt-0.5 block text-xs text-neutral-400">Needed for YouTube sources. You are responsible for the rights to what you post.</span></span>
-                </label>
                 <div className="flex flex-wrap items-center gap-2">
                   <PrimaryButton onClick={onRenderFacecam} disabled={rendering}>{rendering ? "Rendering…" : `Render facecam clip (${fmtTime(clipStart)} – ${fmtTime(clipEnd)})`}</PrimaryButton>
                   <span className="text-xs text-neutral-500">Renders the timeline range (max 5 min) with this layout + captions, 1080×1920.</span>

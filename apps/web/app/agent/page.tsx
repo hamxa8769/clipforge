@@ -4,7 +4,6 @@
 //   - Source picker: one video URL, or a source YouTube channel URL
 //   - Niche picker: presets + free text
 //   - Auto-post toggle, default OFF, with the approval-first warning
-//   - Rights checkbox — the agent cannot be turned on without it
 //   - Live status: current job + progress + which engine is active
 //     (Gemini / OpenAI / rule-based fallback, stated plainly)
 //
@@ -64,7 +63,6 @@ export default function AgentPage() {
   const [sourceUrl, setSourceUrl] = useState("");
   const [niche, setNiche] = useState("");
   const [autoPost, setAutoPost] = useState(false);
-  const [rights, setRights] = useState(false);
 
   const load = useCallback(async () => {
     const [fetchedStatus, fetchedConfig, fetchedProviders] = await Promise.all([
@@ -83,7 +81,6 @@ export default function AgentPage() {
       const savedNiche = fetchedConfig.niche === "general" ? "" : fetchedConfig.niche;
       setNiche(savedNiche);
       setAutoPost(fetchedConfig.auto_post);
-      setRights(fetchedConfig.rights_confirmed);
       if (!NICHE_PRESETS.includes(savedNiche as (typeof NICHE_PRESETS)[number]) && savedNiche) {
         setCustomNiche(savedNiche);
       }
@@ -105,14 +102,12 @@ export default function AgentPage() {
 
   const engine = activeEngineName(providers);
   const nicheValue = niche === "__custom" ? customNiche.trim() : niche;
-  const canEnable = rights && sourceUrl.trim().length > 0 && nicheValue.length > 0;
-  const enableBlocker = !rights
-    ? "Confirm the rights checkbox first — the agent cannot be turned on without it."
-    : !sourceUrl.trim()
-      ? "Add a source video or channel URL first."
-      : !nicheValue
-        ? "Pick a niche first."
-        : null;
+  const canEnable = sourceUrl.trim().length > 0 && nicheValue.length > 0;
+  const enableBlocker = !sourceUrl.trim()
+    ? "Add a source video or channel URL first."
+    : !nicheValue
+      ? "Pick a niche first."
+      : null;
 
   async function save(patch: Partial<AgentConfig>) {
     setSaving(true);
@@ -142,7 +137,7 @@ export default function AgentPage() {
     setNotice(null);
     const saved = await save({
       enabled: next, source_type: sourceType, source_url: sourceUrl.trim(),
-      niche: nicheValue, auto_post: autoPost, rights_confirmed: rights,
+      niche: nicheValue, auto_post: autoPost, rights_confirmed: true,
     });
     if (!saved) { setActing(false); return; }
     const res = next ? await startAgent() : await stopAgent();
@@ -365,24 +360,9 @@ export default function AgentPage() {
             </p>
           )}
 
-          <label className="flex items-start gap-3 text-sm">
-            <input
-              type="checkbox"
-              className="mt-0.5 h-4 w-4 accent-amber-400"
-              checked={rights}
-              onChange={(e) => setRights(e.target.checked)}
-            />
-            <span>
-              <span className="font-medium text-neutral-100">Rights acknowledgement (required)</span>
-              <span className="mt-0.5 block text-xs text-neutral-400">
-                This source is my own video/channel or I have a licence/rights to use it. The agent cannot be turned on without this.
-              </span>
-            </span>
-          </label>
-
           <div className="flex flex-wrap gap-2">
             <PrimaryButton
-              onClick={() => save({ source_type: sourceType, source_url: sourceUrl.trim(), niche: nicheValue, auto_post: autoPost, rights_confirmed: rights })}
+              onClick={() => save({ source_type: sourceType, source_url: sourceUrl.trim(), niche: nicheValue, auto_post: autoPost, rights_confirmed: true })}
               disabled={!engineAvailable || saving || acting}
             >
               {saving ? "Saving…" : "Save agent settings"}

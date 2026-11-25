@@ -13,7 +13,6 @@ import time
 import pytest
 
 from clipforge.agent import (
-    RIGHTS_NOTICE,
     Agent,
     AgentConfig,
     AgentError,
@@ -85,10 +84,11 @@ def test_config_validate_ok():
     _config().validate()
 
 
-def test_config_validate_requires_rights():
-    with pytest.raises(AgentError, match="confirm the source is yours"):
-        _config(rights_confirmed=False).validate()
-    assert "own" in RIGHTS_NOTICE.lower()
+def test_config_validate_needs_no_rights():
+    # v0.11.0: the rights gate is gone — validate passes with or
+    # without the (no longer asked-for) confirmation.
+    _config(rights_confirmed=False).validate()
+    _config(rights_confirmed=True).validate()
 
 
 def test_config_validate_bad_url():
@@ -104,7 +104,7 @@ def test_config_validate_channel_must_be_youtube():
 
 def test_config_validate_structure_allows_unconfirmed_rights():
     # The settings page must be able to SAVE a config before the user
-    # ticks the rights box; only running requires it.
+    # ticks any box; running requires nothing extra.
     _config(rights_confirmed=False).validate_structure()
 
 
@@ -172,20 +172,14 @@ def test_run_once_end_to_end_rules_no_keys(tmp_path):
         session.close()
 
 
-def test_run_once_requires_rights(tmp_path):
+def test_run_once_needs_no_rights(tmp_path):
+    # v0.11.0: the rights gate is gone — a run without the
+    # (no longer asked-for) confirmation completes the same as with it.
     agent = _agent(tmp_path)
-    session = session_factory()()
-    try:
-        jobs_before = session.query(Job).count()
-    finally:
-        session.close()
-    with pytest.raises(AgentError, match="confirm the source is yours"):
-        agent.run_once(_config(rights_confirmed=False))
-    session = session_factory()()
-    try:
-        assert session.query(Job).count() == jobs_before
-    finally:
-        session.close()
+    state = agent.run_once(_config(rights_confirmed=False))
+    assert state["state"] == "done"
+    assert state["demo"] is True
+    assert state["current_job"]
 
 
 def test_run_once_requires_enabled(tmp_path):
@@ -245,12 +239,31 @@ def test_run_once_auto_post_true_publishes_dry_run_only(tmp_path):
 
 
 # ---------------------------------------------------------------- start/stop
-def test_start_requires_enabled_and_rights(tmp_path):
+def test_start_requires_enabled(tmp_path):
     agent = _agent(tmp_path)
     with pytest.raises(AgentError, match="agent is off"):
         agent.start(_config(enabled=False))
-    with pytest.raises(AgentError, match="confirm the source"):
-        agent.start(_config(rights_confirmed=False))
+
+
+def test_start_needs_no_rights(tmp_path, monkeypatch):
+    # v0.11.0: starting with the (no longer asked-for) confirmation
+    # unset starts the run instead of raising.
+    agent = _agent(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _blocking_run(config):
+        entered.set()
+        release.wait(timeout=10)
+        return agent.status()
+
+    monkeypatch.setattr(agent, "run_once", _blocking_run)
+    state = agent.start(_config(rights_confirmed=False))
+    assert state["running"] is True
+    assert entered.wait(timeout=5)
+    release.set()
+    agent._thread.join(timeout=5)
+    assert agent.stop()["state"] in {"stopped", "done", "idle", "error"}
 
 
 def test_start_twice_is_rejected_while_running(tmp_path, monkeypatch):

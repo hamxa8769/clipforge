@@ -35,10 +35,8 @@ Honesty rules (enforced here, not just in the UI)
   ``X_CLIENT_SECRET`` env fallback. No token or secret is ever logged
   or returned by any function here.
 
-Rights guardrail: X publishing only ever runs on clips made from the
-user's own videos or Creative Commons / licensed / public-domain
-videos. The router enforces it (job ``own_content``); this module
-never downloads or re-uploads another creator's video.
+This module never downloads or re-uploads a video — it publishes
+clips the pipeline already made.
 
 Live X calls are NOT verified in this environment (no X API key, no
 developer app). :func:`publish_tweet` and :func:`exchange_code` are

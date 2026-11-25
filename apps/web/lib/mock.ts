@@ -2,7 +2,7 @@ import type { AnalyticsSnapshot, Candidate, ChannelStatus, Job, Monetization, Po
 
 // Demo data only — shown with a "Demo data" badge whenever the live API is unreachable.
 export const demoJobs: Job[] = [
-  { id: "job-001", title: "Weekly podcast ep. 42 — growth tactics", source: "podcast-ep42.mp4", status: "ready", created_at: "2026-11-20T10:00:00Z", candidates: 5, error: null, source_type: "local", own_content: true, stage: "review", progress_pct: 95, eta_s: null, demo: true, blocked_by: null, failed_stage: null, started_at: "2026-11-20T10:00:05Z", finished_at: "2026-11-20T10:00:47Z", duration_s: 42, queue_position: null, queue_priority: 0, error_title: null, error_action: null, error_code: null, stages: [], worker_runs: [], source_license: "cc", source_title: "Why Daily Posting Hurts Your Channel", source_channel: "Creator Academy (CC)", attribution_text: "Source: \"Why Daily Posting Hurts Your Channel\" by Creator Academy (CC) — licensed under Creative Commons (CC BY). Please keep this credit in the description." },
+  { id: "job-001", title: "Weekly podcast ep. 42 — growth tactics", source: "podcast-ep42.mp4", status: "ready", created_at: "2026-11-20T10:00:00Z", candidates: 5, error: null, source_type: "local", own_content: true, stage: "review", progress_pct: 95, eta_s: null, demo: true, blocked_by: null, failed_stage: null, started_at: "2026-11-20T10:00:05Z", finished_at: "2026-11-20T10:00:47Z", duration_s: 42, queue_position: null, queue_priority: 0, error_title: null, error_action: null, error_code: null, stages: [], worker_runs: [], source_license: "own", source_title: "Why Daily Posting Hurts Your Channel", source_channel: "Creator Academy", attribution_text: null },
   { id: "job-002", title: "Product launch walkthrough", source: "launch-walkthrough.mp4", status: "scoring", created_at: "2026-11-20T11:30:00Z", candidates: 0, error: null, source_type: "local", own_content: true, stage: "score", progress_pct: 55, eta_s: 30, demo: true, blocked_by: null, failed_stage: null, started_at: "2026-11-20T11:30:02Z", finished_at: null, duration_s: null, queue_position: null, queue_priority: 0, error_title: null, error_action: null, error_code: null, stages: [], worker_runs: [], source_license: "own", source_title: "", source_channel: "", attribution_text: null },
   { id: "job-003", title: "Founder story interview", source: "founder-story.mp4", status: "transcribing", created_at: "2026-11-20T12:05:00Z", candidates: 0, error: null, source_type: "local", own_content: true, stage: "transcribe", progress_pct: 30, eta_s: 45, demo: true, blocked_by: null, failed_stage: null, started_at: "2026-11-20T12:05:01Z", finished_at: null, duration_s: null, queue_position: null, queue_priority: 0, error_title: null, error_action: null, error_code: null, stages: [], worker_runs: [], source_license: "own", source_title: "", source_channel: "", attribution_text: null },
   { id: "job-004", title: "Q&A: pricing mistakes", source: "qa-pricing.mp4", status: "failed", created_at: "2026-11-19T16:20:00Z", candidates: 0, error: "Transcription failed: Whisper could not read the audio track (unsupported codec).", error_title: "Transcription failed", error_action: "Retry the job. If it keeps failing, try a different source file.", error_code: "transcribe_failed", source_type: "local", own_content: true, stage: "transcribe", progress_pct: 30, eta_s: null, demo: true, blocked_by: null, failed_stage: "transcribe", started_at: "2026-11-19T16:20:03Z", finished_at: "2026-11-19T16:20:31Z", duration_s: 28, queue_position: null, queue_priority: 0, stages: [], worker_runs: [], source_license: "own", source_title: "", source_channel: "", attribution_text: null },
@@ -24,17 +24,16 @@ export const demoCandidates: Candidate[] = [
     reason: "Contrarian opinion bomb in the first 3 seconds, clear practical value, quotable line.",
     transcript_excerpt: "…most creators think volume wins. It does not. The algorithm rewards completion, not frequency — one strong clip a week beats seven forgettable ones…",
     start_s: 342, end_s: 378, status: "pending", n: 1, file_path: null,
-    // v0.7.0: this clip was cut from a Creative Commons source video, so
-    // the review shows its generated thumbnail + attribution credit.
+    // Demo clip with a generated thumbnail (review page).
     thumbnail_url: demoThumb(24, "Stop posting"),
     thumbnail_variants: [demoThumb(24, "Stop posting"), demoThumb(200, "Stop posting"), demoThumb(280, "Stop posting")],
     thumbnail_path: null,
     thumbnails: [{ variant: 1, filename: "thumbnail.jpg", url: demoThumb(24, "Stop posting") }, { variant: 2, filename: "thumbnail_2.jpg", url: demoThumb(200, "Stop posting") }],
-    source_license: "cc",
-    source_url: "https://www.youtube.com/watch?v=cc-demo-001",
+    source_license: "own",
+    source_url: "",
     source_title: "Why Daily Posting Hurts Your Channel",
-    source_channel: "Creator Academy (CC)",
-    attribution_text: "Source: \"Why Daily Posting Hurts Your Channel\" by Creator Academy (CC) (https://www.youtube.com/watch?v=cc-demo-001) — licensed under Creative Commons (CC BY). Please keep this credit in the description.",
+    source_channel: "Creator Academy",
+    attribution_text: null,
     seo: {
       youtube: seo("Stop Posting Every Day (It Hurts Your Reach)", "Why posting daily can hurt Shorts reach — and what to do instead. Full episode linked.", ["#YouTubeShorts", "#CreatorTips", "#Growth"]),
       tiktok: seo("Stop posting every day", "Posting daily is hurting your reach. Here is why — and the fix. #creatortips", ["#creatortips", "#growth", "#contentcreator", "#fyp", "#learnontiktok"]),

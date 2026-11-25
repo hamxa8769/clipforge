@@ -57,7 +57,6 @@ export function SetupWizard({ inline = false, onDone }: WizardProps) {
   const [sourceType, setSourceType] = useState<"video" | "channel">("video");
   const [sourceUrl, setSourceUrl] = useState("");
   // Step 5 form.
-  const [rights, setRights] = useState(false);
   const [agentStarting, setAgentStarting] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -148,7 +147,6 @@ export function SetupWizard({ inline = false, onDone }: WizardProps) {
   }
 
   async function turnOnAgent() {
-    if (!rights) { setNotice("Confirm the rights checkbox first — the agent cannot be turned on without it."); return; }
     if (!sourceUrl.trim() || !nicheValue) {
       setNotice("Go back to step 4 first — the agent needs a source URL and a niche.");
       return;
@@ -322,17 +320,8 @@ export function SetupWizard({ inline = false, onDone }: WizardProps) {
               {nicheValue ? ` for ${nicheValue} moments` : ""}, makes clips, and queues them for your approval.
               Nothing posts without your approval — auto-post stays off.
             </p>
-            <label className="flex items-start gap-3 text-sm">
-              <input type="checkbox" className="mt-0.5 h-4 w-4 accent-amber-400" checked={rights} onChange={(e) => setRights(e.target.checked)} />
-              <span>
-                <span className="font-medium text-neutral-100">Rights acknowledgement (required)</span>
-                <span className="mt-0.5 block text-xs text-neutral-400">
-                  This source is my own video/channel or I have a licence/rights to use it.
-                </span>
-              </span>
-            </label>
             <div className="flex flex-wrap gap-2 pt-2">
-              <PrimaryButton onClick={turnOnAgent} disabled={agentStarting || !rights}>
+              <PrimaryButton onClick={turnOnAgent} disabled={agentStarting}>
                 {agentStarting ? "Starting…" : "Turn on the agent"}
               </PrimaryButton>
               <SecondaryButton onClick={finish} disabled={saving}>Finish setup — I&apos;ll turn it on later</SecondaryButton>

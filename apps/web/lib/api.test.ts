@@ -46,10 +46,7 @@ import {
   normalizeCandidates,
   normalizeThumbnailVariants,
   jobSourceLicense,
-  licenseBadgeLabel,
   deriveCanClip,
-  RIGHTS_ADVISORY,
-  attributionForClip,
   normalizeWorkerQueue,
   normalizeNotifications,
   normalizeNotification,
@@ -63,6 +60,12 @@ import {
   startAgentOnSource,
   getFfmpegInstallStatus,
   API_URL,
+  apiPostJson,
+  clearFinishedJobs,
+  formatDuration,
+  formatPublishedAt,
+  REQUEST_NO_ANSWER,
+  resolveUrl,
 } from "./api.js";
 
 test("normalizeJobStatus passes backend statuses through unchanged", () => {
@@ -832,21 +835,15 @@ test("normalizeVideoLicense maps YouTube and API licence spellings", () => {
   assert.equal(normalizeVideoLicense(42), "unknown");
 });
 
-test("licenseBadgeLabel names each licence in plain language", () => {
-  assert.equal(licenseBadgeLabel("cc"), "Creative Commons");
-  assert.equal(licenseBadgeLabel("own"), "Your video");
-  assert.equal(licenseBadgeLabel("standard"), "Standard licence");
-  assert.equal(licenseBadgeLabel("unknown"), "Licence unknown");
-});
-
-test("RIGHTS_ADVISORY is the non-blocking rights notice shown in the UI", () => {
-  assert.match(RIGHTS_ADVISORY, /Make sure you have the right to use this video/);
-  assert.match(RIGHTS_ADVISORY, /You are responsible for the rights to what you post/);
-  // The notice never claims the app guarantees rights clearance.
-  assert.doesNotMatch(RIGHTS_ADVISORY, /guarantee/i);
-  // Standard and unknown licences carry the notice in their reason.
-  assert.match(deriveCanClip("standard", null).reason, /You are responsible for the rights/);
-  assert.match(deriveCanClip("unknown", null).reason, /You are responsible for the rights/);
+test("deriveCanClip reasons carry no rights wording since v0.11.0", () => {
+  // The rights notice is gone: reasons are plain licence labels.
+  for (const license of ["cc", "own", "standard", "unknown"] as const) {
+    const reason = deriveCanClip(license, null).reason;
+    assert.doesNotMatch(reason, /rights/i);
+    assert.doesNotMatch(reason, /responsible/i);
+  }
+  assert.equal(deriveCanClip("standard", null).reason, "Standard YouTube licence.");
+  assert.equal(deriveCanClip("unknown", null).reason, "No licence information reported.");
 });
 
 test("deriveCanClip is advisory since v0.9.1 — every licence can clip", () => {
@@ -859,7 +856,7 @@ test("deriveCanClip is advisory since v0.9.1 — every licence can clip", () => 
   assert.equal(deriveCanClip("cc", false).canClip, true);
   assert.equal(deriveCanClip("standard", true).canClip, true);
   assert.match(deriveCanClip("standard", null).reason, /Standard YouTube licence/);
-  assert.match(deriveCanClip("standard", null).reason, /You are responsible for the rights/);
+  assert.doesNotMatch(deriveCanClip("standard", null).reason, /rights/i);
   assert.match(deriveCanClip("unknown", null).reason, /No licence information reported/);
 });
 
@@ -875,12 +872,13 @@ test("normalizeTrendingVideo carries licence, verdict and live fields", () => {
 
   const std = normalizeTrendingVideo({ video_id: "std1", title: "Hit song", license: "youtube" });
   assert.equal(std?.license, "standard");
-  // v0.9.1 advisory: a standard-licence video is reported, never refused.
+  // v0.9.1 advisory, v0.11.0: a standard-licence video is reported
+  // with a plain label, never refused, no rights wording.
   assert.equal(std?.can_clip, true);
   assert.match(std?.reason ?? "", /Standard YouTube licence/);
-  assert.match(std?.reason ?? "", /You are responsible for the rights/);
+  assert.doesNotMatch(std?.reason ?? "", /rights/i);
 
-  // No licence at all: reported with the rights notice, never refused.
+  // No licence at all: reported, never refused.
   const unknown = normalizeTrendingVideo({ video_id: "u1", title: "Mystery" });
   assert.equal(unknown?.license, "unknown");
   assert.equal(unknown?.can_clip, true);
@@ -1011,23 +1009,6 @@ test("jobSourceLicense sends the server a canonical key for a clip job", () => {
   assert.equal(jobSourceLicense({ license: "own", license_key: "own" }), "own");
   assert.equal(jobSourceLicense({ license: "public-domain", license_key: "public-domain" }), "public-domain");
   assert.equal(jobSourceLicense({ license: "standard", license_key: "youtube" }), "standard");
-});
-
-test("attributionForClip returns the credit for CC sources only", () => {
-  const cc = {
-    source_license: "cc" as const, source_title: "Open tutorial", source_channel: "Open Chan",
-    source_url: "https://www.youtube.com/watch?v=abc12345678", attribution_text: null,
-  };
-  const text = attributionForClip(cc);
-  assert.match(text ?? "", /Open tutorial/);
-  assert.match(text ?? "", /Open Chan/);
-  assert.match(text ?? "", /Creative Commons/);
-  assert.equal(attributionForClip({ ...cc, attribution_text: "Custom credit." }), "Custom credit.");
-  assert.equal(attributionForClip({ ...cc, source_license: "own" }), null);
-  assert.equal(attributionForClip({ ...cc, source_license: "standard" }), null);
-  const pd = attributionForClip({ ...cc, source_license: "public-domain" });
-  assert.match(pd ?? "", /public domain/);
-  assert.match(pd ?? "", /Open tutorial/);
 });
 
 test("normalizePerfProfile reads the nested hardware object from GET /perf/profile", () => {
@@ -1234,6 +1215,135 @@ test("slow probe getters share one in-flight request (single-flight dedup)", asy
     assert.equal(c?.found, true);
     await getFfmpegInstallStatus();
     assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Dashboard one-box (v0.11.0): POST /resolve + clear-finished.
+// ---------------------------------------------------------------------------
+
+test("formatDuration renders seconds as m:ss / h:mm:ss, never a raw number", () => {
+  assert.equal(formatDuration(0), "0:00");
+  assert.equal(formatDuration(65), "1:05");
+  assert.equal(formatDuration(272), "4:32");
+  assert.equal(formatDuration(3723), "1:02:03");
+  assert.equal(formatDuration(null), "—");
+  assert.equal(formatDuration(undefined), "—");
+  assert.equal(formatDuration(NaN), "—");
+});
+
+test("formatPublishedAt reads yt-dlp upload_date and ISO dates", () => {
+  assert.equal(formatPublishedAt("20240115"), new Date("2024-01-15T00:00:00").toLocaleDateString());
+  assert.equal(formatPublishedAt("2024-01-15T10:00:00Z"), new Date("2024-01-15T10:00:00Z").toLocaleDateString());
+  assert.equal(formatPublishedAt(""), "");
+});
+
+test("resolveUrl normalises a video answer", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({
+    ok: true, status: 200,
+    json: async () => ({
+      kind: "video",
+      video: {
+        video_id: "M7lc1UVf-VE", title: "Test video", channel_title: "Ch",
+        channel_id: "UCx", duration_s: 272, thumbnail_url: "https://i.ytimg.com/vi/x/hq.jpg",
+        published_at: "20240115", view_count: 0,
+        url: "https://www.youtube.com/watch?v=M7lc1UVf-VE",
+      },
+    }),
+  }) as unknown as Response) as typeof fetch;
+  try {
+    const { result, error } = await resolveUrl("https://www.youtube.com/watch?v=M7lc1UVf-VE");
+    assert.equal(error, null);
+    assert.equal(result?.kind, "video");
+    assert.equal(result?.video?.video_id, "M7lc1UVf-VE");
+    assert.equal(result?.video?.duration_s, 272);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("resolveUrl normalises a channel answer and drops unusable entries", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({
+    ok: true, status: 200,
+    json: async () => ({
+      kind: "channel",
+      channel: { id: "UCx", title: "Ch", url: "https://www.youtube.com/@ch" },
+      videos: [
+        { video_id: "aaa", title: "First", channel_title: "Ch", duration_s: 60, url: "https://www.youtube.com/watch?v=aaa" },
+        { video_id: "", title: "No id — dropped" },
+        { video_id: "bbb", title: "Second", channel_title: "Ch", duration_s: null, url: "https://www.youtube.com/watch?v=bbb" },
+      ],
+      source: "ytdlp",
+    }),
+  }) as unknown as Response) as typeof fetch;
+  try {
+    const { result, error } = await resolveUrl("https://www.youtube.com/@ch");
+    assert.equal(error, null);
+    assert.equal(result?.kind, "channel");
+    assert.equal(result?.source, "ytdlp");
+    assert.equal(result?.videos?.length, 2);
+    assert.equal(result?.videos?.[0].video_id, "aaa");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("resolveUrl surfaces the server's plain-language 422 reason", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => ({
+    ok: false, status: 422,
+    json: async () => ({ detail: "This video is no longer available on YouTube." }),
+  }) as unknown as Response) as typeof fetch;
+  try {
+    const { result, error } = await resolveUrl("https://youtu.be/CMzctRZQlo0");
+    assert.equal(result, null);
+    assert.match(error ?? "", /no longer available/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a failed request never claims the server is down (v0.11.0)", async () => {
+  // Regression: the old catch text "The server is not answering"
+  // stated a fact about the server that one timed-out request cannot
+  // prove, and the error card contradicted the header (Live) and the
+  // footer (running · port 8000) — the v0.10.3 Memes screenshot.
+  // The new text says only that this request got no answer and
+  // points at the status bar, the one place that knows.
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => { throw new Error("network down"); }) as typeof fetch;
+  try {
+    const res = await apiPostJson("/resolve", { url: "https://www.youtube.com/watch?v=x" });
+    assert.equal(res.ok, false);
+    assert.equal(res.error, REQUEST_NO_ANSWER);
+    assert.doesNotMatch(res.error ?? "", /not answering/i);
+    const { result, error } = await resolveUrl("https://www.youtube.com/watch?v=x");
+    assert.equal(result, null);
+    assert.equal(error, REQUEST_NO_ANSWER);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("clearFinishedJobs returns the deleted count and ids, null on failure", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async (url: unknown, init?: { method?: string }) => {
+    calls += 1;
+    assert.equal(String(url), `${API_URL}/jobs/clear-finished`);
+    assert.equal(init?.method, "POST");
+    if (calls === 1) return { ok: true, status: 200, json: async () => ({ deleted: 3, ids: ["a", "b", "c"] }) } as unknown as Response;
+    return { ok: false, status: 500, json: async () => ({ detail: "boom" }) } as unknown as Response;
+  }) as typeof fetch;
+  try {
+    const first = await clearFinishedJobs();
+    assert.deepEqual(first, { deleted: 3, ids: ["a", "b", "c"] });
+    const second = await clearFinishedJobs();
+    assert.equal(second, null);
   } finally {
     globalThis.fetch = originalFetch;
   }

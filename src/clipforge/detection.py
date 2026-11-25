@@ -7,11 +7,8 @@ spans on one lexicon pass) by segmenting the transcript into
 sentences/topics first, generating sentence-anchored sliding windows,
 and scoring every candidate on six named sub-scores.
 
-Rights guardrail: detection runs ONLY on the user's own videos or
-Creative Commons / licensed / public-domain videos. This module never
-downloads or fetches a video — it scores transcript segments the
-caller already has. It must not be wired to any source that is
-another creator's standard-licensed video.
+This module never downloads or fetches a video — it scores
+transcript segments the caller already has.
 
 Scoring formula (all sub-scores 0-100, final score 0-100)::
 

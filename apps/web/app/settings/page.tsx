@@ -1,15 +1,18 @@
-// Settings (v0.4.0) — plain-language setup, no raw JSON as the main view.
-//
-// The complaint was that this page showed raw settings JSON (dry_run,
-// client secrets "not configured", ffmpeg found:false, monetization
-// thresholds) and left the user asking "how do I connect?". Now:
-//   - LLM key: one field + Save + Test, result in plain words.
-//   - Channels: one status line per platform + a link into the guided
-//     Connect wizard (the keys are pasted there, not here).
-//   - Updates: the desktop updater state (see components/Updater.tsx).
-//   - Publishing safety, environment, monetization: short plain lines.
-//   - Advanced (collapsed by default): the full settings JSON, read-only,
-//     for support/debugging — plus "Replay onboarding".
+// Settings (v0.11.0) — one screen, plain sections, in the order the
+// user meets them (ClipNova-style section list: AI, Connected apps,
+// Storage — re-implemented from scratch, no ClipNova code; see
+// docs/REUSE.md):
+//   1. Accounts & channels — connect each platform (guided wizard).
+//   2. AI titles — LLM key + test, provider/model, AI engine picker.
+//   3. Posting — dry-run mode + default privacy per platform.
+//   4. Performance — auto profile + override.
+//   5. Downloads & tools — FFmpeg / yt-dlp + requirements, data folder,
+//      secret storage.
+//   6. Updates & app — in-app updater + replay onboarding / setup wizard.
+//   7. Monetization — read-only info (the platforms' published
+//      thresholds, labelled as info, not a setting).
+//   8. Advanced (collapsed) — the full settings JSON, read-only, for
+//      support/debugging.
 //
 // All values come from GET /settings (masked: only the last 4 characters
 // of a secret ever reach this UI) and are saved with PUT /settings.
@@ -181,6 +184,20 @@ export default function SettingsPage() {
               : `Reconnecting… (attempt ${server.attempts}) — settings are safe on the server, changes resume when it is back`}
         </span>
       </div>
+      <nav aria-label="Settings sections" className="flex flex-wrap gap-2 text-sm">
+        {([
+          ["accounts", "Accounts & channels"],
+          ["ai", "AI titles"],
+          ["posting", "Posting"],
+          ["performance", "Performance"],
+          ["tools", "Downloads & tools"],
+          ["updates", "Updates & app"],
+          ["monetization", "Monetization"],
+          ["advanced", "Advanced"],
+        ] as const).map(([id, label]) => (
+          <a key={id} href={`#${id}`} className="rounded-full border border-neutral-700 bg-neutral-900 px-3 py-1 text-neutral-300 hover:border-amber-400 hover:text-neutral-100">{label}</a>
+        ))}
+      </nav>
       {!live && !loading && view !== null && <ReconnectingNotice variant="inline" />}
 
       {notice && (
@@ -191,6 +208,53 @@ export default function SettingsPage() {
         <div className="space-y-4"><Skeleton className="h-48" /><Skeleton className="h-64" /><Skeleton className="h-48" /></div>
       ) : view ? (
         <>
+          <section id="accounts" aria-label="Accounts and channels" className="scroll-mt-4">
+          <Card>
+            <h2 className="mb-1 text-lg font-semibold">Accounts &amp; channels</h2>
+            <p className="mb-4 text-sm text-neutral-400">
+              Connect each platform once with the guided wizard — it shows you where to create the developer app and where to paste the keys.
+              Connection status lives on the <Link className="text-sky-400 underline" href="/channels">Channels page</Link>.
+            </p>
+            <ul className="space-y-3">
+              {PLATFORMS.map((p) => {
+                const c = view.credentials[p];
+                const configured = c?.client_id.configured === true || c?.client_secret.configured === true;
+                const result = testResults[p];
+                return (
+                  <li key={p} className="rounded-lg border border-neutral-800 p-4">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <span className="font-semibold">{PLATFORM_LABELS[p]}</span>
+                      <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${configured ? "bg-emerald-500/15 text-emerald-300" : "bg-amber-500/15 text-amber-300"}`}>
+                        {configured ? "App keys saved" : "Not set up yet"}
+                      </span>
+                      <span className="ml-auto flex flex-wrap gap-2">
+                        <SecondaryButton href={`/channels/connect?platform=${p}`}>{configured ? "Change keys" : "Set up"}</SecondaryButton>
+                        {configured && (
+                          <SecondaryButton onClick={() => test(p, PLATFORM_LABELS[p])} disabled={testing === p || !live}>
+                            {testing === p ? "Testing…" : "Test connection"}
+                          </SecondaryButton>
+                        )}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-sm text-neutral-400">
+                      {configured
+                        ? "Keys are saved on the server. Next: press Connect in the wizard to sign in."
+                        : "Not connected — the wizard takes about five minutes."}
+                    </p>
+                    {result && (
+                      <div className={`mt-3 rounded-lg border p-3 text-sm ${result.ok ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200" : "border-red-500/40 bg-red-500/10 text-red-200"}`}>
+                        <p className="font-medium">{result.summary}</p>
+                        {result.nextStep && <p className="mt-1 text-neutral-300">{result.nextStep}</p>}
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </Card>
+          </section>
+
+          <section id="ai" aria-label="AI titles" className="scroll-mt-4">
           <Card>
             <h2 className="mb-1 text-lg font-semibold">AI titles (optional)</h2>
             <p className="mb-4 text-sm text-neutral-400">
@@ -247,9 +311,45 @@ export default function SettingsPage() {
             <CardHeader title="AI engine" hint="Pick a provider, or use the built-in rule engine with no key" />
             <LlmProviders />
           </Card>
+          </section>
 
-          {/* Performance (v0.8.0) — the app measures this machine and picks
-              a profile; the override here wins until set back to Auto. */}
+          <section id="posting" aria-label="Posting" className="scroll-mt-4">
+          <Card>
+            <h2 className="mb-2 text-lg font-semibold">Posting</h2>
+            <Toggle
+              checked={dryRun}
+              label="Dry-run mode"
+              hint="On: nothing is sent to any platform — publishes return the payload that would be sent. Turn off only with credentials configured and approved posts."
+              onChange={(v) => { setDryRun(v); save({ dry_run: v }); }}
+              disabled={saving || !live}
+            />
+            <p className="mt-1 text-xs text-neutral-500">Dry-run source: {view.dry_run_source === "settings" ? "this setting" : "CLIPFORGE_DRY_RUN environment variable"}. Approval-first still applies: nothing publishes without your approval on the queue page.</p>
+            <div className="mt-4 space-y-2">
+              <h3 className="text-sm font-medium">Default privacy per platform</h3>
+              {PLATFORMS.map((p) => (
+                <label key={p} className="flex items-center gap-3 text-sm">
+                  <span className="w-24 text-neutral-400">{PLATFORM_LABELS[p]}</span>
+                  <select
+                    className="rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5"
+                    value={privacy[p] ?? "private"}
+                    onChange={(e) => {
+                      const next = { ...privacy, [p]: e.target.value };
+                      setPrivacy(next);
+                      save({ default_privacy: next });
+                    }}
+                    disabled={saving || !live}
+                  >
+                    <option value="private">Private</option>
+                    <option value="public">Public</option>
+                    <option value="unlisted">Unlisted (YouTube)</option>
+                  </select>
+                </label>
+              ))}
+            </div>
+          </Card>
+          </section>
+
+          <section id="performance" aria-label="Performance" className="scroll-mt-4">
           <Card>
             <h2 className="mb-1 text-lg font-semibold">Performance</h2>
             <p className="mb-4 text-sm text-neutral-400">
@@ -301,92 +401,11 @@ export default function SettingsPage() {
               </div>
             )}
           </Card>
+          </section>
 
+          <section id="tools" aria-label="Downloads and tools" className="scroll-mt-4">
           <Card>
-            <h2 className="mb-1 text-lg font-semibold">Channels</h2>
-            <p className="mb-4 text-sm text-neutral-400">
-              Connect each platform once with the guided wizard — it shows you where to create the developer app and where to paste the keys.
-              Connection status lives on the <Link className="text-sky-400 underline" href="/channels">Channels page</Link>.
-            </p>
-            <ul className="space-y-3">
-              {PLATFORMS.map((p) => {
-                const c = view.credentials[p];
-                const configured = c?.client_id.configured === true || c?.client_secret.configured === true;
-                const result = testResults[p];
-                return (
-                  <li key={p} className="rounded-lg border border-neutral-800 p-4">
-                    <div className="flex flex-wrap items-center gap-3">
-                      <span className="font-semibold">{PLATFORM_LABELS[p]}</span>
-                      <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${configured ? "bg-emerald-500/15 text-emerald-300" : "bg-amber-500/15 text-amber-300"}`}>
-                        {configured ? "App keys saved" : "Not set up yet"}
-                      </span>
-                      <span className="ml-auto flex flex-wrap gap-2">
-                        <SecondaryButton href={`/channels/connect?platform=${p}`}>{configured ? "Change keys" : "Set up"}</SecondaryButton>
-                        {configured && (
-                          <SecondaryButton onClick={() => test(p, PLATFORM_LABELS[p])} disabled={testing === p || !live}>
-                            {testing === p ? "Testing…" : "Test connection"}
-                          </SecondaryButton>
-                        )}
-                      </span>
-                    </div>
-                    <p className="mt-1 text-sm text-neutral-400">
-                      {configured
-                        ? "Keys are saved on the server. Next: press Connect in the wizard to sign in."
-                        : "Not connected — the wizard takes about five minutes."}
-                    </p>
-                    {result && (
-                      <div className={`mt-3 rounded-lg border p-3 text-sm ${result.ok ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200" : "border-red-500/40 bg-red-500/10 text-red-200"}`}>
-                        <p className="font-medium">{result.summary}</p>
-                        {result.nextStep && <p className="mt-1 text-neutral-300">{result.nextStep}</p>}
-                      </div>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-          </Card>
-
-          <Card>
-            <h2 className="mb-2 text-lg font-semibold">Updates</h2>
-            <UpdateSection />
-          </Card>
-
-          <Card>
-            <h2 className="mb-2 text-lg font-semibold">Publishing safety</h2>
-            <Toggle
-              checked={dryRun}
-              label="Dry-run mode"
-              hint="On: nothing is sent to any platform — publishes return the payload that would be sent. Turn off only with credentials configured and approved posts."
-              onChange={(v) => { setDryRun(v); save({ dry_run: v }); }}
-              disabled={saving || !live}
-            />
-            <p className="mt-1 text-xs text-neutral-500">Dry-run source: {view.dry_run_source === "settings" ? "this setting" : "CLIPFORGE_DRY_RUN environment variable"}. Approval-first still applies: nothing publishes without your approval on the queue page.</p>
-            <div className="mt-4 space-y-2">
-              <h3 className="text-sm font-medium">Default privacy per platform</h3>
-              {PLATFORMS.map((p) => (
-                <label key={p} className="flex items-center gap-3 text-sm">
-                  <span className="w-24 text-neutral-400">{PLATFORM_LABELS[p]}</span>
-                  <select
-                    className="rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5"
-                    value={privacy[p] ?? "private"}
-                    onChange={(e) => {
-                      const next = { ...privacy, [p]: e.target.value };
-                      setPrivacy(next);
-                      save({ default_privacy: next });
-                    }}
-                    disabled={saving || !live}
-                  >
-                    <option value="private">Private</option>
-                    <option value="public">Public</option>
-                    <option value="unlisted">Unlisted (YouTube)</option>
-                  </select>
-                </label>
-              ))}
-            </div>
-          </Card>
-
-          <Card>
-            <h2 className="mb-2 text-lg font-semibold">This app</h2>
+            <h2 className="mb-2 text-lg font-semibold">Downloads &amp; tools</h2>
             <RequirementsPanel />
             <dl className="mt-4 space-y-1 text-sm">
               <div className="flex justify-between gap-2"><dt className="text-neutral-400">Data folder</dt><dd className="truncate font-mono text-xs">{view.data_dir}</dd></div>
@@ -412,6 +431,13 @@ export default function SettingsPage() {
                 </dd>
               </div>
             </dl>
+          </Card>
+          </section>
+
+          <section id="updates" aria-label="Updates and app" className="scroll-mt-4">
+          <Card>
+            <h2 className="mb-2 text-lg font-semibold">Updates &amp; app</h2>
+            <UpdateSection />
             <p className="mt-3 text-sm text-neutral-400">
               Need the first-run guide again?{" "}
               <button className="text-sky-400 underline" onClick={replayOnboarding}>Replay onboarding</button>
@@ -419,10 +445,12 @@ export default function SettingsPage() {
               <Link className="text-sky-400 underline" href="/setup">full setup wizard</Link>.
             </p>
           </Card>
+          </section>
 
+          <section id="monetization" aria-label="Monetization" className="scroll-mt-4">
           <Card>
-            <h2 className="mb-2 text-lg font-semibold">Monetization thresholds</h2>
-            <p className="mb-3 text-sm text-neutral-400">Thresholds are data, not promises — payouts depend on qualified views, originality, country, and platform policy.</p>
+            <h2 className="mb-2 text-lg font-semibold">Monetization</h2>
+            <p className="mb-3 text-sm text-neutral-400">Info only — the published thresholds from each platform, not a setting you change here. Thresholds are data, not promises — payouts depend on qualified views, originality, country, and platform policy.</p>
             <ul className="space-y-3">
               {view.monetization_thresholds.map((t, i) => (
                 <li key={`${t.platform}-${i}`} className="text-sm">
@@ -435,7 +463,9 @@ export default function SettingsPage() {
               ))}
             </ul>
           </Card>
+          </section>
 
+          <section id="advanced" aria-label="Advanced" className="scroll-mt-4">
           <Card>
             <button
               onClick={() => setShowAdvanced((v) => !v)}
@@ -459,6 +489,7 @@ export default function SettingsPage() {
               </div>
             )}
           </Card>
+          </section>
         </>
       ) : settingsError ? (
         <Card>

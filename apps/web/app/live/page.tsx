@@ -20,11 +20,6 @@
 //     says so. A replay is always labelled a replay, never a live
 //     stream.
 //
-// Rights notice (advisory since v0.9.1, stated on the page): make
-// sure you have the right to use a stream before you clip it — your
-// own stream, a licensed stream, or a use YouTube permits. You are
-// responsible for the rights to what you post. ClipForge does not
-// guarantee rights clearance.
 "use client";
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
@@ -36,7 +31,6 @@ import {
   listLiveMonitors,
   startLiveMonitor,
   stopLiveMonitor,
-  RIGHTS_ADVISORY,
   type LivePeak,
   type LivePlatform,
   type LiveSession,
@@ -53,8 +47,6 @@ import {
   SecondaryButton, Skeleton, Badge,
 } from "@/components/ui";
 import { useServerStatus } from "@/components/ServerStatusProvider";
-
-const GUARDRAIL = RIGHTS_ADVISORY;
 
 function LevelStrip({ level }: { level: number[] }) {
   if (!level.length) return <p className="text-sm text-neutral-500">No audio yet — levels appear once the stream is recording.</p>;
@@ -216,7 +208,6 @@ export default function LivePage() {
           transcript — and send each peak to the normal clip pipeline. Peaks are cut from the
           live edge: a moment that already passed cannot be recovered.
         </p>
-        <p className="mt-2 text-xs leading-relaxed text-neutral-500">{GUARDRAIL}</p>
       </div>
 
       {error && <ErrorBanner message={error} onRetry={() => setError(null)} />}

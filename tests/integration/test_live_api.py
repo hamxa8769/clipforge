@@ -169,10 +169,11 @@ def test_live_with_saved_key_returns_live_streams(monkeypatch):
     assert cc["started_at"] == "2026-11-21T09:30:00Z"
     assert std["video_id"] == LIVE_ID_STD
     assert std["licence"] == "youtube"
-    # v0.9.1 advisory: the standard-licence stream is reported, never refused.
+    # v0.11.0: the standard-licence stream is reported with a plain
+    # label, never refused, and no notice field exists any more.
     assert std["can_clip"] is True
-    assert "You are responsible for the rights" in std["clip_reason"]
-    assert "You are responsible for the rights" in body["notice"]
+    assert "rights" not in std["clip_reason"].lower()
+    assert "notice" not in body
 
 
 def test_live_licensed_only_passes_video_license(monkeypatch):
@@ -197,16 +198,19 @@ def test_live_mine_without_connected_channel_is_plain_422(monkeypatch):
 
 
 # ------------------------------------------------------------------ capture
-def test_capture_requires_rights_confirmation(monkeypatch):
+def test_capture_needs_no_rights_confirmation(monkeypatch):
+    """v0.11.0: the rights gate is gone — a capture starts with the
+    (no longer asked-for) confirmation unset."""
     _save_api_key()
     fake = _fake_youtube_client()
     monkeypatch.setattr(trending_router.httpx, "Client", lambda **kwargs: fake)
+    monkeypatch.setattr(trending_router, "worker_run_job", _fake_worker_run)
     resp = client.post(
         "/api/trending/live/capture",
         json={"video_url": LIVE_URL_CC, "duration_s": 120, "rights_confirmed": False},
     )
-    assert resp.status_code == 422
-    assert "confirm" in resp.json()["detail"].lower()
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["ok"] is True
 
 
 def test_capture_rejects_bad_duration(monkeypatch):

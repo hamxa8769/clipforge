@@ -181,13 +181,12 @@ def _publish_due(
     recording above stays readable)."""
     results: list[dict] = []
     for post in due_posts(session, now):
-        # Advisory since v0.9.1: the licence record still travels with
-        # the post (and any CC attribution with it), but no licence
-        # value skips publishing any more — the v0.7.0
-        # ``skipped_licence`` refusal was removed at the user's
-        # explicit instruction after they checked YouTube's terms.
-        # The rights notice is shown in the UI before publishing;
-        # the user is responsible for the rights to what they post.
+        # The licence record still travels with the post (and any CC
+        # attribution with it), but no licence value skips publishing
+        # any more — the v0.7.0 ``skipped_licence`` refusal was removed
+        # at the user's explicit instruction after they checked
+        # YouTube's terms. No rights notice is shown in the UI any
+        # more (v0.11.0).
         cap = daily_cap_for(session, post)
         done = published_today_count(session, post.account_id, post.platform, now)
         if done >= cap:

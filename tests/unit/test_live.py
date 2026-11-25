@@ -27,7 +27,6 @@ from clipforge.auth.secrets import SecretStore
 from clipforge.auth.token_store import TokenRecord, TokenStore
 from clipforge.db import Job, JobStatus, init_db, session_factory
 from clipforge.ingest import SourceInfo
-from clipforge.licensing import RIGHTS_ADVISORY
 from clipforge.live import (
     LIVE_DEFAULT_DURATION_S,
     LiveCaptureCancelled,
@@ -108,12 +107,13 @@ def test_clip_decision_cc_live_clippable():
 
 
 def test_clip_decision_standard_third_party_is_advisory():
-    """v0.9.1: a standard-licence live stream is reported (licence +
-    rights notice) and proceeds — never refused."""
+    """v0.9.1: a standard-licence live stream is reported and proceeds
+    — never refused. v0.11.0: the reason is a plain label, no rights
+    wording."""
     can_clip, reason = clip_decision("youtube", is_own=False)
     assert can_clip is True
     assert "standard" in reason.lower()
-    assert RIGHTS_ADVISORY in reason
+    assert "rights" not in reason.lower()
 
 
 def test_clip_decision_unknown_licence_is_advisory():
@@ -121,7 +121,7 @@ def test_clip_decision_unknown_licence_is_advisory():
     can_clip, reason = clip_decision("unknown", is_own=False)
     assert can_clip is True
     assert "could not be confirmed" in reason
-    assert RIGHTS_ADVISORY in reason
+    assert "rights" not in reason.lower()
 
 
 def test_check_can_clip_never_raises_for_a_licence():
@@ -263,7 +263,7 @@ def test_search_live_marks_cc_and_standard_both_clippable_advisory():
     # v0.9.1: the standard-licence stream is reported, never refused.
     assert std.can_clip is True
     assert std.licence == "youtube"
-    assert RIGHTS_ADVISORY in std.clip_reason
+    assert "rights" not in std.clip_reason.lower()
 
 
 def test_search_live_uses_event_type_live():
@@ -394,7 +394,7 @@ def test_verify_live_video_standard_third_party_is_advisory():
     video = verify_live_video(LIVE_ID_STD, credentials=_api_key_creds(), client=client)
     assert video.can_clip is True
     assert "standard" in video.clip_reason.lower()
-    assert RIGHTS_ADVISORY in video.clip_reason
+    assert "rights" not in video.clip_reason.lower()
 
 
 def test_verify_live_video_missing_video_is_plain_error():

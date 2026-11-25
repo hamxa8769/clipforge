@@ -61,7 +61,6 @@ import httpx
 
 from clipforge.auth.secrets import SecretStore
 from clipforge.ingest import SourceInfo
-from clipforge.licensing import RIGHTS_ADVISORY
 from clipforge.trending import (
     YOUTUBE_API_BASE,
     TrendingCredentials,
@@ -85,8 +84,6 @@ LIVE_STOP_GRACE_S = 15.0
 # How often the capture loop checks for cancel / timeout (seconds).
 _CAPTURE_POLL_S = 0.5
 
-LIVE_NOTICE = "Live clipping reports each stream's licence. " + RIGHTS_ADVISORY
-
 LICENCE_CREATIVE_COMMONS = "creativeCommon"
 LICENCE_STANDARD = "youtube"
 
@@ -107,30 +104,23 @@ class LiveCaptureCancelled(LiveCaptureError):
 def clip_decision(licence: str, is_own: bool) -> tuple[bool, str]:
     """Report whether a live stream may be clipped, and the reason.
 
-    Advisory since v0.9.1: always ``(True, reason)`` — the licence is
-    reported with the rights notice, never enforced. The v0.7.0 hard
-    block (standard-licence or unverifiable third-party streams
-    refused) was removed at the user's explicit instruction after they
-    checked YouTube's terms. Own and Creative Commons streams keep
-    their positive reasons; anything else gets the rights notice.
+    Always ``(True, reason)`` — the licence is reported as metadata,
+    never enforced. The v0.7.0 hard block (standard-licence or
+    unverifiable third-party streams refused) was removed at the
+    user's explicit instruction after they checked YouTube's terms.
+    v0.11.0 removed the rights notice from the reasons.
     """
     if is_own:
         return True, "Your own live stream — you can clip it."
     if licence == LICENCE_CREATIVE_COMMONS:
         return True, "Creative Commons licensed live stream — you can clip it."
     if licence == LICENCE_STANDARD:
-        return (
-            True,
-            "This live stream uses the standard YouTube licence. " + RIGHTS_ADVISORY,
-        )
-    return (
-        True,
-        "The licence of this live stream could not be confirmed. " + RIGHTS_ADVISORY,
-    )
+        return True, "This live stream uses the standard YouTube licence."
+    return True, "The licence of this live stream could not be confirmed."
 
 
 def check_can_clip(licence: str, is_own: bool) -> None:
-    """Advisory since v0.9.1 — never raises for a licence.
+    """Never raises for a licence.
 
     Kept for backward compatibility: the licence is reported by
     :func:`clip_decision`, not enforced. (The worker's live-ingest
@@ -776,7 +766,6 @@ __all__ = [
     "LIVE_DEFAULT_DURATION_S",
     "LIVE_MAX_DURATION_S",
     "LIVE_MIN_DURATION_S",
-    "LIVE_NOTICE",
     "LIVE_STOP_GRACE_S",
     "LICENCE_CREATIVE_COMMONS",
     "LICENCE_STANDARD",

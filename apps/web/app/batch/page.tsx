@@ -9,8 +9,6 @@
 // The active performance profile (GET /perf/profile) is shown at the
 // top: on a Low-end profile the batch processes 1 video at a time.
 //
-// Rights guardrail: only your own videos or Creative Commons / licensed /
-// public-domain videos. Batch mode never re-uploads another creator's video.
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -25,9 +23,6 @@ import {
   PrimaryButton, ProgressBar, SecondaryButton, Skeleton,
 } from "@/components/ui";
 
-const GUARDRAIL =
-  "Batch mode clips only your own videos or Creative Commons / licensed / public-domain videos — never another creator's videos.";
-
 const MAX_SOURCES = 20;
 const DONE_STATES = ["done", "finished", "completed", "ready"];
 const RUNNING_STATES = ["running", "processing", "transcribing", "scoring", "rendering"];
@@ -35,10 +30,6 @@ const RUNNING_STATES = ["running", "processing", "transcribing", "scoring", "ren
 export default function BatchPage() {
   const [input, setInput] = useState("");
   const [sources, setSources] = useState<string[]>([]);
-  // Rights guardrail (fixed): the server only accepts YouTube URLs when
-  // own_content_declaration is true, so the user must confirm it here
-  // before a batch can start.
-  const [rights, setRights] = useState(false);
   const [batch, setBatch] = useState<BatchStatus | null>(null);
   const [batchId, setBatchId] = useState<string | null>(null);
   // Per-item server errors (keyed by source) — the normalised batch
@@ -73,14 +64,15 @@ export default function BatchPage() {
 
   async function onStart() {
     if (sources.length === 0) { setError("Add at least one video URL or path first."); return; }
-    if (!rights) { setError("Please tick the rights box first — ClipForge only clips your own videos or Creative Commons / public-domain videos."); return; }
     setStarting(true);
     setError(null);
     setNotice(null);
     // POST /batch expects plain string sources + own_content_declaration.
     // (The old code sent [{url} | {path}] objects, which the server
     // rejects with 422 — every batch start from the UI failed.)
-    const res = await apiPostJson("/batch", buildBatchPayload(sources, rights));
+    // v0.11.0: no rights checkbox any more — the declaration the server
+    // requires for YouTube URLs is sent with every batch.
+    const res = await apiPostJson("/batch", buildBatchPayload(sources, true));
     setStarting(false);
     const batch_id = (res.data as { batch_id?: unknown } | null)?.batch_id;
     if (!res.ok || typeof batch_id !== "string") {
@@ -134,7 +126,6 @@ export default function BatchPage() {
         intro={`Clip up to ${MAX_SOURCES} videos in one run — paste URLs or file paths, start, and watch each video finish.`}
         actions={<Badge tone="info">Pro · v0.8.0</Badge>}
       />
-      <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-100" role="note">{GUARDRAIL}</div>
       {error && <ErrorBanner message={error} />}
       {notice && <div className="rounded-xl border border-sky-500/40 bg-sky-500/10 p-4 text-sm text-sky-100">{notice}</div>}
 
@@ -175,7 +166,7 @@ export default function BatchPage() {
             className="mt-1 w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 font-mono text-sm"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={"https://www.youtube.com/watch?v=… (your own video)\nC:\\Videos\\my-video.mp4"}
+            placeholder={"https://www.youtube.com/watch?v=…\nC:\\Videos\\my-video.mp4"}
             aria-label="Video URLs or paths"
           />
         </label>
@@ -211,22 +202,13 @@ export default function BatchPage() {
             </ul>
           </div>
         )}
-        <label className="mt-4 flex items-start gap-2 text-sm">
-          <input type="checkbox" checked={rights} onChange={(e) => setRights(e.target.checked)} className="mt-0.5 h-4 w-4 accent-amber-400" />
-          <span>
-            These videos are my own, or Creative Commons / public-domain videos I may use.
-            CC-BY attribution is added to clips automatically. The server refuses
-            YouTube URLs without this confirmation.
-          </span>
-        </label>
         <div className="mt-4">
           <PrimaryButton
             onClick={onStart}
-            disabled={starting || sources.length === 0 || !rights || (batchId !== null && !(batch !== null && isBatchTerminal(batch.status)))}
+            disabled={starting || sources.length === 0 || (batchId !== null && !(batch !== null && isBatchTerminal(batch.status)))}
           >
             {starting ? "Starting batch…" : batchId !== null && !(batch !== null && isBatchTerminal(batch.status)) ? "Batch running — see progress below" : batch !== null && isBatchTerminal(batch.status) ? `Start a new batch (${sources.length} video${sources.length === 1 ? "" : "s"})` : `Start batch (${sources.length} video${sources.length === 1 ? "" : "s"})`}
           </PrimaryButton>
-          {sources.length > 0 && !rights && <span className="ml-3 text-xs text-amber-200">Tick the rights box above to start.</span>}
           {lowEnd && <span className="ml-3 text-xs text-neutral-400">Low-end mode: 1 at a time.</span>}
         </div>
       </Card>

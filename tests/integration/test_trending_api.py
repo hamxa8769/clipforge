@@ -126,7 +126,7 @@ def test_niches_lists_presets():
     body = resp.json()
     assert "gaming" in body["niches"]
     assert body["labels"]["gaming"] == "Gaming"
-    assert "YOUR videos" in body["notice"]
+    assert "notice" not in body  # v0.11.0: notice removed
 
 
 def test_credentials_not_usable_without_connection_or_key():
@@ -183,7 +183,7 @@ def test_search_with_saved_key_returns_live_shaped_results(monkeypatch):
     assert result["like_count"] == 9_000
     assert result["trend_score"] > 0
     assert result["url"] == TRENDING_VIDEO
-    assert "YOUR videos" in body["notice"]
+    assert "notice" not in body  # v0.11.0: notice removed
 
 
 # ------------------------------------------------------------------ match
@@ -203,9 +203,9 @@ def test_match_without_yt_dlp_is_plain_422(monkeypatch):
 
 
 # ------------------------------------------------------------------ run: guardrail
-def test_run_refuses_trending_video_as_source():
-    """GUARDRAIL: a third-party trending video URL is rejected as a
-    clip source — the agent may only clip the user's own videos."""
+def test_run_accepts_trending_video_as_source():
+    """v0.11.0: the trending video itself is accepted as a clip
+    source — the old guardrail is gone."""
     resp = client.post(
         "/api/trending/run",
         json={
@@ -215,13 +215,17 @@ def test_run_refuses_trending_video_as_source():
             "own_source_url": TRENDING_VIDEO,
             "own_source_type": "video",
             "rights_confirmed": True,
+            "demo_transcript_text": DEMO_TRANSCRIPT,
         },
     )
-    assert resp.status_code == 422
-    assert "cannot clip another creator" in resp.json()["detail"]
+    assert resp.status_code == 202, resp.text
+    state = _wait_for_done()
+    assert state["state"] == "done", state.get("last_error")
 
 
-def test_run_requires_rights_confirmation():
+def test_run_needs_no_rights_confirmation():
+    """v0.11.0: the rights gate is gone — a run starts with the
+    (no longer asked-for) confirmation unset."""
     resp = client.post(
         "/api/trending/run",
         json={
@@ -231,10 +235,12 @@ def test_run_requires_rights_confirmation():
             "own_source_url": OWN_VIDEO,
             "own_source_type": "video",
             "rights_confirmed": False,
+            "demo_transcript_text": DEMO_TRANSCRIPT,
         },
     )
-    assert resp.status_code == 422
-    assert "confirm" in resp.json()["detail"].lower()
+    assert resp.status_code == 202, resp.text
+    state = _wait_for_done()
+    assert state["state"] == "done", state.get("last_error")
 
 
 # ------------------------------------------------------------------ run: full loop (demo path)

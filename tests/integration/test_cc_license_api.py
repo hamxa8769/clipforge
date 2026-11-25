@@ -8,13 +8,13 @@ Contract:
   GET  /api/videos/license?url=<youtube-url>
        -> {video_id, title, channel, channel_id, license,
            license_url, can_clip, reason}
-  POST /api/trending/run — advisory since v0.9.1: the source video's
-       licence is NOT verified as a gate any more. A standard-licence
-       third-party source, a CC video, the user's own video, and even a
-       video whose licence cannot be verified all proceed on the
-       user's rights confirmation (the v0.7.0 refusal was removed at
-       the user's explicit instruction after they checked YouTube's
-       terms). The licence check endpoint still reports the licence.
+  POST /api/trending/run — no licence / rights gate any more
+       (v0.11.0): a standard-licence third-party source, a CC video,
+       the user's own video, and even a video whose licence cannot be
+       verified all proceed (the v0.7.0 refusal was removed at the
+       user's explicit instruction after they checked YouTube's
+       terms; v0.11.0 removed the rights notice too). The licence
+       check endpoint still reports the licence.
 
 YouTube HTTP is mocked by monkeypatching ``httpx.Client`` in the
 router module — no test ever hits the real YouTube API. The agent
@@ -146,8 +146,9 @@ def test_license_endpoint_cc_video_can_clip(monkeypatch):
 
 
 def test_license_endpoint_standard_video_is_advisory(monkeypatch):
-    """v0.9.1: a standard-licence video is reported (licence + rights
-    notice) and proceeds — can_clip is True, never a refusal."""
+    """v0.9.1: a standard-licence video is reported and proceeds —
+    can_clip is True, never a refusal. v0.11.0: the reason is a plain
+    licence label, no rights wording."""
     _save_api_key()
     monkeypatch.setattr(
         trending_router.httpx,
@@ -162,7 +163,7 @@ def test_license_endpoint_standard_video_is_advisory(monkeypatch):
     assert body["license"] == "youtube"
     assert body["can_clip"] is True
     assert body["reason"] == STANDARD_LICENSE_REASON
-    assert "You are responsible for the rights" in body["reason"]
+    assert "rights" not in body["reason"].lower()
 
 
 def test_license_endpoint_own_video_can_clip(monkeypatch, _isolated_data_dir):
@@ -303,7 +304,7 @@ def test_run_accepts_cc_source_video(monkeypatch):
 def test_run_accepts_standard_licence_third_party_video(monkeypatch, _isolated_data_dir):
     """v0.9.1 ADVISORY: a standard-licence video that is provably not
     the user's own (connected channel id known, different channel)
-    proceeds on the user's rights confirmation — the v0.7.0 refusal
+    proceeds — the v0.7.0 refusal
     was removed at the user's explicit instruction after they checked
     YouTube's terms."""
     _save_oauth_token(_isolated_data_dir, account_ref=OWN_CHANNEL_ID)
@@ -344,7 +345,7 @@ def test_run_accepts_own_standard_licence_video(monkeypatch, _isolated_data_dir)
 def test_run_proceeds_when_licence_cannot_be_verified(monkeypatch):
     """v0.9.1 ADVISORY: the video cannot be found on YouTube at all, so
     there is no licence to verify — the run still proceeds on the
-    user's rights confirmation instead of refusing on an unverified
+    instead of refusing on an unverified
     source. (The licence-check endpoint itself still reports the
     "could not find that video" error honestly.)"""
     _save_api_key()
@@ -358,10 +359,10 @@ def test_run_proceeds_when_licence_cannot_be_verified(monkeypatch):
     assert len(stub.started) == 1
 
 
-def test_run_without_credentials_falls_back_to_rights_attestation(monkeypatch):
+def test_run_without_credentials_falls_back_to_unverified(monkeypatch):
     """No YouTube connection / API key: the server cannot verify the
-    licence, so the run proceeds on the user's rights confirmation
-    (v0.6.0 behaviour) — it never invents a licence verdict."""
+    licence, so the run proceeds (v0.6.0 behaviour) — it never
+    invents a licence verdict."""
     stub = _StubAgent()
     monkeypatch.setattr(trending_router, "_agent", lambda: stub)
     resp = client.post(

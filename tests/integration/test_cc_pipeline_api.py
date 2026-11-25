@@ -1,8 +1,8 @@
 """Integration tests for the v0.7.0 CC pipeline API: thumbnails, attribution,
 licence records — advisory since v0.9.1 (the Standard-licence publish
 refusal was removed at the user's explicit instruction after they
-checked YouTube's terms; any licence proceeds, the rights notice is
-shown instead, and CC sources still get their attribution block).
+checked YouTube's terms; any licence proceeds, the rights notice
+is gone since v0.11.0, and CC sources still get their attribution block).
 
 Endpoints / fields under test (see ``clipforge.licensing`` for the shared
 field names):
@@ -203,9 +203,8 @@ def test_create_youtube_job_with_standard_licence_proceeds():
 
 
 def test_create_youtube_job_without_declaration_or_licence_proceeds():
-    """v0.9.1 ADVISORY: a YouTube job with no declaration and no
-    licence proceeds too — the rights notice is shown in the UI
-    instead of a 422."""
+    """v0.9.1 ADVISORY, v0.11.0: a YouTube job with no declaration
+    and no licence proceeds too — no rights notice any more."""
     res = client.post(
         "/jobs",
         json={"source_type": "youtube", "source_url": CC_URL, "title": "No rights"},
