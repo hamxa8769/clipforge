@@ -141,6 +141,22 @@ def test_clear_finished_removes_only_dead_jobs() -> None:
     review_id = _seed_job("review")
     running_id = _seed_job("running")
 
+    # The post this test itself seeded (on the failed job's candidate).
+    # Other test files share this throwaway DB and may leave their own
+    # pending_approval posts behind, so every assertion below is scoped
+    # to rows this test created — never a global count.
+    session = get_session()
+    try:
+        seeded_post_id = (
+            session.query(Post.id)
+            .join(ClipCandidate, Post.clip_candidate_id == ClipCandidate.id)
+            .filter(ClipCandidate.job_id == failed_id)
+            .scalar()
+        )
+    finally:
+        session.close()
+    assert seeded_post_id is not None
+
     res = client.post("/jobs/clear-finished")
     assert res.status_code == 200
     body = res.json()
@@ -163,7 +179,9 @@ def test_clear_finished_removes_only_dead_jobs() -> None:
         assert session.query(ClipCandidate).filter_by(job_id=failed_id).count() == 0
         assert session.query(JobStageEvent).filter_by(job_id=failed_id).count() == 0
         assert session.query(WorkerRun).filter_by(job_id=failed_id).count() == 0
-        assert session.query(Post).filter_by(status="pending_approval").count() == 0
+        # Only the seeded post is asserted: other files' pending_approval
+        # posts (e.g. test_phase2_api.py's) are not this test's business.
+        assert session.query(Post).filter_by(id=seeded_post_id).count() == 0
     finally:
         session.close()
 
