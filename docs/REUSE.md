@@ -134,3 +134,21 @@ marginal gain — a second transcription engine to install, ship, and keep
 working on Windows for no user-visible improvement. If faster-whisper ever
 stops meeting ClipForge's needs (e.g. a model faster-whisper cannot run),
 revisit sherpa-onnx then; until that day it stays out.
+
+## v0.11.0 — ClipNova-AI SEO engine (MIT) credit
+
+Source: https://github.com/ahsanK225/ClipNova-AI — MIT licence
+(re-checked 2026-11-25; still MIT, so adaptation with credit is
+permitted). ClipNova's "AI Viral SEO Engine" (`studio/brain.py`:
+`seo_title` + `seo_tags` per clip, `studio/hashtags.py`: deterministic
+3–5 hashtags from transcript keywords / channel tag / category, and
+`fallback_seo` when the LLM is offline) was studied again as the
+reference for the v0.11.0 SEO work. **No ClipNova code was copied or
+vendored** — every feature below is a fresh implementation in
+ClipForge's own codebase, in ClipForge's own architecture.
+
+| Feature | ClipNova idea adapted | Where it landed in ClipForge |
+|---|---|---|
+| SEO pack per clip | One ready-to-post pack per clip: hook title, description, hashtags, plain search tags (`seo_tags`), with a deterministic fallback when the LLM is offline | `src/clipforge/seo/pack.py` (`build_seo_pack`: 2–3 title options + description + plain search tags + hashtags + one plain-language tip per platform, YouTube Shorts / TikTok / Instagram Reels / Facebook Reels / X) + `apps/api/clipforge_api/seo_pack.py` (`GET /clips/{id}/seo-pack`, `POST /seo-pack/preview`) + `apps/web/components/SeoPack.tsx` (per-field Copy + Copy-all, shown in Review and Export Hub). ClipNova writes the pack with an LLM; ClipForge uses deterministic templates only (no LLM call, no key, works offline) — the pack is identical every run. |
+| Transcript keywords for tags | `hashtags.keywords`: words said most in the clip, scored for repeats / names / title words | `extract_search_tags` in `src/clipforge/seo/pack.py`: keyword phrase + channel name + numbered names (“GTA 6”) + most-said words, as plain search tags (no `#`). |
+| Channel SEO view | ClipNova has no channel-SEO view — this is ClipForge's own addition on the same idea (learn from what already works): top videos by views, common title words/shapes, suggested titles/tags | `src/clipforge/channel_seo.py` (yt-dlp flat playlist, no download; optional YouTube Data API enrichment with exact views + real tags when a key is saved; 24 h cache) + `GET /channel-seo`, `POST /channel-seo/analyze`, `GET /channel-seo/connected` + `apps/web/app/channel-seo/page.tsx`. |

@@ -28,6 +28,10 @@ trap 'rm -rf "$TMP"' EXIT
   --target es2022 --module nodenext --moduleResolution nodenext \
   --strict --skipLibCheck --outDir "$TMP"
 
+./node_modules/.bin/tsc lib/api.ts lib/seo-pack.test.ts \
+  --target es2022 --module nodenext --moduleResolution nodenext \
+  --strict --skipLibCheck --outDir "$TMP"
+
 ./node_modules/.bin/tsc lib/api.ts lib/facecam.ts lib/facecam.test.ts \
   --target es2022 --module nodenext --moduleResolution nodenext \
   --strict --skipLibCheck --outDir "$TMP"

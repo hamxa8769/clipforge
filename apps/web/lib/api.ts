@@ -2043,6 +2043,230 @@ export async function createYoutubeClipJob(input: {
   });
 }
 
+// ------------------------------------------------------------------ SEO pack
+// + Channel SEO (v0.11.0, Worker B) — ClipNova-style, simple: one pack
+// per clip (title options, description, search tags, hashtags, one
+// plain-language tip per platform) and one view per channel (top
+// videos, what works there, suggested titles/tags for the next clip).
+
+/** One platform's slice of an SEO pack (GET /clips/{id}/seo-pack). */
+export interface SeoPackPlatform {
+  platform: string; label: string; title: string; title_options: string[];
+  description: string; caption: string; tags: string[]; hashtags: string[];
+  warnings: string[]; tip: string;
+}
+
+/** A full SEO pack for one clip, all five platforms + copy-all text. */
+export interface SeoPack {
+  keyword: string;
+  platforms: Record<string, SeoPackPlatform>;
+  copy_all: string;
+  clip_candidate_id?: string; job_id?: string;
+}
+
+const SEO_PACK_PLATFORMS = ["youtube", "tiktok", "instagram", "facebook", "x"];
+
+export function normalizeSeoPack(raw: unknown): SeoPack | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  const platformsRaw = (r.platforms ?? {}) as Record<string, unknown>;
+  const platforms: Record<string, SeoPackPlatform> = {};
+  for (const p of SEO_PACK_PLATFORMS) {
+    const v = (platformsRaw[p] ?? {}) as Record<string, unknown>;
+    const strArr = (x: unknown): string[] => (Array.isArray(x) ? x.map(String) : []);
+    platforms[p] = {
+      platform: p,
+      label: typeof v.label === "string" ? v.label : p,
+      title: typeof v.title === "string" ? v.title : "",
+      title_options: strArr(v.title_options),
+      description: typeof v.description === "string" ? v.description : "",
+      caption: typeof v.caption === "string" ? v.caption : "",
+      tags: strArr(v.tags),
+      hashtags: strArr(v.hashtags),
+      warnings: strArr(v.warnings),
+      tip: typeof v.tip === "string" ? v.tip : "",
+    };
+  }
+  if (!Object.values(platforms).some((p) => p.title)) return null;
+  return {
+    keyword: typeof r.keyword === "string" ? r.keyword : "",
+    platforms,
+    copy_all: typeof r.copy_all === "string" ? r.copy_all : "",
+    clip_candidate_id: typeof r.clip_candidate_id === "string" ? r.clip_candidate_id : undefined,
+    job_id: typeof r.job_id === "string" ? r.job_id : undefined,
+  };
+}
+
+/** GET /clips/{candidate_id}/seo-pack — the full pack for one clip. */
+export async function getSeoPack(candidateId: string): Promise<SeoPack | null> {
+  const raw = await apiGet<unknown>(`/clips/${encodeURIComponent(candidateId)}/seo-pack`, 10000);
+  return raw === null ? null : normalizeSeoPack(raw);
+}
+
+/** POST /seo-pack/preview — a pack from plain words, no clip needed. */
+export async function previewSeoPack(body: {
+  keyword: string; hook?: string; title_hint?: string; duration_s?: number;
+  transcript?: string; source_title?: string; source_channel?: string;
+}): Promise<{ pack: SeoPack | null; error: string | null }> {
+  const res = await apiPostJson("/seo-pack/preview", body);
+  if (!res.ok) return { pack: null, error: res.error ?? "Could not build the SEO pack." };
+  return { pack: normalizeSeoPack(res.data), error: null };
+}
+
+// ------------------------------------------------------------ Channel SEO
+
+/** One video in a channel's top list. `views` is null when YouTube did not show a count. */
+export interface ChannelSeoVideo {
+  video_id: string; title: string; url: string;
+  views: number | null; duration_s: number | null; published_at: string | null;
+}
+
+/** The Channel SEO view (GET /channel-seo, POST /channel-seo/analyze). */
+export interface ChannelSeo {
+  channel_id: string; channel_name: string; channel_url: string;
+  subscriber_count: number | null; videos_fetched: number;
+  views_source: string; views_note: string;
+  top_videos: ChannelSeoVideo[];
+  what_works: {
+    common_words: { word: string; count: number }[];
+    title_patterns: Record<string, number>;
+    basis: string;
+  };
+  suggested_titles: { title: string; why: string }[];
+  suggested_tags: string[]; suggested_tags_basis: string;
+  api_enrichment: { used: boolean; note: string | null };
+  cached: boolean; fetched_at: string | null;
+  connected_account_name?: string;
+}
+
+export function normalizeChannelSeo(raw: unknown): ChannelSeo | null {
+  const r = (raw ?? {}) as Record<string, unknown>;
+  if (typeof r.channel_name !== "string" && typeof r.channel_url !== "string") return null;
+  const videos = Array.isArray(r.top_videos) ? r.top_videos : [];
+  const works = (r.what_works ?? {}) as Record<string, unknown>;
+  const enrichment = (r.api_enrichment ?? {}) as Record<string, unknown>;
+  return {
+    channel_id: typeof r.channel_id === "string" ? r.channel_id : "",
+    channel_name: typeof r.channel_name === "string" ? r.channel_name : "",
+    channel_url: typeof r.channel_url === "string" ? r.channel_url : "",
+    subscriber_count: typeof r.subscriber_count === "number" ? r.subscriber_count : null,
+    videos_fetched: typeof r.videos_fetched === "number" ? r.videos_fetched : videos.length,
+    views_source: typeof r.views_source === "string" ? r.views_source : "",
+    views_note: typeof r.views_note === "string" ? r.views_note : "",
+    top_videos: videos.map((v) => {
+      const q = (v ?? {}) as Record<string, unknown>;
+      return {
+        video_id: typeof q.video_id === "string" ? q.video_id : "",
+        title: typeof q.title === "string" ? q.title : "",
+        url: typeof q.url === "string" ? q.url : "",
+        views: typeof q.views === "number" ? q.views : null,
+        duration_s: typeof q.duration_s === "number" ? q.duration_s : null,
+        published_at: typeof q.published_at === "string" ? q.published_at : null,
+      } satisfies ChannelSeoVideo;
+    }),
+    what_works: {
+      common_words: (Array.isArray(works.common_words) ? works.common_words : []).map((w) => {
+        const q = (w ?? {}) as Record<string, unknown>;
+        return { word: typeof q.word === "string" ? q.word : "", count: typeof q.count === "number" ? q.count : 0 };
+      }),
+      title_patterns: (works.title_patterns ?? {}) as Record<string, number>,
+      basis: typeof works.basis === "string" ? works.basis : "",
+    },
+    suggested_titles: (Array.isArray(r.suggested_titles) ? r.suggested_titles : []).map((s) => {
+      const q = (s ?? {}) as Record<string, unknown>;
+      return { title: typeof q.title === "string" ? q.title : "", why: typeof q.why === "string" ? q.why : "" };
+    }),
+    suggested_tags: Array.isArray(r.suggested_tags) ? r.suggested_tags.map(String) : [],
+    suggested_tags_basis: typeof r.suggested_tags_basis === "string" ? r.suggested_tags_basis : "",
+    api_enrichment: {
+      used: enrichment.used === true,
+      note: typeof enrichment.note === "string" ? enrichment.note : null,
+    },
+    cached: r.cached === true,
+    fetched_at: typeof r.fetched_at === "string" ? r.fetched_at : null,
+    connected_account_name: typeof r.connected_account_name === "string" ? r.connected_account_name : undefined,
+  };
+}
+
+/**
+ * GET that keeps the server's plain-language error. `apiGet` returns
+ * null for any non-OK status, which would turn a 400 (“that is a video
+ * link, not a channel link”) into “the server did not answer”. A
+ * channel read is slow (up to ~2 min server-side) and its errors are
+ * the whole point of the message, so this fetches directly.
+ */
+async function apiGetWithError(path: string, timeoutMs = 120000): Promise<{ data: unknown | null; error: string | null }> {
+  try {
+    const res = await fetch(`${API_URL}${path}`, { cache: "no-store", signal: AbortSignal.timeout(timeoutMs) });
+    let data: unknown = null;
+    try { data = await res.json(); } catch { /* non-JSON error body */ }
+    if (!res.ok) {
+      const detail = (data as { detail?: unknown } | null)?.detail;
+      return { data: null, error: typeof detail === "string" ? detail : `Request failed (${res.status})` };
+    }
+    return { data, error: null };
+  } catch {
+    return { data: null, error: "The server did not answer — check the status bar, then try again." };
+  }
+}
+
+/**
+ * GET /channel-seo — the view for a channel link (or the connected
+ * channel when no link is given). A live channel read can take up to
+ * ~2 min server-side, so the client timeout is 120 s. Returns
+ * `{ data, error }`: `error` is the server's plain-language reason.
+ */
+export async function getChannelSeo(channelUrl = "", topic = ""): Promise<{ data: ChannelSeo | null; error: string | null }> {
+  const q = new URLSearchParams();
+  if (channelUrl) q.set("channel_url", channelUrl);
+  if (topic) q.set("topic", topic);
+  const { data, error } = await apiGetWithError(`/channel-seo?${q.toString()}`);
+  if (error) return { data: null, error };
+  const normalized = normalizeChannelSeo(data);
+  return normalized ? { data: normalized, error: null } : { data: null, error: "Could not read that channel." };
+}
+
+/** POST /channel-seo/analyze — same view, always read live (ignores the cache). */
+export async function analyzeChannelSeo(channelUrl: string, topic = ""): Promise<{ data: ChannelSeo | null; error: string | null }> {
+  const res = await apiPostJson("/channel-seo/analyze", { channel_url: channelUrl, topic }, 120000);
+  if (!res.ok) return { data: null, error: res.error ?? "Could not read that channel." };
+  return { data: normalizeChannelSeo(res.data), error: null };
+}
+
+/** GET /channel-seo/connected — the view for the connected YouTube channel only. */
+export async function getConnectedChannelSeo(topic = ""): Promise<{ data: ChannelSeo | null; error: string | null }> {
+  const q = topic ? `?topic=${encodeURIComponent(topic)}` : "";
+  const { data, error } = await apiGetWithError(`/channel-seo/connected${q}`);
+  if (error) return { data: null, error };
+  const normalized = normalizeChannelSeo(data);
+  return normalized ? { data: normalized, error: null } : { data: null, error: "No YouTube channel is connected yet." };
+}
+
+/** Seconds → "4:32" / "1:02:03" for the channel video picker. Null/NaN → "—". */
+export function formatDuration(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return "—";
+  const total = Math.round(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const mm = h > 0 ? String(m).padStart(2, "0") : String(m);
+  return `${h > 0 ? `${h}:` : ""}${mm}:${String(s).padStart(2, "0")}`;
+}
+
+/** A yt-dlp `upload_date` ("20240115") or an ISO date → a readable date, else the raw text. */
+export function formatPublishedAt(raw: string): string {
+  if (!raw) return "";
+  if (/^\d{8}$/.test(raw)) {
+    const d = new Date(`${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}T00:00:00`);
+    if (!Number.isNaN(d.getTime())) return d.toLocaleDateString();
+    return raw;
+  }
+  try {
+    const d = new Date(raw);
+    if (!Number.isNaN(d.getTime())) return d.toLocaleDateString();
+  } catch { /* fall through */ }
+  return raw;
+}
+
 /** GET /clips/{candidateId}/thumbnail — generated thumbnails for a clip. */
 export async function getClipThumbnails(candidateId: string): Promise<{ thumbnail_url: string | null; thumbnails: ThumbnailVariant[] } | null> {
   const raw = await apiGet<unknown>(`/clips/${encodeURIComponent(candidateId)}/thumbnail`);

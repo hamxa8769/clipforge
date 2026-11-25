@@ -1,10 +1,11 @@
 "use client";
-import { useState } from "react";
-import type { Candidate, Job } from "@/lib/api";
-import { approveCandidate, attributionForClip, exportClipToCapcut, licenseBadgeLabel, regenerateThumbnail, rejectCandidate, selectThumbnailVariant } from "@/lib/api";
+import { useEffect, useState } from "react";
+import type { Candidate, Job, SeoPack as SeoPackData } from "@/lib/api";
+import { approveCandidate, attributionForClip, exportClipToCapcut, getSeoPack, licenseBadgeLabel, regenerateThumbnail, rejectCandidate, selectThumbnailVariant } from "@/lib/api";
 import { summarizeApproveQueue } from "@/lib/review";
 import { Card, ExternalLink, StatusPill } from "@/components/ui";
 import ClipPlayer from "@/components/ClipPlayer";
+import SeoPack from "@/components/SeoPack";
 
 const PLATFORMS = ["youtube", "tiktok", "instagram", "facebook"] as const;
 const PLATFORM_LABEL: Record<string, string> = { youtube: "YouTube", tiktok: "TikTok", instagram: "Instagram", facebook: "Facebook" };
@@ -15,6 +16,23 @@ function CandidateCard({ c, job, demo }: { c: Candidate; job: Job; demo: boolean
   const [note, setNote] = useState("");
   const [noChannel, setNoChannel] = useState(false);
   const seo = c.seo[platform];
+  // SEO pack (v0.11.0): title options, description, search tags,
+  // hashtags + copy buttons per field, from GET /clips/{id}/seo-pack.
+  // In demo mode there is no server, so the pack is never fetched and
+  // the plain per-platform variants below are shown instead.
+  const [pack, setPack] = useState<SeoPackData | null>(null);
+  const [packLoading, setPackLoading] = useState(false);
+  useEffect(() => {
+    if (demo) return;
+    let cancelled = false;
+    setPackLoading(true);
+    getSeoPack(c.id)
+      .then((p) => { if (!cancelled) setPack(p); })
+      .catch(() => { if (!cancelled) setPack(null); })
+      .finally(() => { if (!cancelled) setPackLoading(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [c.id, demo]);
   // Thumbnail step (v0.7.0): the generated thumbnail, with Regenerate and
   // a variant picker when the API offers variants.
   const variants = c.thumbnail_variants.length > 0 ? c.thumbnail_variants : (c.thumbnail_url ? [c.thumbnail_url] : []);
@@ -218,33 +236,41 @@ function CandidateCard({ c, job, demo }: { c: Candidate; job: Job; demo: boolean
       <p className="mt-2 text-xs text-neutral-500">Own-content declaration: this clip is from content you own or have rights to. AI-assisted edits: when captions, reframing or voiceover were AI-generated, label the clip as AI-generated on the platform when you publish — ClipForge does not send that label for you yet.</p>
 
       <div className="mt-5">
-        <div className="flex gap-1 border-b border-neutral-800">
-          {PLATFORMS.map((p) => (
-            <button key={p} onClick={() => setPlatform(p)} className={`rounded-t-md px-3 py-2 text-sm ${platform === p ? "bg-neutral-800 font-medium text-white" : "text-neutral-400 hover:text-white"}`}>{PLATFORM_LABEL[p]}</button>
-          ))}
-        </div>
-        {seo ? (
-          <div className="space-y-2 rounded-b-lg bg-neutral-950 p-4 text-sm">
-            <p><strong>Title:</strong> {seo.title} <span className="text-neutral-500">({seo.title.length} chars)</span></p>
-            <p><strong>Description:</strong> {seo.description}</p>
-            {attribution && (
-              <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-3">
-                <p className="text-xs font-semibold text-emerald-300">Attribution — always included for Creative Commons / public-domain sources (read-only)</p>
-                <p className="mt-1 text-sm text-neutral-200">{attribution}</p>
-                <p className="mt-1 text-xs text-neutral-500">
-                  Source: {c.source_title || job.source_title || "Creative Commons video"}{(c.source_channel || job.source_channel) ? ` by ${c.source_channel || job.source_channel}` : ""}{(c.source_url || job.source) ? <> · <ExternalLink className="text-sky-300 underline" href={c.source_url || job.source}>source video</ExternalLink></> : ""}. This credit stays in the published description.
+        {pack ? (
+          <SeoPack pack={pack} />
+        ) : packLoading ? (
+          <p className="p-4 text-sm text-neutral-400">Loading the SEO pack…</p>
+        ) : (
+          <>
+            <div className="flex gap-1 border-b border-neutral-800">
+              {PLATFORMS.map((p) => (
+                <button key={p} onClick={() => setPlatform(p)} className={`rounded-t-md px-3 py-2 text-sm ${platform === p ? "bg-neutral-800 font-medium text-white" : "text-neutral-400 hover:text-white"}`}>{PLATFORM_LABEL[p]}</button>
+              ))}
+            </div>
+            {seo ? (
+              <div className="space-y-2 rounded-b-lg bg-neutral-950 p-4 text-sm">
+                <p><strong>Title:</strong> {seo.title} <span className="text-neutral-500">({seo.title.length} chars)</span></p>
+                <p><strong>Description:</strong> {seo.description}</p>
+              {attribution && (
+                <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-3">
+                  <p className="text-xs font-semibold text-emerald-300">Attribution — always included for Creative Commons / public-domain sources (read-only)</p>
+                  <p className="mt-1 text-sm text-neutral-200">{attribution}</p>
+                  <p className="mt-1 text-xs text-neutral-500">
+                    Source: {c.source_title || job.source_title || "Creative Commons video"}{(c.source_channel || job.source_channel) ? ` by ${c.source_channel || job.source_channel}` : ""}{(c.source_url || job.source) ? <> · <ExternalLink className="text-sky-300 underline" href={c.source_url || job.source}>source video</ExternalLink></> : ""}. This credit stays in the published description.
+                  </p>
+                </div>
+              )}
+                <p><strong>Hashtags:</strong> {seo.hashtags.join(" ")}</p>
+                <p className="text-xs text-neutral-500">
+                  {platform === "youtube" && "YouTube: keyword front-loaded, 2–3 hashtags, links in Shorts descriptions are not clickable."}
+                  {platform === "tiktok" && "TikTok: keyword in first line; 3–5 hashtags. Clips under 60s will not earn Creator Rewards."}
+                  {platform === "instagram" && "Instagram: max 5 hashtags (Dec 2025 cap); keywords in the caption matter more than hashtags."}
+                  {platform === "facebook" && "Facebook: short, plain caption, 2–3 niche hashtags; API Reels cap is 90s."}
                 </p>
               </div>
-            )}
-            <p><strong>Hashtags:</strong> {seo.hashtags.join(" ")}</p>
-            <p className="text-xs text-neutral-500">
-              {platform === "youtube" && "YouTube: keyword front-loaded, 2–3 hashtags, links in Shorts descriptions are not clickable."}
-              {platform === "tiktok" && "TikTok: keyword in first line; 3–5 hashtags. Clips under 60s will not earn Creator Rewards."}
-              {platform === "instagram" && "Instagram: max 5 hashtags (Dec 2025 cap); keywords in the caption matter more than hashtags."}
-              {platform === "facebook" && "Facebook: short, plain caption, 2–3 niche hashtags; API Reels cap is 90s."}
-            </p>
-          </div>
-        ) : <p className="p-4 text-sm text-neutral-400">No SEO variant for this platform yet.</p>}
+            ) : <p className="p-4 text-sm text-neutral-400">No SEO variant for this platform yet.</p>}
+          </>
+        )}
       </div>
 
       <div className="mt-4 flex flex-wrap gap-2">

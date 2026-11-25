@@ -472,6 +472,50 @@ Facebook 13, YouTube 15, TikTok 19 UTC).
 Stored SEO variants for one clip: `{candidate_id, seo: {platform:
 {title, description, hashtags, ...}}}`.
 
+### `GET /clips/{candidate_id}/seo-pack` (v0.11.0)
+
+Full SEO pack for one clip: `{clip_candidate_id, job_id, keyword,
+platforms: {youtube|tiktok|instagram|facebook|x: {label, title,
+title_options[2–3], description, caption, tags, hashtags, warnings,
+tip}}, copy_all}`. Built from the clip (hook, transcript excerpt,
+duration) and its job (keyword from the job title); the worker's stored
+SEO variants win where they exist, so the pack never contradicts the
+Review page. Shown in Review and in the Export Hub, with a Copy button
+per field and Copy-all.
+
+### `POST /seo-pack/preview` (v0.11.0)
+
+Same pack from a plain body — no clip needed:
+`{keyword, hook?, title_hint?, duration_s?, transcript?,
+source_title?, source_channel?}`. `keyword` is required (400 otherwise).
+
+### `GET /channel-seo` · `POST /channel-seo/analyze` · `GET /channel-seo/connected` (v0.11.0)
+
+Channel SEO view: `{channel_id, channel_name, channel_url,
+subscriber_count, videos_fetched, views_source, views_note,
+top_videos[10]: {video_id, title, url, views, duration_s,
+published_at}, what_works: {common_words, title_patterns, basis},
+suggested_titles[3]: {title, why}, suggested_tags,
+suggested_tags_basis, api_enrichment: {used, note}, cached,
+fetched_at}`.
+
+- `GET /channel-seo?channel_url=&topic=` — for a channel link, or the
+  connected YouTube channel when no link is given. Returns the cached
+  analysis (24 h) when fresh, otherwise reads the channel live.
+- `POST /channel-seo/analyze {channel_url, topic?, limit?}` — always
+  reads the channel live (ignores the cache).
+- `GET /channel-seo/connected?topic=` — the connected YouTube channel
+  only (404 with a plain message when none is connected).
+
+The channel is read from its public page with yt-dlp (flat playlist,
+no download, no API key needed). A saved YouTube Data API key is used
+only to enrich views + real tags when it exists; without it the public
+page numbers stand and `api_enrichment.note` says so. Videos YouTube
+shows no view count for are listed last and `views_note` says so.
+Errors are plain language: 400 for a video link instead of a channel
+link (or no link and no connected channel), 502 when the channel
+cannot be read.
+
 ## Errors
 
 | Status | Meaning |

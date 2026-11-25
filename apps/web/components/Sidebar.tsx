@@ -24,6 +24,8 @@ const NAV: { href: string; label: string; hint: string; icon: React.ReactNode }[
   { href: "/live", label: "Live", hint: "Monitor streams, clip peaks", icon: <><circle cx="12" cy="12" r="2" /><path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5.6 5.6a9 9 0 0 0 0 12.8M18.4 5.6a9 9 0 0 1 0 12.8" /></> },
   { href: "/automation", label: "Automation", hint: "Runner, rules & history", icon: <path d="M4 12a8 8 0 1 1 2.3 5.6M4 12V7m0 5h5" /> },
   { href: "/channels", label: "Channels", hint: "Connect accounts", icon: <path d="M12 3v10m0 0l-3-3m3 3l3-3M5 21h14" /> },
+  // v0.11.0 (worker B): Channel SEO — what works on a channel.
+  { href: "/channel-seo", label: "Channel SEO", hint: "Top videos & title ideas", icon: <path d="M3 17l6-6 4 4 8-8M15 7h6v6" /> },
   { href: "/queue", label: "Approval Queue", hint: "Review clips before posting", icon: <path d="M9 11l3 3 8-8M5 21h14M5 3h14" /> },
   { href: "/schedule", label: "Schedule", hint: "When clips go out", icon: <path d="M8 3v4M16 3v4M3 9h18M5 5h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z" /> },
   { href: "/monetization", label: "Monetization", hint: "Thresholds per platform", icon: <path d="M3 17l6-6 4 4 8-8M15 7h6v6" /> },

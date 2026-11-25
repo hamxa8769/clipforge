@@ -14,6 +14,16 @@ approved Post record, explicit credentials, and ``dry_run=false``):
                                       ETA, retry/cancel)
   POST /jobs/{id}/candidates/{n}/approve | reject | trim
   GET  /clips/{candidate_id}/seo     (stored per-platform SEO variants)
+  GET  /clips/{candidate_id}/seo-pack (v0.11.0: full SEO pack — title
+                                     options, description, search tags,
+                                     hashtags, tips, copy-all text)
+  POST /seo-pack/preview             (v0.11.0: same pack from a plain body,
+                                     no clip needed)
+  GET  /channel-seo                 (v0.11.0: top videos, what works,
+                                     suggested titles/tags for a channel
+                                     link — or the connected channel)
+  POST /channel-seo/analyze         (v0.11.0: same, always read live)
+  GET  /channel-seo/connected       (v0.11.0: connected YouTube channel only)
   GET  /clips/{candidate_id}/thumbnail | POST (regenerate variants)
                                      | POST /thumbnail/select (pick variant)
   GET  /media/thumbnails/{job_id}/{filename} (serve generated thumbnails)
@@ -606,6 +616,13 @@ app.include_router(publish_router)
 from clipforge_api.live_monitor import router as live_monitor_router  # noqa: E402
 
 app.include_router(live_monitor_router)
+
+# --- v0.11.0 (Worker B): SEO pack per clip + Channel SEO (/clips/*/seo-pack,
+# /seo-pack/preview, /channel-seo*). Registered here, before __main__ adds
+# the "/" StaticFiles mount, so API calls still return JSON.
+from clipforge_api.seo_pack import router as seo_pack_router  # noqa: E402
+
+app.include_router(seo_pack_router)
 
 
 def _queue_position(db: Session, job: Job) -> int | None:
