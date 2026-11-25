@@ -17,7 +17,7 @@ import {
   analyzeChannelSeo, getChannelSeo, getConnectedChannelSeo,
   type ChannelSeo,
 } from "@/lib/api";
-import { Card, CardHeader, EmptyState, ErrorBanner, PageHeader, Skeleton, fmtCompact } from "@/components/ui";
+import { Card, CardHeader, EmptyState, ErrorBanner, ExternalLink, PageHeader, Skeleton, fmtCompact } from "@/components/ui";
 import { useServerStatus } from "@/components/ServerStatusProvider";
 import { CopyButton } from "@/components/SeoPack";
 
@@ -183,7 +183,7 @@ function ChannelSeoPageInner() {
                 {data.top_videos.map((v, i) => (
                   <li key={v.video_id || i} className="flex flex-wrap items-baseline gap-2 rounded-lg border border-neutral-800 p-3 text-sm">
                     <span className="w-6 shrink-0 font-bold text-neutral-400">{i + 1}.</span>
-                    <a href={v.url} target="_blank" rel="noreferrer" className="min-w-0 flex-1 font-medium text-sky-300 underline">{v.title || v.video_id}</a>
+                    <ExternalLink href={v.url} className="min-w-0 flex-1 font-medium text-sky-300 underline">{v.title || v.video_id}</ExternalLink>
                     <span className="shrink-0 text-neutral-400">{fmtViews(v.views)}</span>
                     <span className="shrink-0 text-xs text-neutral-500">{fmtDate(v.published_at)}</span>
                   </li>
