@@ -206,9 +206,7 @@ def _video_from_flat_entry(entry: dict) -> ResolvedVideo | None:
     )
 
 
-def _flat_playlist(
-    yt_dlp: str, url: str, *, max_results: int = DEFAULT_MAX_VIDEOS
-) -> dict:
+def _flat_playlist(yt_dlp: str, url: str, *, max_results: int = DEFAULT_MAX_VIDEOS) -> dict:
     """Run yt-dlp flat-playlist extraction and return its JSON.
 
     ``--playlist-end`` bounds the work (newest first, so the first N
@@ -223,9 +221,7 @@ def _flat_playlist(
     return _flat_playlist_run(yt_dlp, url, max_results=max_results, android_client=False)
 
 
-def _flat_playlist_run(
-    yt_dlp: str, url: str, *, max_results: int, android_client: bool
-) -> dict:
+def _flat_playlist_run(yt_dlp: str, url: str, *, max_results: int, android_client: bool) -> dict:
     cmd = [
         yt_dlp,
         "--flat-playlist",
@@ -287,14 +283,12 @@ def _flat_playlist_run(
         info = json.loads(proc.stdout)
     except json.JSONDecodeError as exc:
         raise ResolveError(
-            "YouTube's answer for this channel could not be read — "
-            "try again in a moment.",
+            "YouTube's answer for this channel could not be read — try again in a moment.",
             code="channel_unavailable",
         ) from exc
     if not isinstance(info, dict):
         raise ResolveError(
-            "YouTube's answer for this channel could not be read — "
-            "try again in a moment.",
+            "YouTube's answer for this channel could not be read — try again in a moment.",
             code="channel_unavailable",
         )
     return info
@@ -317,7 +311,9 @@ def resolve_video(url: str, yt_dlp: str) -> ResolvedVideo:
             try:
                 info = _ytdlp_simulate(yt_dlp, url, android_client=True)
             except IngestError as android_exc:
-                raise ResolveError(str(android_exc), code=android_exc.code or "youtube_unavailable") from android_exc
+                raise ResolveError(
+                    str(android_exc), code=android_exc.code or "youtube_unavailable"
+                ) from android_exc
         else:
             raise ResolveError(str(exc), code=exc.code or "youtube_unavailable") from exc
     if info.get("_type") == "playlist":
@@ -336,8 +332,7 @@ def resolve_video(url: str, yt_dlp: str) -> ResolvedVideo:
     video = _video_from_ytdlp_info(info)
     if not video.video_id:
         raise ResolveError(
-            "YouTube's answer for this video could not be read — "
-            "try again in a moment.",
+            "YouTube's answer for this video could not be read — try again in a moment.",
             code="youtube_unavailable",
         )
     return video
@@ -402,8 +397,16 @@ def _api_get(api_key: str, path: str, params: dict) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=YOUTUBE_API_TIMEOUT_S) as resp:
             return json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError) as exc:
-        raise ResolveError(f"YouTube Data API request failed: {exc}", code="youtube_api_failed") from exc
+    except (
+        urllib.error.URLError,
+        urllib.error.HTTPError,
+        TimeoutError,
+        ValueError,
+        OSError,
+    ) as exc:
+        raise ResolveError(
+            f"YouTube Data API request failed: {exc}", code="youtube_api_failed"
+        ) from exc
 
 
 def _channel_ref_for_api(url: str) -> tuple[str, str] | None:
@@ -462,7 +465,7 @@ def list_channel_videos_api(
         video_id = str(resource.get("videoId") or "")
         if not video_id:
             continue
-        thumbs = (snippet.get("thumbnails") or {})
+        thumbs = snippet.get("thumbnails") or {}
         thumb = (
             (thumbs.get("high") or {}).get("url")
             or (thumbs.get("medium") or {}).get("url")

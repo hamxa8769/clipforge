@@ -122,9 +122,7 @@ def _download_runs(tmp_path: Path) -> list[list[str]]:
     return [a for a in _argv_runs(tmp_path) if "--simulate" not in a]
 
 
-def test_stall_once_is_retried_and_succeeds(
-    tmp_path: Path, fake_ytdlp: Path, monkeypatch
-) -> None:
+def test_stall_once_is_retried_and_succeeds(tmp_path: Path, fake_ytdlp: Path, monkeypatch) -> None:
     """First download stalls → one automatic retry → the job succeeds.
 
     The retry reuses the same download dir (same ``-o`` template), so
@@ -161,6 +159,8 @@ def test_plain_error_action_names_the_automatic_retry() -> None:
     happened (v0.11.0): ingest retries once before failing."""
     from clipforge.errors import plain_error
 
-    mapped = plain_error(IngestError("The download stalled — no data arrived.", code="download_stalled"))
+    mapped = plain_error(
+        IngestError("The download stalled — no data arrived.", code="download_stalled")
+    )
     assert mapped["code"] == "download_stalled"
     assert "retried" in mapped["action"]

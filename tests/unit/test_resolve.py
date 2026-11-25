@@ -136,10 +136,18 @@ def test_classify_url(url: str, kind: str) -> None:
 
 
 def test_channel_videos_url_appends_videos_tab() -> None:
-    assert _channel_videos_url("https://www.youtube.com/@Ch") == "https://www.youtube.com/@Ch/videos"
-    assert _channel_videos_url("https://www.youtube.com/channel/UCx") == "https://www.youtube.com/channel/UCx/videos"
+    assert (
+        _channel_videos_url("https://www.youtube.com/@Ch") == "https://www.youtube.com/@Ch/videos"
+    )
+    assert (
+        _channel_videos_url("https://www.youtube.com/channel/UCx")
+        == "https://www.youtube.com/channel/UCx/videos"
+    )
     # A link that already names a tab is used as-is.
-    assert _channel_videos_url("https://www.youtube.com/@Ch/shorts") == "https://www.youtube.com/@Ch/shorts"
+    assert (
+        _channel_videos_url("https://www.youtube.com/@Ch/shorts")
+        == "https://www.youtube.com/@Ch/shorts"
+    )
     assert _channel_videos_url(PLAYLIST_URL) == PLAYLIST_URL
 
 
@@ -153,9 +161,7 @@ def test_resolve_video_returns_title_channel_duration(fake_ytdlp: Path) -> None:
     assert video.url == VIDEO_URL
 
 
-def test_resolve_video_unavailable_is_plain_and_classified(
-    fake_ytdlp: Path, monkeypatch
-) -> None:
+def test_resolve_video_unavailable_is_plain_and_classified(fake_ytdlp: Path, monkeypatch) -> None:
     monkeypatch.setenv("FAKE_YTDLP_MODE", "unavailable")
     with pytest.raises(ResolveError) as excinfo:
         resolve_video(VIDEO_URL, str(fake_ytdlp))
@@ -196,9 +202,7 @@ def test_list_channel_videos_bot_check_retries_android_client(
 
 
 # ------------------------------------------------------------ channel listing
-def test_list_channel_videos_newest_first_capped(
-    fake_ytdlp: Path, tmp_path: Path
-) -> None:
+def test_list_channel_videos_newest_first_capped(fake_ytdlp: Path, tmp_path: Path) -> None:
     channel, videos = list_channel_videos_ytdlp(CHANNEL_URL, str(fake_ytdlp), max_results=5)
     assert channel["title"] == "Test Channel"
     assert len(videos) == 5
@@ -212,18 +216,14 @@ def test_list_channel_videos_newest_first_capped(
     assert runs[0][-1] == CHANNEL_URL + "/videos"
 
 
-def test_list_channel_videos_empty_is_channel_empty(
-    fake_ytdlp: Path, monkeypatch
-) -> None:
+def test_list_channel_videos_empty_is_channel_empty(fake_ytdlp: Path, monkeypatch) -> None:
     monkeypatch.setenv("FAKE_YTDLP_MODE", "empty")
     with pytest.raises(ResolveError) as excinfo:
         list_channel_videos_ytdlp(CHANNEL_URL, str(fake_ytdlp))
     assert excinfo.value.code == "channel_empty"
 
 
-def test_list_channel_videos_unavailable_is_plain(
-    fake_ytdlp: Path, monkeypatch
-) -> None:
+def test_list_channel_videos_unavailable_is_plain(fake_ytdlp: Path, monkeypatch) -> None:
     monkeypatch.setenv("FAKE_YTDLP_MODE", "unavailable")
     with pytest.raises(ResolveError) as excinfo:
         list_channel_videos_ytdlp(CHANNEL_URL, str(fake_ytdlp))
@@ -279,9 +279,7 @@ def test_api_listing_skipped_for_c_slash_links() -> None:
     assert list_channel_videos_api("https://www.youtube.com/user/Name", "k") is None
 
 
-def test_resolve_url_falls_back_to_ytdlp_when_api_fails(
-    fake_ytdlp: Path, monkeypatch
-) -> None:
+def test_resolve_url_falls_back_to_ytdlp_when_api_fails(fake_ytdlp: Path, monkeypatch) -> None:
     def _boom(api_key: str, path: str, params: dict) -> dict:
         raise ResolveError("api down", code="youtube_api_failed")
 

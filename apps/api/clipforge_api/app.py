@@ -1319,7 +1319,11 @@ def clear_finished_jobs(db: Session = Depends(get_db)):
         deleted_ids.append(job.id)
         shutil.rmtree(clips_root / job.id, ignore_errors=True)
     db.commit()
-    return {"deleted": len(deleted_ids), "ids": deleted_ids, "statuses": list(CLEARABLE_JOB_STATUSES)}
+    return {
+        "deleted": len(deleted_ids),
+        "ids": deleted_ids,
+        "statuses": list(CLEARABLE_JOB_STATUSES),
+    }
 
 
 @app.get("/jobs/{job_id}")

@@ -1,10 +1,10 @@
 """API integration tests — Dashboard one-box (v0.11.0).
 
-  POST /resolve            -> video / channel answers, 422 for bad links
-  POST /jobs/clear-finished -> deletes failed / cancelled / blocked jobs
-                              (with candidates, stage events, worker
-                              runs and referencing posts); active /
-                              review / ready jobs are untouched.
+POST /resolve            -> video / channel answers, 422 for bad links
+POST /jobs/clear-finished -> deletes failed / cancelled / blocked jobs
+                            (with candidates, stage events, worker
+                            runs and referencing posts); active /
+                            review / ready jobs are untouched.
 """
 
 from __future__ import annotations
@@ -38,23 +38,35 @@ client = TestClient(app)
 def _seed_job(status: str, *, with_candidate: bool = False) -> str:
     session = get_session()
     try:
-        job = Job(source_type="youtube", source_url="https://www.youtube.com/watch?v=x", status=status)
+        job = Job(
+            source_type="youtube", source_url="https://www.youtube.com/watch?v=x", status=status
+        )
         session.add(job)
         session.commit()
         job_id = job.id
         if with_candidate:
             cand = ClipCandidate(
-                job_id=job_id, n=1, start_s=0.0, end_s=30.0, score=80.0,
-                hook_rating=8.0, hook_line="hook", reason="test", status="pending",
+                job_id=job_id,
+                n=1,
+                start_s=0.0,
+                end_s=30.0,
+                score=80.0,
+                hook_rating=8.0,
+                hook_line="hook",
+                reason="test",
+                status="pending",
             )
             session.add(cand)
             session.commit()
             post = Post(
-                clip_candidate_id=cand.id, platform="youtube",
+                clip_candidate_id=cand.id,
+                platform="youtube",
                 status="pending_approval",
             )
             session.add(post)
-            session.add(JobStageEvent(job_id=job_id, stage="ingest", status="failed", message="boom"))
+            session.add(
+                JobStageEvent(job_id=job_id, stage="ingest", status="failed", message="boom")
+            )
             session.add(WorkerRun(job_id=job_id, status="failed", error="boom"))
             session.commit()
         return job_id
@@ -70,10 +82,14 @@ def test_resolve_video(monkeypatch) -> None:
         lambda url, yt_dlp, **kw: {
             "kind": "video",
             "video": {
-                "video_id": "M7lc1UVf-VE", "title": "Fake video",
-                "channel_title": "Ch", "channel_id": "UCx",
-                "duration_s": 272, "thumbnail_url": None,
-                "published_at": "20240115", "view_count": 0,
+                "video_id": "M7lc1UVf-VE",
+                "title": "Fake video",
+                "channel_title": "Ch",
+                "channel_id": "UCx",
+                "duration_s": 272,
+                "thumbnail_url": None,
+                "published_at": "20240115",
+                "view_count": 0,
                 "url": "https://www.youtube.com/watch?v=M7lc1UVf-VE",
             },
         },
@@ -91,10 +107,17 @@ def test_resolve_channel(monkeypatch) -> None:
             "kind": "channel",
             "channel": {"id": "UCx", "title": "Ch", "url": url},
             "videos": [
-                {"video_id": "aaa", "title": "First", "channel_title": "Ch",
-                 "channel_id": "UCx", "duration_s": 60, "thumbnail_url": None,
-                 "published_at": "", "view_count": 0,
-                 "url": "https://www.youtube.com/watch?v=aaa"}
+                {
+                    "video_id": "aaa",
+                    "title": "First",
+                    "channel_title": "Ch",
+                    "channel_id": "UCx",
+                    "duration_s": 60,
+                    "thumbnail_url": None,
+                    "published_at": "",
+                    "view_count": 0,
+                    "url": "https://www.youtube.com/watch?v=aaa",
+                }
             ],
             "source": "ytdlp",
         },

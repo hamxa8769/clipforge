@@ -155,6 +155,28 @@ def _wait_for_status(job_id: str, status: str, timeout: float = 30.0) -> dict:
     raise AssertionError(f"job {job_id} never reached {status!r}: {body!r}")
 
 
+def _wait_for_empty_running(timeout: float = 60.0) -> None:
+    """Poll GET /worker/queue until no run is in flight (v0.11.0).
+
+    v0.9.0 auto-run + the live dispatcher mean earlier tests' jobs can
+    still be running when a later test starts: the dispatcher claims
+    an auto-enqueued job and its WorkerRun stays ``running`` until the
+    worker finishes or a cancel unwinds. Cancelling a running job is
+    async (the worker stops at the next checkpoint), so a plain cancel
+    is not enough — wait, bounded, for the list to actually empty.
+    Raises instead of weakening the ``running == []`` assertions.
+    """
+    import time as _time
+
+    deadline = _time.time() + timeout
+    while _time.time() < deadline:
+        running = client.get("/worker/queue").json()["running"]
+        if running == []:
+            return
+        _time.sleep(0.5)
+    raise AssertionError(f"stale worker run(s) never drained: {running!r}")
+
+
 def _seed_job(status: str = "review") -> str:
     session = get_session()
     try:
@@ -397,9 +419,18 @@ def test_upload_endpoint_creates_job(test_video):
 def test_worker_queue_and_run_next(test_video):
     _clear_retention_points()
     # Drain anything pending left by earlier tests so run-next is deterministic.
+    # v0.11.0: also cancel RUNNING jobs — v0.9.0 auto-run + the live
+    # dispatcher claim earlier tests' jobs, and their WorkerRun stays
+    # "running" until the worker finishes or the cancel unwinds, which
+    # is what made `running == []` fail when this file ran in order
+    # (pre-existing on clean v0.10.3 too, same line, same assertion).
     for job in client.get("/jobs").json():
-        if job["status"] in {"pending", "queued"}:
+        if job["status"] in {"pending", "queued", "running"}:
             client.post(f"/jobs/{job['id']}/cancel")
+    # A running job only stops when its worker unwinds (async cancel),
+    # so wait — bounded — for the queue to actually empty before
+    # asserting anything about it.
+    _wait_for_empty_running(timeout=120.0)
     # v0.9.0 auto-run: POST /jobs enqueues at once and the dispatcher
     # claims it, so a manually-driven run-next test must seed the queued
     # job directly in the DB (bypassing the API's auto-enqueue).

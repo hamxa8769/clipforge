@@ -838,9 +838,7 @@ def _run_ytdlp_bounded(
     return code, stderr
 
 
-def _download_with_stall_retry(
-    cmd: list[str], control: JobControl | None
-) -> tuple[int, str]:
+def _download_with_stall_retry(cmd: list[str], control: JobControl | None) -> tuple[int, str]:
     """Run the download, retrying once automatically on a stall.
 
     A stall (no output from yt-dlp for ``YTDLP_STALL_TIMEOUT_S``) used
