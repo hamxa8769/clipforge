@@ -30,7 +30,7 @@ _MAX_MESSAGE_CHARS = 500
 # below handles that; dropping it would eat the whole message.
 _TRACEBACK_RE = re.compile(r"(?m)^(Traceback|File \"|  File |    ).*$")
 _CLASS_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*Error: ")
-_SECRET_HINT_RE = re.compile(r"(?i)(api[_-]?key|token|password|secret)\s*[:=]\s*\S+")
+_SECRET_HINT_RE = re.compile(r"(?i)(api[_-]?key|token|password|secret|cookie)\s*[:=]\s*\S+")
 
 
 def sanitize_error_message(message: str) -> str:
@@ -110,11 +110,24 @@ def plain_error(exc: BaseException, stage: str | None = None) -> dict:
                 "title": "YouTube asked to sign in",
                 "message": sanitize_error_message(str(exc)),
                 "action": (
-                    "Wait a little while and retry the job. If it keeps "
-                    "happening, the link may need YouTube cookies — try a "
-                    "different video first."
+                    "Retry the job with browser cookies: on the job page, "
+                    "pick the browser you're signed into YouTube with and "
+                    "press 'Retry with browser cookies' — or set it once in "
+                    "Settings → Downloads & tools. Waiting a little while "
+                    "and retrying can also work."
                 ),
                 "code": "youtube_bot_check",
+            }
+        if code == "youtube_cookies_missing":
+            return {
+                "title": "Browser cookies not found",
+                "message": sanitize_error_message(str(exc)),
+                "action": (
+                    "Pick the browser you're signed into YouTube with in "
+                    "Settings → Downloads & tools, or turn browser cookies "
+                    "off and retry the job."
+                ),
+                "code": "youtube_cookies_missing",
             }
         if code == "youtube_live":
             return {
@@ -135,10 +148,11 @@ def plain_error(exc: BaseException, stage: str | None = None) -> dict:
                 "title": "The download stalled",
                 "message": sanitize_error_message(str(exc)),
                 "action": (
-                    "ClipForge already retried the download once "
-                    "automatically and it stalled again. Check your "
-                    "internet connection and retry the job. If it keeps "
-                    "stalling, try a shorter video."
+                    "ClipForge already tried the download several ways "
+                    "(web, Android, and lower quality) and it made no "
+                    "progress. Retry the job — if it keeps stalling, try a "
+                    "shorter video, or retry with browser cookies "
+                    "(Settings → Downloads & tools)."
                 ),
                 "code": code,
             }

@@ -49,6 +49,10 @@ with open(log_path, "a", encoding="utf-8") as fh:
 video_id = "CMzctRZQlo0"
 android = "youtube:player_client=android" in argv
 
+if argv == ["--version"]:
+    print("2026.11.23")
+    sys.exit(0)
+
 if "--simulate" in argv:
     if mode == "unavailable":
         sys.stderr.write("ERROR: [youtube] CMzctRZQlo0: This video is unavailable\\n")
@@ -138,7 +142,9 @@ def fake_ytdlp(tmp_path: Path, fixture_video: Path, monkeypatch) -> Path:
 
 
 def _argv_runs(log_path: Path) -> list[list[str]]:
-    return [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+    runs = [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
+    # The --version verification run is not a probe / download run.
+    return [run for run in runs if run != ["--version"]]
 
 
 def _log(tmp_path: Path) -> Path:
@@ -267,17 +273,19 @@ def test_stall_watchdog_kills_silent_download() -> None:
 
 
 def test_chatty_process_does_not_trip_watchdog() -> None:
-    """Steady stderr output resets the stall clock — a slow-but-alive
-    download is not killed."""
+    """Steady stdout output resets the stall clock — a slow-but-alive
+    download is not killed. (v0.11.1: real yt-dlp is chatty on
+    *stdout*, not stderr — the old test printed to stderr, which is
+    why the bug shipped with green tests.)"""
     cmd = [
         sys.executable,
         "-c",
         "import sys, time\n"
-        "[print(i, file=sys.stderr, flush=True) or time.sleep(0.2) for i in range(10)]",
+        "[print(i, file=sys.stdout, flush=True) or time.sleep(0.2) for i in range(10)]",
     ]
-    code, stderr = _run_ytdlp_bounded(cmd, None, timeout=60, stall_timeout=1)
+    code, stderr, stdout = _run_ytdlp_bounded(cmd, None, timeout=60, stall_timeout=1)
     assert code == 0
-    assert "9" in stderr
+    assert "9" in stdout
 
 
 def test_total_timeout_is_still_a_plain_ingest_error() -> None:

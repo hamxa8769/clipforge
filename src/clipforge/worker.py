@@ -494,13 +494,66 @@ def _run_stages(
                 "or Settings) to install it automatically, or use a local "
                 "file upload.",
             )
+            # v0.11.1: browser cookies for bot-checked downloads — the
+            # per-job override (set from the job page's "Retry with
+            # browser cookies") wins over the Settings default. Only
+            # the browser *name* is ever read or passed; no cookie
+            # value touches the job record or any log.
+            from clipforge.auth.settings_store import SettingsStore  # noqa: PLC0415
+            from clipforge.ingest import (  # noqa: PLC0415
+                normalize_youtube_cookies_browser,
+            )
+
+            job_meta = dict(job.meta_json or {})
+            cookies_browser = (
+                normalize_youtube_cookies_browser(job_meta.get("youtube_cookies_browser"))
+                or SettingsStore(data).load().youtube_cookies_browser
+            )
+            # Live download progress (v0.11.1): ingest is 10% of the
+            # job, so a download at 42% of the file is 4.2% of the
+            # job — same shape as live capture's progress callback.
+            # Commits are throttled (whole-percent change, or 5 s
+            # since the last commit) so a long download does not
+            # commit hundreds of times; the speed / ETA ride along
+            # for the Pipeline card.
+            last_commit = {"t": 0.0, "pct": -1.0}
+            ingest_attempts: list[dict] = list(job_meta.get("ingest_attempts") or [])
+
+            def _download_progress(progress) -> None:
+                now = time.time()
+                pct = -1.0
+                if progress.total_bytes:
+                    pct = round(progress.downloaded_bytes / progress.total_bytes * 10.0, 1)
+                progressed = pct >= 0 and pct - last_commit["pct"] >= 1.0
+                if not progressed and now - last_commit["t"] < 5.0:
+                    return
+                last_commit["t"] = now
+                if pct >= 0:
+                    last_commit["pct"] = pct
+                updates: dict = {
+                    "download_speed_bps": int(progress.speed_bps),
+                    "download_eta_s": progress.eta_s,
+                    "downloaded_bytes": progress.downloaded_bytes,
+                    "download_total_bytes": progress.total_bytes,
+                }
+                if pct >= 0:
+                    updates["progress_pct"] = pct
+                _set_job_meta(session, job, **updates)
+
+            def _download_attempt(attempt: dict) -> None:
+                ingest_attempts.append(attempt)
+                _set_job_meta(session, job, ingest_attempts=ingest_attempts)
+
             source = ingest_youtube(
                 job.source_url or "",
                 own_content=bool(job.own_content),
                 out_dir=data / "uploads",
+                cookies_from_browser=cookies_browser or None,
                 data_dir=data,
                 control=control,
                 job_id=job.id,
+                on_progress=_download_progress,
+                on_attempt=_download_attempt,
             )
         elif job.source_type == "live":
             # Live capture (v0.7.0): record a bounded segment of the

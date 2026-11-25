@@ -281,6 +281,11 @@ class JobCreate(BaseModel):
     # Facecam Studio layout (v0.10.0): validated by the worker; renders
     # every candidate with the layout instead of the centre crop.
     facecam_layout: dict | None = None
+    # YouTube browser cookies for this job only (v0.11.1): the browser
+    # yt-dlp reads signed-in YouTube cookies from when YouTube
+    # bot-blocks the download. "" / None = the Settings default. Only
+    # the browser name is stored — never a cookie value.
+    youtube_cookies_browser: str | None = None
 
     def declared(self) -> bool:
         return bool(self.own_content or self.own_content_declaration)
@@ -434,6 +439,9 @@ class SettingsUpdate(BaseModel):
     llm_models: dict[str, str] | None = None
     # v0.10.0: Ollama base URL override ("" = default localhost:11434).
     ollama_base_url: str | None = None
+    # v0.11.1: YouTube browser cookies default ("" = off). Only a
+    # known browser name is accepted; anything else is a 422.
+    youtube_cookies_browser: str | None = None
     llm_api_key: str | None = None  # None = keep, "" = clear, value = set
     gemini_api_key: str | None = None  # v0.5.0: same semantics, Gemini key
     # {platform: {"client_id": ..., "client_secret": ...}} — same semantics.
@@ -676,6 +684,12 @@ def _job_out(job: Job, db: Session, detail: bool = False) -> dict:
         # Live workflow fields (v0.3.0) — always present, null/0 when idle.
         "stage": meta.get("stage"),
         "progress_pct": float(meta.get("progress_pct") or 0.0),
+        # v0.11.1 live download progress (ingest stage): speed / ETA /
+        # bytes, so the Pipeline card shows more than a spinner.
+        "download_speed_bps": meta.get("download_speed_bps"),
+        "download_eta_s": meta.get("download_eta_s"),
+        "downloaded_bytes": meta.get("downloaded_bytes"),
+        "download_total_bytes": meta.get("download_total_bytes"),
         "eta_s": estimate_eta_s(db, job),
         "demo": bool(meta.get("demo", False)),
         "blocked_by": meta.get("blocked_by"),
@@ -1160,6 +1174,17 @@ def create_job(payload: JobCreate, db: Session = Depends(get_db)):
     meta: dict = {"top_n": payload.top_n, "caption_style": payload.caption_style}
     if payload.transcript_text:
         meta["transcript_text"] = payload.transcript_text
+    if payload.youtube_cookies_browser is not None:
+        # v0.11.1: per-job browser-cookies override — only a known
+        # browser name (or "" = use the Settings default) is stored;
+        # anything else is a 422, never silently kept.
+        from clipforge.ingest import normalize_youtube_cookies_browser  # noqa: PLC0415
+
+        choice = payload.youtube_cookies_browser.strip().lower()
+        if choice and normalize_youtube_cookies_browser(choice) != choice:
+            raise HTTPException(422, f"unknown browser for youtube_cookies_browser: {choice!r}")
+        if choice:
+            meta["youtube_cookies_browser"] = choice
     if payload.facecam_layout is not None:
         # Validate now so a bad layout is a 422, not a failed job.
         from clipforge.facecam import FacecamError, FacecamLayout
@@ -1452,7 +1477,12 @@ def run_job_endpoint(job_id: str, wait: bool = Query(default=True), db: Session 
 
 
 @app.post("/jobs/{job_id}/retry")
-def retry_job(job_id: str, wait: bool = Query(default=True), db: Session = Depends(get_db)):
+def retry_job(
+    job_id: str,
+    wait: bool = Query(default=True),
+    youtube_cookies_browser: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
     """Reset a failed / blocked job to pending and run it again.
 
     Old candidates + stored SEO are dropped (they are re-derived);
@@ -1480,8 +1510,23 @@ def retry_job(job_id: str, wait: bool = Query(default=True), db: Session = Depen
     job.meta_json = {
         k: v
         for k, v in (dict(job.meta_json or {}).items())
-        if k in {"top_n", "caption_style", "transcript_text"}
+        if k in {"top_n", "caption_style", "transcript_text", "youtube_cookies_browser"}
     }
+    # v0.11.1: "Retry with browser cookies" — the job page passes the
+    # chosen browser here; it is stored as the per-job override for
+    # this run (and kept on later retries until cleared).
+    if youtube_cookies_browser is not None:
+        from clipforge.ingest import normalize_youtube_cookies_browser  # noqa: PLC0415
+
+        choice = youtube_cookies_browser.strip().lower()
+        if choice and normalize_youtube_cookies_browser(choice) != choice:
+            raise HTTPException(422, f"unknown browser for youtube_cookies_browser: {choice!r}")
+        meta = dict(job.meta_json or {})
+        if choice:
+            meta["youtube_cookies_browser"] = choice
+        else:
+            meta.pop("youtube_cookies_browser", None)
+        job.meta_json = meta
     db.commit()
     queue = get_job_queue()
     queue.enqueue(db, job_id, priority=1)
@@ -2690,6 +2735,14 @@ def update_settings(payload: SettingsUpdate):
         if url and not url.startswith(("http://", "https://")):
             raise HTTPException(422, "ollama_base_url must start with http:// or https://")
         current.ollama_base_url = url
+    if payload.youtube_cookies_browser is not None:
+        # v0.11.1: only a known browser name (or "" = off) is saved.
+        from clipforge.ingest import normalize_youtube_cookies_browser  # noqa: PLC0415
+
+        choice = payload.youtube_cookies_browser.strip().lower()
+        if choice and normalize_youtube_cookies_browser(choice) != choice:
+            raise HTTPException(422, f"unknown browser for youtube_cookies_browser: {choice!r}")
+        current.youtube_cookies_browser = choice
     store.save(current)
     if payload.dry_run is not None:
         # Keep the cached /health value in sync (see
@@ -2726,6 +2779,71 @@ def test_connection(service: str):
             detail = f"{detail} Next step: {result['next_step']}"
         raise HTTPException(502, detail)
     return result
+
+
+class YoutubeCookiesTest(BaseModel):
+    """POST /settings/test-youtube-cookies body: browser name + optional URL."""
+
+    browser: str = ""
+    url: str | None = None
+
+
+@app.post("/settings/test-youtube-cookies")
+def test_youtube_cookies(payload: YoutubeCookiesTest):
+    """Test the chosen browser's YouTube cookies with a metadata probe.
+
+    Runs the same pre-flight probe the download uses (web client, then
+    Android on bot-check / unreachable) with ``--cookies-from-browser``.
+    No video is downloaded, and only the browser *name* is accepted —
+    never a cookie value. Always answers 200 with ``{ok, message,
+    code, next_step}`` — a bad browser or a blocked probe is a result,
+    not a 500.
+    """
+    from clipforge.errors import plain_error  # noqa: PLC0415
+    from clipforge.ingest import (  # noqa: PLC0415
+        IngestError,
+        _is_youtube_url,
+        check_youtube_available,
+        normalize_youtube_cookies_browser,
+    )
+    from clipforge.ytdlp_install import resolve_yt_dlp_path  # noqa: PLC0415
+
+    browser = normalize_youtube_cookies_browser(payload.browser)
+    if not browser:
+        return {
+            "ok": False,
+            "code": "no_browser",
+            "message": "Pick a browser first — Chrome, Edge, Firefox, Brave, Opera or Chromium.",
+            "next_step": "Choose the browser you're signed into YouTube with, then test again.",
+        }
+    url = payload.url or "https://www.youtube.com/watch?v=M7lc1UVf-VE"
+    if not _is_youtube_url(url):
+        raise HTTPException(422, "url must be a YouTube video link")
+    yt_dlp = resolve_yt_dlp_path()
+    if yt_dlp is None:
+        return {
+            "ok": False,
+            "code": "ytdlp_missing",
+            "message": "yt-dlp isn't installed, so the cookies can't be tested yet.",
+            "next_step": "Press 'Install yt-dlp' in Settings → Downloads & tools, then test again.",
+        }
+    try:
+        info = check_youtube_available(url, yt_dlp, cookies_from_browser=browser)
+    except IngestError as exc:
+        mapped = plain_error(exc, "ingest")
+        return {
+            "ok": False,
+            "code": exc.code or "test_failed",
+            "message": str(exc),
+            "next_step": mapped["action"],
+        }
+    title = str(info.get("title") or "the video")
+    return {
+        "ok": True,
+        "code": "ok",
+        "message": (f"YouTube answered with {browser}'s cookies — details loaded for “{title}”."),
+        "next_step": "Save this browser in Settings and retry the job.",
+    }
 
 
 # ------------------------------------------------- one-click FFmpeg install

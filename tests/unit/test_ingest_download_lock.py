@@ -70,6 +70,9 @@ with open(log_path, "a", encoding="utf-8") as fh:
 
 url = argv[-1]
 video_id = "CMzctRZQlo0"  # the test URL's id
+if argv == ["--version"]:
+    print("2026.11.23")
+    sys.exit(0)
 if "--simulate" in argv:
     # Pre-flight probe (v0.10.3): metadata only, no files created.
     info = {"id": video_id, "title": "Fake video", "duration": 120,

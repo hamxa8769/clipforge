@@ -638,6 +638,46 @@ test("normalizeSettings defaults yt-dlp to not found when the backend predates i
   assert.equal(s?.yt_dlp.path, "");
 });
 
+test("normalizeSettings keeps the YouTube cookies browser (v0.11.1)", () => {
+  const base = {
+    dry_run: true, dry_run_source: "env", default_privacy: {}, default_platforms: [],
+    llm: { provider: "openai-compatible", base_url: "https://api.openai.com/v1", model: "gpt-4o-mini", api_key: { configured: false, last4: "", masked: "", source: "none" } },
+    credentials: {}, data_dir: "/tmp", secret_backend: "file",
+    ffmpeg: { found: false, path: "", version: "", install_url: "https://ffmpeg.org/download.html" },
+    monetization_thresholds: [],
+  };
+  const s = normalizeSettings({ ...base, youtube_cookies_browser: "chrome" });
+  assert.equal(s?.youtube_cookies_browser, "chrome");
+  // Older servers (or an unset choice) report "" — never a missing field.
+  const off = normalizeSettings(base);
+  assert.equal(off?.youtube_cookies_browser, "");
+  const junk = normalizeSettings({ ...base, youtube_cookies_browser: 42 });
+  assert.equal(junk?.youtube_cookies_browser, "");
+});
+
+test("normalizeJob keeps live download progress fields (v0.11.1)", () => {
+  const job = normalizeJob({
+    id: "job-1", title: "t", source: "https://www.youtube.com/watch?v=M7lc1UVf-VE",
+    status: "running", created_at: "2026-11-25T10:00:00Z", candidates: 0,
+    error: null, source_type: "youtube", own_content: true, stage: "ingest",
+    progress_pct: 4.2, eta_s: null, demo: false, blocked_by: null,
+    failed_stage: null, started_at: "2026-11-25T10:00:05Z", finished_at: null,
+    duration_s: null, queue_position: null, queue_priority: 0,
+    error_title: null, error_action: null, error_code: null,
+    download_speed_bps: 1614807, download_eta_s: 33,
+    downloaded_bytes: 42846702, download_total_bytes: 101292441,
+    stages: [], worker_runs: [],
+    source_license: "own", source_title: "", source_channel: "", attribution_text: null,
+  });
+  assert.equal(job.download_speed_bps, 1614807);
+  assert.equal(job.download_eta_s, 33);
+  assert.equal(job.downloaded_bytes, 42846702);
+  assert.equal(job.download_total_bytes, 101292441);
+  const bare = normalizeJob({ id: "job-2", status: "pending" });
+  assert.equal(bare.download_speed_bps, null);
+  assert.equal(bare.download_eta_s, null);
+});
+
 test("normalizeSettings keeps the ffmpeg version when present", () => {
   const s = normalizeSettings({
     dry_run: true, dry_run_source: "env", default_privacy: {}, default_platforms: [],

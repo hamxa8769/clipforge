@@ -34,6 +34,10 @@ argv = sys.argv[1:]
 with open(log_path, "a", encoding="utf-8") as fh:
     fh.write(json.dumps(argv) + "\\n")
 
+if argv == ["--version"]:
+    print("2026.11.23")
+    sys.exit(0)
+
 if "--simulate" in argv:
     print(json.dumps({"id": "M7lc1UVf-VE", "title": "Fake video",
                       "duration": 120, "is_live": False, "_type": "video"}))
@@ -119,15 +123,18 @@ def _argv_runs(tmp_path: Path) -> list[list[str]]:
 
 
 def _download_runs(tmp_path: Path) -> list[list[str]]:
-    return [a for a in _argv_runs(tmp_path) if "--simulate" not in a]
+    return [a for a in _argv_runs(tmp_path) if "--simulate" not in a and "--version" not in a]
 
 
 def test_stall_once_is_retried_and_succeeds(tmp_path: Path, fake_ytdlp: Path, monkeypatch) -> None:
-    """First download stalls → one automatic retry → the job succeeds.
+    """First download stalls → the ladder escalates to the next rung
+    (Android client) and the job succeeds.
 
     The retry reuses the same download dir (same ``-o`` template), so
     yt-dlp resumes the partial fragments instead of starting over.
-    """
+    (v0.11.1: a stall with zero progress escalates instead of
+    repeating the identical command — the fake stalls only the first
+    run, so the Android rung succeeds here.)"""
     monkeypatch.setenv("FAKE_YTDLP_MODE", "stall-once")
     started = time.monotonic()
     info = ingest_youtube(LIVE_URL, own_content=True, out_dir=tmp_path / "uploads")
@@ -141,26 +148,32 @@ def test_stall_once_is_retried_and_succeeds(tmp_path: Path, fake_ytdlp: Path, mo
 def test_stall_twice_fails_and_says_it_was_retried(
     tmp_path: Path, fake_ytdlp: Path, monkeypatch
 ) -> None:
-    """Two stalls → the job fails, and the message says the retry
-    already happened, so the user is not told to "just retry" what
-    the app already tried."""
+    """Every rung stalls → the job fails, and the message names the
+    rungs that were tried, so the user is not told to "just retry"
+    what the app already tried several ways."""
     monkeypatch.setenv("FAKE_YTDLP_MODE", "stall-always")
     started = time.monotonic()
     with pytest.raises(IngestError) as excinfo:
         ingest_youtube(LIVE_URL, own_content=True, out_dir=tmp_path / "uploads")
     assert time.monotonic() - started < 30
     assert excinfo.value.code == "download_stalled"
-    assert "retried once" in str(excinfo.value)
-    assert len(_download_runs(tmp_path)) == 2
+    assert "Tried 5 download(s)" in str(excinfo.value)
+    assert "web/" in str(excinfo.value) and "android/" in str(excinfo.value)
+    downloads = _download_runs(tmp_path)
+    assert len(downloads) == 5
+    # No rung is repeated identically: each run is a different rung.
+    assert len({tuple(d) for d in downloads}) == 5
 
 
 def test_plain_error_action_names_the_automatic_retry() -> None:
-    """The job-page action for a stall no longer pretends no retry
-    happened (v0.11.0): ingest retries once before failing."""
+    """The job-page action for a stall no longer pretends a single
+    retry happened (v0.11.1): ingest tries the ladder (web, Android,
+    lower quality) before failing, and points at browser cookies."""
     from clipforge.errors import plain_error
 
     mapped = plain_error(
         IngestError("The download stalled — no data arrived.", code="download_stalled")
     )
     assert mapped["code"] == "download_stalled"
-    assert "retried" in mapped["action"]
+    assert "tried" in mapped["action"]
+    assert "browser cookies" in mapped["action"]

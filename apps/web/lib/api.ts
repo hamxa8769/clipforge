@@ -158,6 +158,9 @@ export interface Job {
   stage: string | null; progress_pct: number; eta_s: number | null; demo: boolean; blocked_by: string | null;
   /** Failed stage + run timing (null when the job never ran). */ failed_stage: string | null;
   started_at: string | null; finished_at: string | null; duration_s: number | null;
+  /** v0.11.1 live download progress (ingest stage): speed / ETA / bytes. */
+  download_speed_bps: number | null; download_eta_s: number | null;
+  downloaded_bytes: number | null; download_total_bytes: number | null;
   /** v0.9.0 job queue: honest queue position (null unless pending /
    * queued), user-priority flag, and the plain-language failure
    * (title / what-to-do / code) when the job failed. */
@@ -346,6 +349,10 @@ export function normalizeJob(raw: unknown): Job {
     started_at: asOptString(r.started_at),
     finished_at: asOptString(r.finished_at),
     duration_s: asOptNumber(r.duration_s),
+    download_speed_bps: asOptNumber(r.download_speed_bps),
+    download_eta_s: asOptNumber(r.download_eta_s),
+    downloaded_bytes: asOptNumber(r.downloaded_bytes),
+    download_total_bytes: asOptNumber(r.download_total_bytes),
     queue_position: typeof r.queue_position === "number" ? r.queue_position : null,
     queue_priority: typeof r.queue_priority === "number" ? r.queue_priority : 0,
     error_title: asOptString(r.error_title),
@@ -628,9 +635,24 @@ export async function runScheduler(dryRun = true): Promise<ApiResult> {
  * ("only failed / blocked jobs can be retried") or refresh the job detail
  * from `data`. Null when the job has no id.
  */
-export async function retryJob(job: Job): Promise<ApiResult | null> {
+export async function retryJob(job: Job, opts?: { youtubeCookiesBrowser?: string }): Promise<ApiResult | null> {
   if (!job.id) return null;
-  return apiPostJson(`/jobs/${encodeURIComponent(job.id)}/retry`);
+  const query = opts?.youtubeCookiesBrowser
+    ? `?youtube_cookies_browser=${encodeURIComponent(opts.youtubeCookiesBrowser)}`
+    : "";
+  return apiPostJson(`/jobs/${encodeURIComponent(job.id)}/retry${query}`);
+}
+
+/**
+ * Test the chosen browser's YouTube cookies: POST
+ * /settings/test-youtube-cookies — runs the metadata probe with
+ * --cookies-from-browser. Only the browser name is sent, never a
+ * cookie value.
+ */
+export async function testYoutubeCookies(browser: string): Promise<ApiResult> {
+  // The probe can take a while (web client fails, Android retries) —
+  // give it 60 s instead of the default 5 s.
+  return apiPostJson("/settings/test-youtube-cookies", { browser }, 60000);
 }
 
 /**
@@ -1413,6 +1435,8 @@ export interface AppSettingsView {
   llm: { provider: string; base_url: string; model: string; api_key: MaskedCredential };
   credentials: Record<string, { client_id: MaskedCredential; client_secret: MaskedCredential }>;
   data_dir: string; secret_backend: string;
+  /** v0.11.1: browser yt-dlp reads YouTube cookies from ("" = off). */
+  youtube_cookies_browser: string;
   ffmpeg: { found: boolean; path: string; version: string; install_url: string };
   yt_dlp: { found: boolean; path: string; version: string; install_url: string; broken: boolean; broken_reason: string; source: string };
   monetization_thresholds: { platform: string; program: string; threshold: Record<string, number>; note: string }[];
@@ -1454,6 +1478,7 @@ export function normalizeSettings(raw: unknown): AppSettingsView | null {
     ),
     data_dir: String(r.data_dir ?? ""),
     secret_backend: String(r.secret_backend ?? ""),
+    youtube_cookies_browser: typeof r.youtube_cookies_browser === "string" ? r.youtube_cookies_browser : "",
     ffmpeg: {
       found: ffmpeg.found === true,
       path: String(ffmpeg.path ?? ""),

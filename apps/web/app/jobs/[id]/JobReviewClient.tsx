@@ -22,6 +22,21 @@ import ReviewClient from "./ReviewClient";
 
 interface LogLine { ts: string | null; stage: string; level: string; message: string; }
 
+function formatSpeed(bps: number | null): string {
+  if (!bps) return "";
+  if (bps >= 1024 * 1024) return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`;
+  if (bps >= 1024) return `${(bps / 1024).toFixed(0)} KB/s`;
+  return `${bps} B/s`;
+}
+
+function formatEta(etaS: number | null): string {
+  if (etaS === null || etaS === undefined) return "";
+  const s = Math.round(etaS);
+  if (s >= 3600) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  if (s >= 60) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  return `${s}s`;
+}
+
 export default function JobReviewClient({ id }: { id: string }) {
   const [job, setJob] = useState<Job>(demoJobs.find((j) => j.id === id) ?? demoJobs[0]);
   const [candidates, setCandidates] = useState<Candidate[]>(
@@ -35,6 +50,10 @@ export default function JobReviewClient({ id }: { id: string }) {
   const [retrying, setRetrying] = useState(false);
   const [controlling, setControlling] = useState(false);
   const [logs, setLogs] = useState<LogLine[] | null>(null);
+  // "Retry with browser cookies" (v0.11.1): offered when a YouTube
+  // job failed with a bot-check — the browser the user is signed
+  // into YouTube with. Only the name is ever sent.
+  const [cookiesBrowser, setCookiesBrowser] = useState("chrome");
 
   useEffect(() => {
     let cancelled = false;
@@ -118,6 +137,30 @@ export default function JobReviewClient({ id }: { id: string }) {
     setRetryNote("Job re-queued — the same job is running again (old candidates dropped and re-derived; stage history kept).");
   }
 
+  async function onRetryWithCookies() {
+    if (!cookiesBrowser) return;
+    setRetrying(true);
+    setRetryNote(null);
+    if (!live) {
+      setJob((j) => ({ ...j, status: "pending", error: null, failed_stage: null }));
+      setRetryNote("Retry simulated locally (demo mode: server not answering). A live retry re-runs this job with your browser's YouTube cookies.");
+      setRetrying(false);
+      return;
+    }
+    const res = await retryJob(job, { youtubeCookiesBrowser: cookiesBrowser });
+    setRetrying(false);
+    if (res === null) {
+      setRetryNote("Cannot retry: this job has no id.");
+      return;
+    }
+    if (!res.ok) {
+      setRetryNote(`Retry failed: ${res.error ?? `HTTP ${res.status}`}.`);
+      return;
+    }
+    if (res.data) setJob(normalizeJob(res.data));
+    setRetryNote(`Job re-queued with ${cookiesBrowser}'s YouTube cookies — the download will retry using your signed-in browser session.`);
+  }
+
   // v0.9.0 job control: pause / resume / cancel that actually take
   // effect (API-CONTRACT.md §6b). A running job pauses between stages
   // / clips; a cancel kills the render and the job lands in
@@ -181,11 +224,18 @@ export default function JobReviewClient({ id }: { id: string }) {
               only when the server reports no progress yet (0). */}
           {(() => {
             const progress = job.progress_pct > 0 ? Math.round(job.progress_pct) : pipelineProgress(job.status);
+            // v0.11.1: while a YouTube download is running, show the
+            // live speed + ETA the worker reports instead of a blind
+            // percentage.
+            const downloading = running && job.download_speed_bps !== null && job.download_speed_bps !== undefined && job.download_speed_bps > 0;
+            const downloadText = downloading
+              ? ` · Downloading ${formatSpeed(job.download_speed_bps)}${job.download_eta_s !== null && job.download_eta_s !== undefined ? ` · ETA ${formatEta(job.download_eta_s)}` : ""}`
+              : "";
             return (
               <>
                 <ProgressBar value={failed ? 0 : progress} tone={failed ? "danger" : progress >= 100 ? "success" : "default"} />
                 <p className="mt-1.5 text-xs text-neutral-500">
-                  {failed ? "Failed — see the error below." : paused ? "Paused — resume to continue from where it stopped, nothing is re-done." : queued ? (job.queue_position ? `Queued — position ${job.queue_position}, waiting for the worker. Only one job runs at a time.` : "Queued — waiting for the worker. Only one job runs at a time.") : `${progress}% complete · ${job.candidates} clip candidate(s) so far`}
+                  {failed ? "Failed — see the error below." : paused ? "Paused — resume to continue from where it stopped, nothing is re-done." : queued ? (job.queue_position ? `Queued — position ${job.queue_position}, waiting for the worker. Only one job runs at a time.` : "Queued — waiting for the worker. Only one job runs at a time.") : `${progress}% complete · ${job.candidates} clip candidate(s) so far${downloadText}`}
                   {live && PROCESSING_STATUSES.includes(job.status) ? " · live, updating every 10s" : ""}
                 </p>
               </>
@@ -197,6 +247,31 @@ export default function JobReviewClient({ id }: { id: string }) {
             <ErrorBanner message={`Job failed: ${job.error_title ? `${job.error_title} — ${job.error}` : job.error}`} />
             {job.error_action && (
               <p className="mt-2 text-sm text-neutral-300">{job.error_action}</p>
+            )}
+            {job.error_code === "youtube_bot_check" && (
+              <div className="mt-3 space-y-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+                <p className="text-sm text-amber-100">
+                  YouTube blocked this download. Retry it with the cookies from the browser you&apos;re signed into
+                  YouTube with — your cookies stay on this computer and are read by yt-dlp at download time.
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <label htmlFor="job-cookies-browser" className="text-sm text-neutral-200">Browser</label>
+                  <select
+                    id="job-cookies-browser"
+                    value={cookiesBrowser}
+                    onChange={(e) => setCookiesBrowser(e.target.value)}
+                    disabled={retrying || !live}
+                    className="rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm text-neutral-200 disabled:opacity-50"
+                  >
+                    {["chrome", "edge", "firefox", "brave", "opera", "vivaldi", "chromium"].map((b) => (
+                      <option key={b} value={b}>{b === "chrome" ? "Chrome" : b === "edge" ? "Edge" : b === "firefox" ? "Firefox" : b === "brave" ? "Brave" : b === "opera" ? "Opera" : b === "vivaldi" ? "Vivaldi" : "Chromium"}</option>
+                    ))}
+                  </select>
+                  <PrimaryButton onClick={() => void onRetryWithCookies()} disabled={retrying || !live}>
+                    {retrying ? "Retrying…" : "Retry with browser cookies"}
+                  </PrimaryButton>
+                </div>
+              </div>
             )}
             <p className="mt-2 text-xs text-neutral-500">
               {job.failed_stage ? `Failed stage: ${job.failed_stage}. ` : ""}

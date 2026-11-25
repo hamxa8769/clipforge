@@ -186,6 +186,12 @@ class AppSettings:
     # Path of the yt-dlp binary installed by the one-click installer
     # ("" = none installed; same fallback as ffmpeg_path).
     yt_dlp_path: str = ""
+    # YouTube browser cookies (v0.11.1): the browser yt-dlp reads
+    # signed-in YouTube cookies from (``--cookies-from-browser``) when
+    # YouTube bot-blocks a download. "" = off. Only the browser *name*
+    # is stored — never a cookie value. See
+    # clipforge.ingest.YOUTUBE_COOKIES_BROWSERS.
+    youtube_cookies_browser: str = ""
     # First-run onboarding progress (see DEFAULT_ONBOARDING).
     onboarding: dict[str, object] = field(default_factory=lambda: dict(DEFAULT_ONBOARDING))
 
@@ -218,6 +224,15 @@ class AppSettings:
             for k, v in settings.llm_models.items()
             if k in _LLM_PROVIDERS and isinstance(v, str) and v and len(v) <= 120
         }
+        # YouTube cookies browser (v0.11.1): only a known browser name
+        # (or "" = off) is kept; anything else is dropped, never stored.
+        from clipforge.ingest import (  # noqa: PLC0415 (lazy, like llm above)
+            normalize_youtube_cookies_browser,
+        )
+
+        settings.youtube_cookies_browser = normalize_youtube_cookies_browser(
+            settings.youtube_cookies_browser
+        )
         return settings
 
 
@@ -439,6 +454,7 @@ class SettingsStore:
             },
             "data_dir": str(self.data_dir.resolve()),
             "secret_backend": self.secrets.backend,
+            "youtube_cookies_browser": settings.youtube_cookies_browser,
             "ffmpeg": self._cached_tool_info("ffmpeg", settings.ffmpeg_path),
             "yt_dlp": self._cached_tool_info("yt_dlp", settings.yt_dlp_path),
             "monetization_thresholds": [

@@ -48,6 +48,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -56,6 +57,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -73,7 +75,8 @@ class IngestError(ValueError):
     """Raised when a source cannot be ingested (bad file, bad URL, ...).
 
     ``code`` (v0.10.3) is a short machine-readable reason —
-    ``youtube_unavailable``, ``youtube_bot_check``, ``youtube_live``,
+    ``youtube_unavailable``, ``youtube_bot_check``,
+    ``youtube_cookies_missing``, ``youtube_live``,
     ``youtube_unreachable``, ``download_stalled``, ``download_timeout``,
     ``youtube_age_gated``, ``youtube_geo_blocked``,
     ``youtube_playlist``, ``download_file_lock`` — so
@@ -516,8 +519,9 @@ YTDLP_DOWNLOAD_TIMEOUT_S = 3600
 #: long — a download that is making progress prints ``[download]``
 #: lines constantly, so silence means it is stuck, not slow.
 YTDLP_STALL_TIMEOUT_S = 180
-#: Keep only the tail of yt-dlp's stderr (error classification only
+#: Keep only the tail of yt-dlp's output (error classification only
 #: needs the last lines; an hour of progress lines must not pile up).
+#: Both streams are kept — the stall path used to drop them entirely.
 _YTDLP_STDERR_KEEP_BYTES = 65536
 
 
@@ -559,12 +563,207 @@ def youtube_unreachable_message() -> str:
     )
 
 
-def download_stalled_message(stalled_s: float) -> str:
-    """yt-dlp produced no output for a long time: stuck, not slow."""
+# ---------------------------------------------------------------------------
+# Download progress (v0.11.1)
+#
+# yt-dlp prints every ``[download]`` progress line to STDOUT (only
+# ``ERROR:`` lines go to stderr). v0.10.3 threw stdout away
+# (``stdout=subprocess.DEVNULL``) and treated stderr silence as "no
+# data arrived", so any download whose media phase lasted longer
+# than the 180 s stall timeout was killed while data was flowing —
+# the user's "stalled twice" job (v0.11.0). The runner below
+# captures both streams, parses the stdout progress lines, and
+# treats *byte growth* (progress lines, or the download dir growing)
+# as activity: a slow download is slow, not stuck, and only a
+# download that makes no byte progress for the whole stall window
+# is killed. The parsed progress is also surfaced live (see
+# :func:`ingest_youtube`'s ``on_progress``) so the Pipeline card
+# shows percent + speed + ETA instead of a blind spinner.
+# ---------------------------------------------------------------------------
+
+#: Browsers yt-dlp can read cookies from (``--cookies-from-browser``).
+#: Only the browser *name* is ever stored or passed — never a cookie
+#: value, never a cookie-file path. ``""`` = off.
+YOUTUBE_COOKIES_BROWSERS = (
+    "",
+    "chrome",
+    "chromium",
+    "firefox",
+    "edge",
+    "brave",
+    "opera",
+    "vivaldi",
+)
+
+
+def normalize_youtube_cookies_browser(value: str | None) -> str:
+    """Validate a cookies-browser choice: known name, else ``""`` (off)."""
+    if not isinstance(value, str):
+        return ""
+    choice = value.strip().lower()
+    return choice if choice in YOUTUBE_COOKIES_BROWSERS else ""
+
+
+@dataclass
+class DownloadProgress:
+    """Live state of one yt-dlp download, parsed from its stdout."""
+
+    downloaded_bytes: int = 0
+    total_bytes: int = 0  # 0 = yt-dlp never told us the total
+    speed_bps: float = 0.0
+    eta_s: float | None = None
+    percent: float | None = None
+
+
+def format_bytes(n: float) -> str:
+    """Human size (``101.3 MB``) for messages; never logs raw counts."""
+    value = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(value) < 1024 or unit == "GB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def _parse_size_bytes(text: str) -> float:
+    """``96.60MiB`` / ``1.54MiB`` / ``512B`` → bytes (0 on garbage)."""
+    match = re.match(r"([\d.]+)\s*([KMGT]?i?B)", text.strip(), re.IGNORECASE)
+    if not match:
+        return 0.0
+    value = float(match.group(1))
+    unit = match.group(2).upper()
+    base = 1024.0 if "I" in unit else 1000.0
+    power = {
+        "B": 0,
+        "KB": 1,
+        "KIB": 1,
+        "MB": 2,
+        "MIB": 2,
+        "GB": 3,
+        "GIB": 3,
+        "TB": 4,
+        "TIB": 4,
+    }.get(unit, 0)
+    return value * (base**power)
+
+
+def _parse_eta_s(parts: tuple[str | None, ...]) -> float | None:
+    """ETA ``(mm, ss, hh?)`` groups from the progress regex → seconds."""
+    nums = [p for p in parts if p is not None]
+    try:
+        values = [int(p) for p in nums]
+    except ValueError:
+        return None
+    if len(values) == 2:  # MM:SS
+        return float(values[0] * 60 + values[1])
+    if len(values) == 3:  # HH:MM:SS
+        return float(values[0] * 3600 + values[1] * 60 + values[2])
+    return None
+
+
+# ``[download]  42.3% of  96.60MiB at  1.54MiB/s ETA 00:33`` — speed and
+# ETA are optional (yt-dlp omits them on the first lines).
+_PROGRESS_RE = re.compile(
+    r"\[download\]\s+(\d+(?:\.\d+)?)% of\s+~?\s*([\d.]+[KMGT]?i?B)"
+    r"(?:\s+at\s+([\d.]+[KMGT]?i?B)/s)?(?:\s+ETA\s+(\d+):(\d+)(?::(\d+))?)?",
+    re.IGNORECASE,
+)
+# ``[download] 100% of 96.60MiB in 00:01:02 at 1.54MiB/s`` — the
+# finished line has ``in <time>`` instead of ``ETA``.
+_PROGRESS_DONE_RE = re.compile(
+    r"\[download\]\s+100(?:\.0+)?%\s+of\s+~?\s*([\d.]+[KMGT]?i?B)"
+    r"\s+in\s+(\d+):(\d+)(?::(\d+))?(?:\s+at\s+([\d.]+[KMGT]?i?B)/s)?",
+    re.IGNORECASE,
+)
+
+
+def parse_ytdlp_progress_line(line: str) -> DownloadProgress | None:
+    """Parse one yt-dlp stdout line into progress, or None.
+
+    Only ``[download] NN% of SIZE ...`` lines carry progress;
+    ``[download] Destination: ...`` / ``[Merger] ...`` / extraction
+    lines return None. ``downloaded_bytes`` is derived from the
+    percent of the total, so it only ever grows while the file does.
+    """
+    text = (line or "").strip()
+    if "[download]" not in text:
+        return None
+    done = _PROGRESS_DONE_RE.search(text)
+    if done:
+        total = _parse_size_bytes(done.group(1))
+        speed = _parse_size_bytes(done.group(5)) if done.group(5) else 0.0
+        return DownloadProgress(
+            downloaded_bytes=int(total),
+            total_bytes=int(total),
+            speed_bps=speed,
+            eta_s=0.0,
+            percent=100.0,
+        )
+    match = _PROGRESS_RE.search(text)
+    if not match:
+        return None
+    total = _parse_size_bytes(match.group(2))
+    percent = float(match.group(1))
+    downloaded = int(total * percent / 100.0) if total else 0
+    speed = _parse_size_bytes(match.group(3)) if match.group(3) else 0.0
+    eta = _parse_eta_s((match.group(4), match.group(5), match.group(6)))
+    return DownloadProgress(
+        downloaded_bytes=downloaded,
+        total_bytes=int(total),
+        speed_bps=speed,
+        eta_s=eta,
+        percent=percent,
+    )
+
+
+def has_sabr_warning(text: str) -> bool:
+    """True when yt-dlp says YouTube served SABR-only formats.
+
+    The Android client then yields no downloadable ``https`` formats
+    ("Some android client https formats have been skipped as they are
+    missing a URL. YouTube may have enabled the SABR-only streaming
+    experiment ...") — a distinct condition, not a generic failure:
+    the ladder should jump straight to the single-file ``best``
+    selector instead of burning another stall window on DASH.
+    """
+    lowered = (text or "").lower()
+    return "sabr" in lowered and "missing a url" in lowered
+
+
+def download_stalled_message(stalled_s: float, progress: DownloadProgress | None = None) -> str:
+    """A download that made no byte progress for ``stalled_s``.
+
+    When the download *was* progressing, the message says so — bytes
+    downloaded, percent, and speed — instead of the v0.10.3 wording
+    ("no data arrived ... check your internet connection"), which was
+    wrong for a slow-but-alive download and for a YouTube-side block.
+    """
+    if progress is not None and progress.downloaded_bytes > 0:
+        total = f" of {format_bytes(progress.total_bytes)}" if progress.total_bytes else ""
+        percent = f" ({progress.percent:.0f}%)" if progress.percent is not None else ""
+        speed = f" at {format_bytes(progress.speed_bps)}/s" if progress.speed_bps else ""
+        return (
+            f"The download stalled — it had downloaded "
+            f"{format_bytes(progress.downloaded_bytes)}{total}{percent}{speed}, "
+            f"then made no progress for {int(stalled_s)}s, so it was stopped "
+            "instead of waiting indefinitely. Retry the job — the download "
+            "resumes where it stopped."
+        )
     return (
-        f"The download stalled — no data arrived from YouTube for "
-        f"{int(stalled_s)}s, so it was stopped instead of waiting "
-        "indefinitely. Check your internet connection and retry the job."
+        f"The download stalled — it made no progress for {int(stalled_s)}s, "
+        "so it was stopped instead of waiting indefinitely. Retry the job — "
+        "if it keeps stalling, try a shorter video."
+    )
+
+
+def youtube_cookies_missing_message() -> str:
+    """No usable browser cookies were found for the chosen browser."""
+    return (
+        "ClipForge couldn't read YouTube cookies from the browser you "
+        "picked — the browser may not be installed on this computer, or "
+        "you're not signed into YouTube in it. Pick the browser you're "
+        "signed into YouTube with in Settings → Downloads & tools, or "
+        "turn browser cookies off and retry."
     )
 
 
@@ -580,6 +779,8 @@ def classify_ytdlp_error(stderr: str) -> str | None:
     text = (stderr or "").lower().replace("\u2019", "'").replace("\u2018", "'")
     if "confirm you're not a bot" in text or "confirm you are not a bot" in text:
         return "youtube_bot_check"
+    if "cookies database" in text or ("could not find" in text and "cookies" in text):
+        return "youtube_cookies_missing"
     if "private video" in text or "this video is private" in text:
         return "youtube_unavailable"
     if (
@@ -629,6 +830,8 @@ def _ytdlp_error(url: str, stderr: str) -> IngestError:
     code = classify_ytdlp_error(stderr)
     if code == "youtube_bot_check":
         return IngestError(youtube_bot_check_message(), code=code)
+    if code == "youtube_cookies_missing":
+        return IngestError(youtube_cookies_missing_message(), code=code)
     if code == "youtube_unavailable":
         return IngestError(youtube_unavailable_message(url), code=code)
     if code == "youtube_age_gated":
@@ -675,6 +878,7 @@ def _ytdlp_simulate(
     url: str,
     *,
     android_client: bool = False,
+    cookies_from_browser: str | None = None,
     timeout: float = PREFLIGHT_YTDLP_TIMEOUT_S,
 ) -> dict:
     """Metadata-only yt-dlp probe: the video's info dict, no download.
@@ -697,6 +901,11 @@ def _ytdlp_simulate(
     ]
     if android_client:
         cmd += ["--extractor-args", "youtube:player_client=android"]
+    if cookies_from_browser:
+        # Only the browser name is passed — yt-dlp reads the cookies
+        # itself from the user's own browser profile; no cookie value
+        # ever enters a command line, a log, or a job record.
+        cmd += ["--cookies-from-browser", cookies_from_browser]
     cmd.append(url)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
@@ -715,7 +924,7 @@ def _ytdlp_simulate(
     raise _ytdlp_error(url, proc.stderr)
 
 
-def check_youtube_available(url: str, yt_dlp: str) -> dict:
+def check_youtube_available(url: str, yt_dlp: str, cookies_from_browser: str | None = None) -> dict:
     """Fail-fast pre-flight: is this YouTube link a downloadable video?
 
     oEmbed first (a dead link answers 404 in <1 s); then a
@@ -723,6 +932,9 @@ def check_youtube_available(url: str, yt_dlp: str) -> dict:
     (age-gate, geo-block, live stream, bot-check). A bot-check on the
     web client gets one retry on YouTube's Android player client,
     which answers where the web client is refused from a flagged IP.
+    The same Android retry applies when the web probe fails as
+    unreachable (a dropped webpage fetch): the Android probe succeeds
+    in exactly that situation, and the download after it can too.
     Returns the probe's info dict (title / duration / ...) on success;
     raises :class:`IngestError` with a plain-language, classified
     message otherwise. A dead link fails here in seconds — it never
@@ -731,10 +943,12 @@ def check_youtube_available(url: str, yt_dlp: str) -> dict:
     if _oembed_status(url) == "unavailable":
         raise IngestError(youtube_unavailable_message(url), code="youtube_unavailable")
     try:
-        info = _ytdlp_simulate(yt_dlp, url)
+        info = _ytdlp_simulate(yt_dlp, url, cookies_from_browser=cookies_from_browser)
     except IngestError as exc:
-        if exc.code == "youtube_bot_check":
-            info = _ytdlp_simulate(yt_dlp, url, android_client=True)
+        if exc.code in {"youtube_bot_check", "youtube_unreachable"}:
+            info = _ytdlp_simulate(
+                yt_dlp, url, android_client=True, cookies_from_browser=cookies_from_browser
+            )
         else:
             raise
     if info.get("_type") == "playlist":
@@ -748,61 +962,148 @@ def check_youtube_available(url: str, yt_dlp: str) -> dict:
     return info
 
 
+def _dir_size_bytes(path: Path | None) -> int:
+    """Total bytes of the files directly in ``path`` (0 when unknown)."""
+    if path is None:
+        return 0
+    try:
+        return sum(entry.stat().st_size for entry in path.iterdir() if entry.is_file())
+    except OSError:
+        return 0
+
+
+def _attach_run_output(
+    err: IngestError, progress: DownloadProgress, stderr: str, stdout: str
+) -> IngestError:
+    """Attach the preserved yt-dlp output to a failure, for the caller.
+
+    The stall path used to drop this evidence entirely; the classifier
+    and the final message both need it (a watchdog kill whose tail
+    says "confirm you're not a bot" is a bot-check, not a stall).
+    Only the tail is kept (see ``_YTDLP_STDERR_KEEP_BYTES``).
+    """
+    err.download_progress = progress  # type: ignore[attr-defined]
+    err.stderr_text = stderr  # type: ignore[attr-defined]
+    err.stdout_text = stdout  # type: ignore[attr-defined]
+    return err
+
+
 def _run_ytdlp_bounded(
     cmd: list[str],
     control: JobControl | None,
     *,
     timeout: float = YTDLP_DOWNLOAD_TIMEOUT_S,
     stall_timeout: float = YTDLP_STALL_TIMEOUT_S,
-) -> tuple[int, str]:
+    on_progress: Callable[[DownloadProgress], None] | None = None,
+    watch_dir: Path | None = None,
+) -> tuple[int, str, str]:
     """Run yt-dlp, killing it on cancel, total timeout, or a stall.
 
-    A reader thread drains stderr (yt-dlp prints ``[download]``
-    progress lines constantly while it is actually downloading) and
-    stamps the last output time; the main loop kills the process when
-    no output arrives for ``stall_timeout`` — the v0.10.2 hang, where
-    a stalled connection sat silent until the 3600 s outer timeout,
-    now ends in minutes with a "download stalled" error instead.
-    Returns ``(returncode, stderr_text)``. Raises :class:`IngestError`
+    v0.11.1 — the stall watchdog watches the right stream. yt-dlp
+    prints ``[download]`` progress to **stdout** (only ``ERROR:``
+    lines go to stderr), so both streams are captured and drained on
+    reader threads. Activity is *byte growth*, not just "any output":
+
+    * before the first progress line (extraction), any output from
+      either stream resets the clock — extraction prints
+      ``[youtube] ...`` lines up front;
+    * once bytes are flowing, only byte growth resets it — a progress
+      line with a larger ``downloaded_bytes``, or the download dir
+      growing (the ffmpeg merge phase prints no progress lines but
+      writes the output file). Retry warnings / repeated lines with
+      no byte growth do not count as alive.
+
+    A slow download is therefore slow, not stuck: a 101 MB file at
+    300 KiB/s takes ~340 s and finishes, where v0.10.3 killed it at
+    180 s of stderr silence. Returns ``(returncode, stderr, stdout)``
+    — the stdout tail is returned (not discarded) so the caller can
+    classify failures from it. Raises :class:`IngestError`
     (``download_stalled`` / ``download_timeout``) instead of
     ``TimeoutError``, so the worker reports the real stage error;
-    raises ``JobCancelled`` on a user cancel.
+    raises ``JobCancelled`` on a user cancel. A stall whose preserved
+    output says bot-check (or cookies-missing) is raised with that
+    code instead of ``download_stalled``. The raised error carries
+    ``download_progress`` / ``stderr_text`` / ``stdout_text``.
     """
     from clipforge.errors import JobCancelled  # noqa: PLC0415 (avoid cycle)
 
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, **popen_kwargs()
-    )
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **popen_kwargs())
+    assert proc.stdout is not None
     assert proc.stderr is not None
     if control is not None:
         # A user cancel kills yt-dlp through the registered process
         # (JobControl.request_cancel → kill_process), as before; the
         # poll loop below is the second path that notices the flag.
         control.register_process(proc)
-    chunks: list[bytes] = []
-    kept = {"n": 0}
-    last_output = {"t": time.monotonic()}
+    started = time.monotonic()
     lock = threading.Lock()
+    progress = DownloadProgress()
+    last_output = {"t": started}
+    last_byte_growth = {"t": started}
+    last_size = {"n": _dir_size_bytes(watch_dir)}
+    last_file_growth = {"t": started}
+    out_chunks: list[bytes] = []
+    err_chunks: list[bytes] = []
+    kept = {"out": 0, "err": 0}
 
-    def _reader() -> None:
+    def _reader(stream, is_stdout: bool) -> None:
+        chunks = out_chunks if is_stdout else err_chunks
+        key = "out" if is_stdout else "err"
+        line_buf = b""
         try:
             while True:
-                data = proc.stderr.read1(4096)
+                data = stream.read1(4096)
                 if not data:
                     return
                 with lock:
                     chunks.append(data)
-                    kept["n"] += len(data)
-                    while kept["n"] > _YTDLP_STDERR_KEEP_BYTES and len(chunks) > 1:
-                        kept["n"] -= len(chunks.pop(0))
-                last_output["t"] = time.monotonic()
+                    kept[key] += len(data)
+                    while kept[key] > _YTDLP_STDERR_KEEP_BYTES and len(chunks) > 1:
+                        kept[key] -= len(chunks.pop(0))
+                    last_output["t"] = time.monotonic()
+                if not is_stdout:
+                    continue
+                # Progress lines are ``\\n``-separated with --newline;
+                # without it yt-dlp rewrites with ``\\r`` — split on
+                # either so a partial chunk never hides a line.
+                line_buf += data
+                while True:
+                    sep = re.search(rb"[\r\n]", line_buf)
+                    if sep is None:
+                        break
+                    raw, line_buf = line_buf[: sep.start()], line_buf[sep.end() :]
+                    parsed = parse_ytdlp_progress_line(raw.decode("utf-8", "replace"))
+                    if parsed is None:
+                        continue
+                    with lock:
+                        if parsed.downloaded_bytes > progress.downloaded_bytes:
+                            progress.downloaded_bytes = parsed.downloaded_bytes
+                            last_byte_growth["t"] = time.monotonic()
+                        if parsed.total_bytes:
+                            progress.total_bytes = parsed.total_bytes
+                        if parsed.speed_bps:
+                            progress.speed_bps = parsed.speed_bps
+                        progress.eta_s = parsed.eta_s
+                        if parsed.percent is not None:
+                            progress.percent = parsed.percent
+                        snapshot = DownloadProgress(
+                            downloaded_bytes=progress.downloaded_bytes,
+                            total_bytes=progress.total_bytes,
+                            speed_bps=progress.speed_bps,
+                            eta_s=progress.eta_s,
+                            percent=progress.percent,
+                        )
+                    if on_progress is not None:
+                        on_progress(snapshot)
         except (OSError, ValueError):
             return
 
-    reader = threading.Thread(target=_reader, daemon=True)
-    reader.start()
-    started = time.monotonic()
+    reader_out = threading.Thread(target=_reader, args=(proc.stdout, True), daemon=True)
+    reader_err = threading.Thread(target=_reader, args=(proc.stderr, False), daemon=True)
+    reader_out.start()
+    reader_err.start()
     code: int | None = None
+    failure: IngestError | None = None
     try:
         while True:
             if control is not None and control.is_cancelled:
@@ -814,60 +1115,210 @@ def _run_ytdlp_bounded(
             now = time.monotonic()
             if now - started > timeout:
                 _terminate_process(proc)
-                raise IngestError(
+                failure = IngestError(
                     f"The download ran longer than {int(timeout)}s without "
                     "finishing, so it was stopped. The video may be very "
                     "long or your connection may be too slow — try a "
                     "shorter video, or retry when your connection is better.",
                     code="download_timeout",
                 )
-            if now - last_output["t"] > stall_timeout:
+                break
+            if watch_dir is not None:
+                size = _dir_size_bytes(watch_dir)
+                if size > last_size["n"]:
+                    last_size["n"] = size
+                    last_file_growth["t"] = now
+            if progress.downloaded_bytes > 0:
+                idle_for = now - max(last_byte_growth["t"], last_file_growth["t"])
+            else:
+                idle_for = now - last_output["t"]
+            if idle_for > stall_timeout:
                 _terminate_process(proc)
-                raise IngestError(
-                    download_stalled_message(now - last_output["t"]),
+                failure = IngestError(
+                    download_stalled_message(idle_for, progress),
                     code="download_stalled",
                 )
+                break
             time.sleep(0.1)
     finally:
         if control is not None:
             control.register_process(None)
-        reader.join(timeout=5)
-    assert code is not None
+        reader_out.join(timeout=5)
+        reader_err.join(timeout=5)
     with lock:
-        stderr = b"".join(chunks).decode("utf-8", "replace")
-    return code, stderr
+        stderr = b"".join(err_chunks).decode("utf-8", "replace")
+        stdout = b"".join(out_chunks).decode("utf-8", "replace")
+    if failure is not None:
+        _attach_run_output(failure, progress, stderr, stdout)
+        if failure.code == "download_stalled":
+            # The preserved output may say more than "stalled": a
+            # watchdog kill whose tail is a bot-check (or a missing
+            # cookies database) is that failure, not a stall.
+            classified = classify_ytdlp_error(stderr + "\n" + stdout)
+            if classified == "youtube_bot_check":
+                failure = _attach_run_output(
+                    IngestError(youtube_bot_check_message(), code=classified),
+                    progress,
+                    stderr,
+                    stdout,
+                )
+            elif classified == "youtube_cookies_missing":
+                failure = _attach_run_output(
+                    IngestError(youtube_cookies_missing_message(), code=classified),
+                    progress,
+                    stderr,
+                    stdout,
+                )
+        raise failure
+    assert code is not None
+    return code, stderr, stdout
 
 
-def _download_with_stall_retry(cmd: list[str], control: JobControl | None) -> tuple[int, str]:
-    """Run the download, retrying once automatically on a stall.
+def _download_with_stall_retry(
+    cmd: list[str],
+    control: JobControl | None,
+    *,
+    on_progress: Callable[[DownloadProgress], None] | None = None,
+    watch_dir: Path | None = None,
+    deadline: float | None = None,
+) -> tuple[int, str, str]:
+    """Run one download rung, retrying once on a stall — with proof.
 
-    A stall (no output from yt-dlp for ``YTDLP_STALL_TIMEOUT_S``) used
-    to fail the job outright — the user's "Memes" agent job died this
-    way after 223 s. Now the first stall gets one automatic retry in
-    the *same* download dir: yt-dlp resumes the partial fragments it
-    already wrote (``--continue`` is its default), so a transient
-    network stall costs seconds, not a full re-download and not the
-    job. Only a second stall fails, and its message says the retry
-    already happened, so the user is not told to "just retry" what
-    the app already tried.
+    v0.11.1: the identical-command retry is reserved for stalls with
+    *proven byte progress* (a partial file was growing, so resuming
+    the same command in the same dir can finish it). A stall where
+    nothing ever arrived is not retried identically — the caller
+    escalates to the next ladder rung instead (a deterministic
+    YouTube-side block fails the same way twice, burning a second
+    stall window). Returns ``(returncode, stderr, stdout)``; a stall
+    raises :class:`IngestError` with ``download_progress`` /
+    ``stderr_text`` / ``stdout_text`` attached. ``deadline`` (a
+    ``time.monotonic()`` timestamp) bounds the rung *and* its retry
+    together — the 3600 s outer cap is shared by the whole ladder,
+    not per rung.
     """
+    if deadline is None:
+        deadline = time.monotonic() + YTDLP_DOWNLOAD_TIMEOUT_S
+
+    def _remaining() -> float:
+        return max(1.0, deadline - time.monotonic())  # type: ignore[operator]
+
     try:
-        return _run_ytdlp_bounded(cmd, control, stall_timeout=YTDLP_STALL_TIMEOUT_S)
+        return _run_ytdlp_bounded(
+            cmd,
+            control,
+            timeout=_remaining(),
+            stall_timeout=YTDLP_STALL_TIMEOUT_S,
+            on_progress=on_progress,
+            watch_dir=watch_dir,
+        )
     except IngestError as exc:
         if exc.code != "download_stalled":
             raise
-        try:
-            return _run_ytdlp_bounded(cmd, control, stall_timeout=YTDLP_STALL_TIMEOUT_S)
-        except IngestError as retry_exc:
-            if retry_exc.code != "download_stalled":
-                raise
-            raise IngestError(
-                "The download stalled twice — it was retried once "
-                "automatically and still no data arrived from YouTube, "
-                "so it was stopped instead of waiting indefinitely. "
-                "Check your internet connection and retry the job.",
-                code="download_stalled",
-            ) from retry_exc
+        progress = getattr(exc, "download_progress", None)
+        if progress is None or progress.downloaded_bytes <= 0:
+            raise
+        # Bytes were flowing: one same-command resume retry, in the
+        # same dir, so yt-dlp resumes its partial fragments.
+        return _run_ytdlp_bounded(
+            cmd,
+            control,
+            timeout=_remaining(),
+            stall_timeout=YTDLP_STALL_TIMEOUT_S,
+            on_progress=on_progress,
+            watch_dir=watch_dir,
+        )
+
+
+def _verify_ytdlp_runs(yt_dlp: str) -> bool:
+    """True when the resolved yt-dlp binary actually runs.
+
+    ``resolve_yt_dlp_path`` only checks the file exists and is
+    executable — it once returned a ``~/.local/bin/yt-dlp`` whose
+    ``--version`` fails with ``ModuleNotFoundError``. A binary that
+    cannot even print its version fails here as "yt-dlp missing"
+    (with the Install button) instead of dying mid-download.
+    """
+    try:
+        proc = subprocess.run([yt_dlp, "--version"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0 and bool(proc.stdout.strip())
+
+
+@dataclass(frozen=True)
+class _DownloadRung:
+    """One rung of the download fallback ladder (v0.11.1)."""
+
+    label: str  # "web" | "android" | "ios" — what the job log shows
+    format_selector: str
+    extractor_args: str | None  # e.g. "youtube:player_client=android"
+
+
+#: Full-quality DASH selector (video + audio, merged to mp4).
+_FULL_FORMAT = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+
+#: The ladder, in order: web as now, then the Android player client
+#: (which answers where the web client is bot-blocked), then Android
+#: with a single-file selector (no DASH/merge — the smallest, most
+#: robust download), then a capped 720p selector, then iOS. A rung is
+#: tried on *any* failure of the previous one — exit code, stall, or
+#: bot-check — never by repeating the identical command.
+_DOWNLOAD_RUNGS: tuple[_DownloadRung, ...] = (
+    _DownloadRung("web", _FULL_FORMAT, None),
+    _DownloadRung("android", _FULL_FORMAT, "youtube:player_client=android"),
+    _DownloadRung("android", "best", "youtube:player_client=android"),
+    _DownloadRung("android", "best[height<=720]/best", "youtube:player_client=android"),
+    _DownloadRung("ios", _FULL_FORMAT, "youtube:player_client=ios"),
+)
+
+
+def _download_cmd(
+    yt_dlp: str,
+    rung: _DownloadRung,
+    template: str,
+    url: str,
+    cookies_from_browser: str | None = None,
+) -> list[str]:
+    """The yt-dlp download command for one ladder rung."""
+    cmd = [
+        yt_dlp,
+        "--no-playlist",
+        "--newline",
+        "--format",
+        rung.format_selector,
+        "--merge-output-format",
+        "mp4",
+        # Retries with backoff (v0.9.2): yt-dlp's defaults — 3
+        # file-access retries ~10 ms apart — lose to a moment of
+        # antivirus scanning on Windows (the v0.9.1 Error 32 failure).
+        # Explicit values ride out a transient lock; a lock that still
+        # persists is reported in plain language below.
+        "--retries",
+        str(YTDLP_RETRIES),
+        "--fragment-retries",
+        str(YTDLP_FRAGMENT_RETRIES),
+        "--file-access-retries",
+        str(YTDLP_FILE_ACCESS_RETRIES),
+        "--retry-sleep",
+        YTDLP_FILE_ACCESS_RETRY_SLEEP,
+        # v0.10.3: bound every network wait. Without --socket-timeout
+        # a stalled connection hangs yt-dlp indefinitely (the 3601 s
+        # job); with it, a stall fails fast and the retries above (or
+        # the watchdog in _run_ytdlp_bounded) take over.
+        "--socket-timeout",
+        str(YTDLP_SOCKET_TIMEOUT_S),
+        "--extractor-retries",
+        str(YTDLP_EXTRACTOR_RETRIES),
+        "-o",
+        template,
+    ]
+    if rung.extractor_args:
+        cmd += ["--extractor-args", rung.extractor_args]
+    if cookies_from_browser:
+        cmd += ["--cookies-from-browser", cookies_from_browser]
+    cmd.append(url)
+    return cmd
 
 
 def ingest_youtube(
@@ -879,6 +1330,8 @@ def ingest_youtube(
     data_dir: str | Path | None = None,
     control: JobControl | None = None,
     job_id: str | None = None,
+    on_progress: Callable[[DownloadProgress], None] | None = None,
+    on_attempt: Callable[[dict], None] | None = None,
 ) -> SourceInfo:
     """Download a YouTube video **only for the caller's own content**.
 
@@ -908,9 +1361,16 @@ def ingest_youtube(
     oEmbed, then a metadata-only yt-dlp probe — so a removed / private
     link fails in seconds with a classified plain-language error
     instead of burning the download timeout. The download itself runs
-    under :func:`_run_ytdlp_bounded` (socket timeout + stall watchdog;
-    3600 s only as a last resort) with one Android-client retry when
-    the web client is bot-blocked.
+    under :func:`_run_ytdlp_bounded` (socket timeout + byte-growth
+    stall watchdog; 3600 s only as a last resort) and escalates
+    through the fallback ladder (web → Android → Android ``best`` →
+    Android 720p → iOS) on any failure mode.
+
+    ``on_progress`` receives a :class:`DownloadProgress` snapshot on
+    every parsed progress line, so the caller can show percent +
+    speed + ETA live. ``on_attempt`` receives one dict per ladder
+    attempt (client, format, exit code, bytes downloaded, speed,
+    error code) for the job log.
     """
     if not own_content:
         raise OwnContentRequiredError(
@@ -920,13 +1380,16 @@ def ingest_youtube(
         )
     if not _is_youtube_url(url):
         raise IngestError(f"not a YouTube URL: {url!r}")
+    cookies_from_browser = normalize_youtube_cookies_browser(cookies_from_browser)
     yt_dlp = resolve_yt_dlp_path(data_dir)
-    if yt_dlp is None:
+    if yt_dlp is None or not _verify_ytdlp_runs(yt_dlp):
         raise IngestError(ytdlp_missing_message())
     # v0.10.3 fail-fast: check the link is a downloadable video BEFORE
     # starting a download. A removed / private link fails here in
     # seconds with a plain-language reason; it never reaches yt-dlp.
-    check_youtube_available(url, yt_dlp)
+    # The chosen browser's cookies are used on the probe too, so a bad
+    # browser choice fails here in seconds — not after a download.
+    check_youtube_available(url, yt_dlp, cookies_from_browser=cookies_from_browser or None)
     dest = Path(out_dir)
     dest.mkdir(parents=True, exist_ok=True)
     video_id = _extract_youtube_id(url)
@@ -934,59 +1397,158 @@ def ingest_youtube(
     dl_dir = _new_download_dir(dest, job_id)
     dl_dir.mkdir(parents=True, exist_ok=True)
     template = str(dl_dir / "%(id)s.%(ext)s")
-    cmd = [
-        yt_dlp,
-        "--no-playlist",
-        "--format",
-        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "--merge-output-format",
-        "mp4",
-        # Retries with backoff (v0.9.2): yt-dlp's defaults — 3
-        # file-access retries ~10 ms apart — lose to a moment of
-        # antivirus scanning on Windows (the v0.9.1 Error 32 failure).
-        # Explicit values ride out a transient lock; a lock that still
-        # persists is reported in plain language below.
-        "--retries",
-        str(YTDLP_RETRIES),
-        "--fragment-retries",
-        str(YTDLP_FRAGMENT_RETRIES),
-        "--file-access-retries",
-        str(YTDLP_FILE_ACCESS_RETRIES),
-        "--retry-sleep",
-        YTDLP_FILE_ACCESS_RETRY_SLEEP,
-        # v0.10.3: bound every network wait. Without --socket-timeout
-        # a stalled connection hangs yt-dlp indefinitely (the 3601 s
-        # job); with it, a stall fails fast and the retries above (or
-        # the watchdog in _run_ytdlp_bounded) take over.
-        "--socket-timeout",
-        str(YTDLP_SOCKET_TIMEOUT_S),
-        "--extractor-retries",
-        str(YTDLP_EXTRACTOR_RETRIES),
-        "-o",
-        template,
-    ]
-    if cookies_from_browser:
-        cmd += ["--cookies-from-browser", cookies_from_browser]
-    cmd.append(url)
+    last_progress = DownloadProgress()
+
+    def _track_progress(snapshot: DownloadProgress) -> None:
+        nonlocal last_progress
+        last_progress = snapshot
+        if on_progress is not None:
+            on_progress(snapshot)
+
+    attempts: list[dict] = []
+
+    def _record_attempt(
+        rung: _DownloadRung,
+        *,
+        returncode: int | None,
+        progress: DownloadProgress,
+        error_code: str | None,
+        duration_s: float,
+    ) -> None:
+        record = {
+            "client": rung.label,
+            "format": rung.format_selector,
+            "returncode": returncode,
+            "downloaded_bytes": progress.downloaded_bytes,
+            "total_bytes": progress.total_bytes,
+            "speed_bps": progress.speed_bps,
+            "error_code": error_code,
+            "duration_s": round(duration_s, 1),
+        }
+        attempts.append(record)
+        if on_attempt is not None:
+            on_attempt(record)
+
+    # The fallback ladder (v0.11.1): every rung shares one 3600 s
+    # deadline. A rung is left behind on any failure — non-zero exit,
+    # stall, or bot-check — and the next rung is tried instead of
+    # repeating the identical command. A failure no rung can fix
+    # (removed / age-gated / geo-blocked / file lock) fails at once.
+    deadline = time.monotonic() + YTDLP_DOWNLOAD_TIMEOUT_S
+    returncode: int | None = None
+    last_combined = ""
+    last_error: IngestError | None = None
+    seen_bot_check = False
+    seen_cookies_missing = False
+    succeeded = False
     try:
-        # One bounded runner for both paths (v0.10.3): the old
-        # subprocess.run(timeout=3600) / wait_for_process(timeout=3600)
-        # pair had no stall detection, so a silent yt-dlp burned the
-        # whole hour and surfaced only as a generic TimeoutError.
-        # v0.11.0: a stall is retried once automatically (same dir, so
-        # yt-dlp resumes its partial fragments) before it fails.
-        returncode, stderr = _download_with_stall_retry(cmd, control)
-        if returncode != 0 and classify_ytdlp_error(stderr) == "youtube_bot_check":
-            # One retry on YouTube's Android player client, which
-            # answers where the web client is bot-blocked from a
-            # flagged IP (verified while building v0.10.3). The
-            # extractor-args go before the URL (the last element).
-            retry_cmd = cmd[:-1] + [
-                "--extractor-args",
-                "youtube:player_client=android",
+        rung_index = 0
+        while rung_index < len(_DOWNLOAD_RUNGS):
+            rung = _DOWNLOAD_RUNGS[rung_index]
+            cmd = _download_cmd(
+                yt_dlp,
+                rung,
+                template,
                 url,
-            ]
-            returncode, stderr = _download_with_stall_retry(retry_cmd, control)
+                cookies_from_browser=cookies_from_browser or None,
+            )
+            attempt_started = time.monotonic()
+            # Fresh progress state per rung, so an attempt record never
+            # reports the previous rung's bytes as its own.
+            last_progress = DownloadProgress()
+            try:
+                returncode, stderr, stdout = _download_with_stall_retry(
+                    cmd,
+                    control,
+                    on_progress=_track_progress,
+                    watch_dir=dl_dir,
+                    deadline=deadline,
+                )
+                attempt_progress = last_progress
+            except IngestError as exc:
+                # Stall / timeout (cancel is JobCancelled, not
+                # IngestError, and propagates untouched). The error
+                # carries the preserved yt-dlp output + progress.
+                attempt_progress = getattr(exc, "download_progress", None) or last_progress
+                combined = getattr(exc, "stderr_text", "") + "\n" + getattr(exc, "stdout_text", "")
+                last_combined = combined
+                last_error = exc
+                if exc.code == "youtube_bot_check":
+                    seen_bot_check = True
+                elif exc.code == "youtube_cookies_missing":
+                    seen_cookies_missing = True
+                _record_attempt(
+                    rung,
+                    returncode=None,
+                    progress=attempt_progress,
+                    error_code=exc.code,
+                    duration_s=time.monotonic() - attempt_started,
+                )
+                if exc.code == "download_timeout":
+                    raise
+                # Stall / bot-check / cookies: escalate to the next
+                # rung. (A stall with proven byte progress already
+                # got its one same-command resume retry inside
+                # _download_with_stall_retry.)
+                rung_index += 1
+                continue
+            last_combined = stderr + "\n" + stdout
+            if returncode == 0:
+                _record_attempt(
+                    rung,
+                    returncode=returncode,
+                    progress=attempt_progress,
+                    error_code=None,
+                    duration_s=time.monotonic() - attempt_started,
+                )
+                succeeded = True
+                break
+            code = classify_ytdlp_error(last_combined)
+            if looks_like_download_lock(last_combined):
+                raise IngestError(download_lock_message(dest.resolve()), code="download_file_lock")
+            if code == "youtube_bot_check":
+                seen_bot_check = True
+            elif code == "youtube_cookies_missing":
+                seen_cookies_missing = True
+            _record_attempt(
+                rung,
+                returncode=returncode,
+                progress=attempt_progress,
+                error_code=code,
+                duration_s=time.monotonic() - attempt_started,
+            )
+            if code in {"youtube_unavailable", "youtube_age_gated", "youtube_geo_blocked"}:
+                raise _ytdlp_error(url, last_combined)
+            if has_sabr_warning(last_combined) and rung_index < 2:
+                # SABR-only formats on this client: the single-file
+                # selector is the rung that can still work — jump
+                # straight to it instead of burning a stall window.
+                rung_index = 2
+                continue
+            rung_index += 1
+        if not succeeded:
+            # Every rung failed: report the most useful reason, not
+            # just the last one. A bot-check seen on any rung beats a
+            # later stall — the stall is usually *caused* by the block.
+            # The final error carries the last progress + preserved
+            # output, like every stall error does.
+            tried = ", ".join(f"{a['client']}/{a['format']}" for a in attempts)
+            if seen_cookies_missing:
+                final = IngestError(
+                    youtube_cookies_missing_message(), code="youtube_cookies_missing"
+                )
+            elif seen_bot_check:
+                final = IngestError(youtube_bot_check_message(), code="youtube_bot_check")
+            elif last_error is not None and last_error.code == "download_stalled":
+                final = IngestError(
+                    f"{last_error} (Tried {len(attempts)} download(s): {tried}.)",
+                    code="download_stalled",
+                )
+            elif last_error is not None:
+                final = last_error
+            else:
+                final = _ytdlp_error(url, last_combined)
+            raise _attach_run_output(final, last_progress, "", last_combined)
     except BaseException:
         # Cancel / timeout / stall (or anything else) mid-download:
         # drop the per-run scratch dir so a cancelled run leaves no
@@ -996,9 +1558,9 @@ def ingest_youtube(
         raise
     if returncode != 0:
         shutil.rmtree(dl_dir, ignore_errors=True)
-        if looks_like_download_lock(stderr):
+        if looks_like_download_lock(last_combined):
             raise IngestError(download_lock_message(dest.resolve()), code="download_file_lock")
-        raise _ytdlp_error(url, stderr)
+        raise _ytdlp_error(url, last_combined)
     finished = _pick_finished_file(dl_dir, video_id)
     if finished is None:
         shutil.rmtree(dl_dir, ignore_errors=True)

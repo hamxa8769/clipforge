@@ -22,7 +22,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   explainConnectionError, getPerfProfile, getSettings, saveSettings, setPerfProfile,
-  testConnection, updateOnboarding,
+  testConnection, testYoutubeCookies, updateOnboarding,
   type AppSettingsView, type PerfProfile, type PerfProfileName,
 } from "@/lib/api";
 import { ReconnectingNotice, useServerStatus } from "@/components/ServerStatusProvider";
@@ -42,6 +42,18 @@ const PLATFORM_LABELS: Record<string, string> = {
   facebook: "Facebook",
   tiktok: "TikTok",
 };
+// Browsers yt-dlp can read YouTube cookies from (v0.11.1) — only the
+// name is ever sent or stored, never a cookie value.
+const COOKIES_BROWSERS = [
+  { value: "", label: "Off — don't use browser cookies" },
+  { value: "chrome", label: "Chrome" },
+  { value: "edge", label: "Edge" },
+  { value: "firefox", label: "Firefox" },
+  { value: "brave", label: "Brave" },
+  { value: "opera", label: "Opera" },
+  { value: "vivaldi", label: "Vivaldi" },
+  { value: "chromium", label: "Chromium" },
+] as const;
 
 function StatusLine({ configured, masked }: { configured: boolean; masked: string }) {
   if (!configured) return <span className="text-sm text-neutral-500">Not set yet</span>;
@@ -108,6 +120,11 @@ export default function SettingsPage() {
   const [llmModel, setLlmModel] = useState("");
   const [dryRun, setDryRun] = useState(true);
   const [privacy, setPrivacy] = useState<Record<string, string>>({});
+  // YouTube browser cookies (v0.11.1): the browser yt-dlp reads
+  // signed-in YouTube cookies from when a download is bot-blocked.
+  const [cookiesBrowser, setCookiesBrowser] = useState("");
+  const [cookiesTesting, setCookiesTesting] = useState(false);
+  const [cookiesTest, setCookiesTest] = useState<{ ok: boolean; summary: string; nextStep: string } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -119,6 +136,7 @@ export default function SettingsPage() {
         setLlmModel(fetched.llm.model);
         setDryRun(fetched.dry_run);
         setPrivacy(fetched.default_privacy);
+        setCookiesBrowser(fetched.youtube_cookies_browser ?? "");
       }
     } catch {
       setSettingsError(true);
@@ -157,6 +175,24 @@ export default function SettingsPage() {
     } else {
       const explained = explainConnectionError(detail ?? res.error);
       setTestResults((prev) => ({ ...prev, [service]: { ok: false, summary: explained.summary, nextStep: explained.nextStep } }));
+    }
+  }
+
+  async function testCookies() {
+    if (!cookiesBrowser) return;
+    setCookiesTesting(true);
+    setCookiesTest(null);
+    const res = await testYoutubeCookies(cookiesBrowser);
+    setCookiesTesting(false);
+    const data = (res.data ?? {}) as { message?: string; next_step?: string };
+    if (res.ok && data.message) {
+      setCookiesTest({ ok: true, summary: data.message, nextStep: data.next_step ?? "" });
+    } else {
+      setCookiesTest({
+        ok: false,
+        summary: data.message ?? res.error ?? "The cookies test failed.",
+        nextStep: data.next_step ?? "",
+      });
     }
   }
 
@@ -431,6 +467,43 @@ export default function SettingsPage() {
                 </dd>
               </div>
             </dl>
+            <div className="mt-4 space-y-2 border-t border-neutral-800 pt-4">
+              <h3 className="text-sm font-semibold text-neutral-200">YouTube sign-in (for bot-checks)</h3>
+              <p className="text-sm text-neutral-400">
+                When YouTube blocks a download and asks to sign in, ClipForge can retry using the cookies from the
+                browser you&apos;re signed into YouTube with. Only the browser name is saved — your cookies stay on
+                this computer and are read by yt-dlp at download time. Never paste cookies or passwords anywhere.
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <label htmlFor="yt-cookies-browser" className="text-sm text-neutral-300">Browser</label>
+                <select
+                  id="yt-cookies-browser"
+                  value={cookiesBrowser}
+                  onChange={(e) => { setCookiesBrowser(e.target.value); setCookiesTest(null); }}
+                  disabled={!live || saving}
+                  className="rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm text-neutral-200 disabled:opacity-50"
+                >
+                  {COOKIES_BROWSERS.map((b) => (
+                    <option key={b.value || "off"} value={b.value}>{b.label}</option>
+                  ))}
+                </select>
+                <SecondaryButton
+                  onClick={() => void save({ youtube_cookies_browser: cookiesBrowser })}
+                  disabled={!live || saving}
+                >
+                  {saving ? "Saving…" : "Save"}
+                </SecondaryButton>
+                <SecondaryButton onClick={() => void testCookies()} disabled={!live || !cookiesBrowser || cookiesTesting}>
+                  {cookiesTesting ? "Testing…" : "Test"}
+                </SecondaryButton>
+              </div>
+              {cookiesTest && (
+                <p className={`rounded-lg border p-3 text-sm ${cookiesTest.ok ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-100" : "border-red-500/40 bg-red-500/10 text-red-100"}`}>
+                  {cookiesTest.summary}
+                  {cookiesTest.nextStep ? ` ${cookiesTest.nextStep}` : ""}
+                </p>
+              )}
+            </div>
           </Card>
           </section>
 
