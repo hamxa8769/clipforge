@@ -490,6 +490,10 @@ def _pick_finished_file(dl_dir: Path, video_id: str | None) -> Path | None:
 # client is bot-blocked (verified while building this: the Android
 # client answers where the web client gets "Sign in to confirm
 # you're not a bot" from a flagged IP).
+# Stall retry (v0.11.0): a stall no longer fails the job outright —
+# the download is retried once automatically in the same directory
+# (yt-dlp resumes its partial fragments), and only a second stall
+# fails, with a message that says the retry already happened.
 # ---------------------------------------------------------------------------
 
 #: oEmbed is one HTTPS GET; 10 s is generous (a dead link answers 404
@@ -834,6 +838,40 @@ def _run_ytdlp_bounded(
     return code, stderr
 
 
+def _download_with_stall_retry(
+    cmd: list[str], control: JobControl | None
+) -> tuple[int, str]:
+    """Run the download, retrying once automatically on a stall.
+
+    A stall (no output from yt-dlp for ``YTDLP_STALL_TIMEOUT_S``) used
+    to fail the job outright — the user's "Memes" agent job died this
+    way after 223 s. Now the first stall gets one automatic retry in
+    the *same* download dir: yt-dlp resumes the partial fragments it
+    already wrote (``--continue`` is its default), so a transient
+    network stall costs seconds, not a full re-download and not the
+    job. Only a second stall fails, and its message says the retry
+    already happened, so the user is not told to "just retry" what
+    the app already tried.
+    """
+    try:
+        return _run_ytdlp_bounded(cmd, control, stall_timeout=YTDLP_STALL_TIMEOUT_S)
+    except IngestError as exc:
+        if exc.code != "download_stalled":
+            raise
+        try:
+            return _run_ytdlp_bounded(cmd, control, stall_timeout=YTDLP_STALL_TIMEOUT_S)
+        except IngestError as retry_exc:
+            if retry_exc.code != "download_stalled":
+                raise
+            raise IngestError(
+                "The download stalled twice — it was retried once "
+                "automatically and still no data arrived from YouTube, "
+                "so it was stopped instead of waiting indefinitely. "
+                "Check your internet connection and retry the job.",
+                code="download_stalled",
+            ) from retry_exc
+
+
 def ingest_youtube(
     url: str,
     *,
@@ -937,7 +975,9 @@ def ingest_youtube(
         # subprocess.run(timeout=3600) / wait_for_process(timeout=3600)
         # pair had no stall detection, so a silent yt-dlp burned the
         # whole hour and surfaced only as a generic TimeoutError.
-        returncode, stderr = _run_ytdlp_bounded(cmd, control)
+        # v0.11.0: a stall is retried once automatically (same dir, so
+        # yt-dlp resumes its partial fragments) before it fails.
+        returncode, stderr = _download_with_stall_retry(cmd, control)
         if returncode != 0 and classify_ytdlp_error(stderr) == "youtube_bot_check":
             # One retry on YouTube's Android player client, which
             # answers where the web client is bot-blocked from a
@@ -948,7 +988,7 @@ def ingest_youtube(
                 "youtube:player_client=android",
                 url,
             ]
-            returncode, stderr = _run_ytdlp_bounded(retry_cmd, control)
+            returncode, stderr = _download_with_stall_retry(retry_cmd, control)
     except BaseException:
         # Cancel / timeout / stall (or anything else) mid-download:
         # drop the per-run scratch dir so a cancelled run leaves no

@@ -12,6 +12,8 @@ not exist yet, the UI says so instead of guessing.
 | Endpoint | Used for |
 |---|---|
 | `GET /health` → `{status, dry_run}` | Liveness + dry-run banner; decides live vs labelled demo data. |
+| `POST /resolve` → `{kind: "video", video} | {kind: "channel" \| "playlist", channel, videos[], source}` (v0.11.0) | Dashboard one-box: a pasted video/channel link resolves to the video or the channel's newest videos (newest first, capped at `max_results`, default 25) with no job created. Video links are probed metadata-only; channel links list via yt-dlp flat-playlist extraction (no key needed) or the saved YouTube Data API key when present (`source: "api"` vs `"ytdlp"`). Unresolvable links are 422 with a plain-language reason. |
+| `POST /jobs/clear-finished` → `{deleted, ids, statuses}` (v0.11.0) | Deletes failed / cancelled / blocked jobs (with their candidates, posts, stage events, worker runs and clips folder) so the Jobs list stays clean. Review / ready / running jobs are never touched. |
 | `GET /jobs` / `GET /jobs/{id}` | Jobs, statuses, `error`, `source_type`, `own_content`, `candidates` count. |
 | `GET /jobs/{id}/candidates` | Review list, SEO variants, trim spans. |
 | `POST /jobs/{id}/candidates/{n}/approve` / `reject` / `trim` | Review actions. |

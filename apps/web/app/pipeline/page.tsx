@@ -12,11 +12,11 @@
 // stages show the server's error in plain words plus a Retry button
 // that calls the existing POST /jobs/{id}/retry.
 "use client";
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
-  PIPELINE_STAGES, apiGet, apiPostJson, cancelJob, getJob, getJobLogs, getJobs,
+  PIPELINE_STAGES, apiGet, apiPostJson, cancelJob, clearFinishedJobs, getJob, getJobLogs, getJobs,
   getPosts, pauseJob, resumeJob, retryJob,
   type Candidate, type Job, type JobLogEntry, type Post,
 } from "@/lib/api";
@@ -161,11 +161,34 @@ function PipelinePageInner() {
   // my one-shot /jobs fetch happen to succeed".
   const server = useServerStatus();
   const live = server.live;
+  // Mirror of `live` for the detail loader below: the loader is a
+  // stable callback, so it reads liveness from this ref instead of
+  // closing over a stale value (v0.11.0).
+  const liveRef = useRef(false);
+  liveRef.current = server.live;
   const [error, setError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [retryMsg, setRetryMsg] = useState<string | null>(null);
   const [controlling, setControlling] = useState(false);
   const [controlMsg, setControlMsg] = useState<string | null>(null);
+  const [clearingFinished, setClearingFinished] = useState(false);
+
+  async function onClearFinished() {
+    setClearingFinished(true);
+    const cleared = await clearFinishedJobs();
+    setClearingFinished(false);
+    if (cleared === null) { setControlMsg("Could not clear finished jobs — try again."); return; }
+    setControlMsg(
+      cleared.deleted > 0
+        ? `Cleared ${cleared.deleted} finished job${cleared.deleted === 1 ? "" : "s"}.`
+        : "No finished jobs to clear.",
+    );
+    if (cleared.deleted > 0 && selectedId && cleared.ids.includes(selectedId)) {
+      setSelectedId(null);
+      setJob(null);
+    }
+    await loadJobs();
+  }
 
   const loadJobs = useCallback(async () => {
     const fetched = await getJobs();
@@ -191,8 +214,16 @@ function PipelinePageInner() {
     if (detail) {
       setJob(detail);
       setError(null);
+    } else if (liveRef.current) {
+      // The server IS live — the shared provider says so — so this
+      // one request timed out or failed; it is not proof the server
+      // is down. Say that, and never show "the server is not
+      // answering" while the header says Live (v0.11.0).
+      setError("Could not load this job — the request timed out. Try again.");
     } else {
-      setError("Could not load this job — the server did not answer.");
+      // Server down: the page already shows the ReconnectingNotice,
+      // so no second, contradicting error card is set here.
+      setError(null);
     }
     setLogs(fetchedLogs ?? []);
     setPosts(fetchedPosts ?? []);
@@ -310,7 +341,21 @@ function PipelinePageInner() {
       {error && <ErrorBanner message={error} onRetry={() => selectedId && loadDetail(selectedId)} />}
 
       <Card>
-        <CardHeader title="Jobs" hint={`${jobs.length} job(s) — pick one to see its pipeline`} />
+        <CardHeader
+          title="Jobs"
+          hint={`${jobs.length} job(s) — pick one to see its pipeline`}
+          action={jobs.some((j) => ["failed", "cancelled", "blocked"].includes(j.status)) ? (
+            <button
+              onClick={() => void onClearFinished()}
+              disabled={clearingFinished}
+              title="Remove every failed, cancelled and blocked job from this list"
+              className="text-sm font-medium text-neutral-300 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {clearingFinished ? "Clearing…" : `Clear finished (${jobs.filter((j) => ["failed", "cancelled", "blocked"].includes(j.status)).length})`}
+            </button>
+          ) : undefined}
+        />
+        {controlMsg && <p className="mb-3 text-sm text-neutral-300">{controlMsg}</p>}
         <div className="flex flex-wrap gap-2">
           {jobs.map((j) => (
             <button
